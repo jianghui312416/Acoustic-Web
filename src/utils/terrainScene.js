@@ -1,3 +1,4 @@
+import { normalizeExaggeration, terrainLighting, terrainMesh, terrainSegments, hillshade } from './terrainRendering.js'
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x))
 
 export function bathymetryColor(height, min = -8000, max = 0) {
@@ -17,11 +18,7 @@ export function createTerrainProjection(bounds, size, floor, camera = {}) {
   // X/Y 已按经纬跨度等比例归一化；Z 使用相同的物理米制跨度。
   // 因此倍率 1 是真实纵横比例，而不是按“最大水深”再次归一化后的视觉厚度。
   const horizontalSpanM = Math.max(1, span * 110574)
-  const verticalExaggeration = clamp(
-    Number(camera.verticalExaggeration) || 1,
-    0.2,
-    Math.max(1, Number(camera.maxVerticalExaggeration) || 6)
-  )
+  const verticalExaggeration = normalizeExaggeration(camera.verticalExaggeration)
   return (lon, lat, elevation) => {
     const x = (lon - (bounds.west + bounds.east) / 2) * cosLat / span
     const y = ((bounds.north + bounds.south) / 2 - lat) / span
@@ -31,7 +28,7 @@ export function createTerrainProjection(bounds, size, floor, camera = {}) {
     const perspective = 1 / (1 - ry * .35)
     return { x: size.width * .5 + rx * scale * perspective,
       y: size.height * .40 + (ry * Math.sin(pitch) - z * Math.cos(pitch)) * scale * perspective,
-      order: ry + z * .3 }
+      order: ry + z * .3, perspective }
   }
 }
 
@@ -85,13 +82,14 @@ export function drawTerrainScene(canvas, grid, {
   controls = {},
   rayScene = null,
   directionLine = null,
+  receiver = null,
 } = {}) {
   if (!canvas || !grid) return null
   const { width, height } = canvas.getBoundingClientRect()
   if (!width || !height) return null
   const dpr = Math.min(2, globalThis.devicePixelRatio || 1)
-  canvas.width = Math.round(width * dpr)
-  canvas.height = Math.round(height * dpr)
+  if (canvas.width !== Math.round(width * dpr)) canvas.width = Math.round(width * dpr)
+  if (canvas.height !== Math.round(height * dpr)) canvas.height = Math.round(height * dpr)
   const ctx = canvas.getContext('2d')
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, width, height)
@@ -100,28 +98,23 @@ export function drawTerrainScene(canvas, grid, {
     ...camera,
     verticalExaggeration: controls.terrainExaggeration,
   })
-  const points = []
-  for (let row = 0; row < grid.height; row++) {
-    const lat = b.north - row / (grid.height - 1) * (b.north - b.south)
-    for (let col = 0; col < grid.width; col++) {
-      const lon = b.west + col / (grid.width - 1) * (b.east - b.west)
-      const elevation = grid.values[row * grid.width + col]
-      points.push({ ...project(lon, lat, elevation), lon, lat, elevation })
-    }
-  }
-  const faces = []
-  for (let row = 0; row < grid.height - 1; row++) {
-    for (let col = 0; col < grid.width - 1; col++) {
-      const i = row * grid.width + col
-      const p = [points[i], points[i + 1], points[i + grid.width + 1], points[i + grid.width]]
-      if (!p.every(v => Number.isFinite(v.elevation))) continue
-      const h = p.reduce((sum, v) => sum + v.elevation, 0) / 4
-      const shade = clamp(.85 + (p[0].elevation - p[1].elevation + p[2].elevation - p[1].elevation) / Math.max(50, grid.range) * 7, .45, 1.4)
-      const color = bathymetryColor(h, grid.min, grid.max).map(c => Math.round(clamp(c * shade, 0, 255)))
-      faces.push({ p, order: p.reduce((sum, v) => sum + v.order, 0) / 4, color: `rgb(${color.join(',')})` })
-    }
-  }
-  faces.sort((a, b) => a.order - b.order).forEach(f => polygon(ctx, f.p, f.color))
+  const lighting = { ...terrainLighting, zFactor: normalizeExaggeration(controls.terrainExaggeration) }
+  const mesh = terrainMesh(grid, terrainSegments({ width, height }, camera?.zoom || 1))
+  const points = mesh.vertices.map(v => ({ ...v, ...project(v.lon, v.lat, v.elevation) }))
+  const colors = mesh.vertices.map(v => {
+    const shade = hillshade(v.slopeX, v.slopeY, lighting)
+    return bathymetryColor(v.elevation, grid.min, grid.max).map(c => Math.round(c * shade))
+  })
+  const faces = mesh.faces.map(indices => {
+    const p = indices.map(i => points[i])
+    return { p, colors: indices.map(i => colors[i]), order: p.reduce((sum, v) => sum + v.order, 0) / 4 }
+  })
+  faces.sort((a, b) => a.order - b.order).forEach(f => {
+    // Close-up views retain native samples but avoid shading off-screen faces.
+    if (f.p.every(p => p.x < 0) || f.p.every(p => p.x > width) ||
+        f.p.every(p => p.y < 0) || f.p.every(p => p.y > height)) return
+    gradientPolygon(ctx, f.p, f.colors, 1)
+  })
   drawTerrainAxes(ctx, project, b, grid)
 
   let anchor = null
@@ -468,7 +461,17 @@ export function drawTerrainScene(canvas, grid, {
       ctx.beginPath(); ctx.arc(layerAnchor.x, layerAnchor.y, 4, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0
     }
   }
-  return { points, anchor, anchors, faces, project }
+  if (!anchor && source && source.lon >= b.west && source.lon <= b.east && source.lat >= b.south && source.lat <= b.north) {
+    anchor = project(source.lon, source.lat, -source.depth)
+    ctx.fillStyle = '#00ffc2'
+    ctx.beginPath(); ctx.arc(anchor.x, anchor.y, 4, 0, Math.PI * 2); ctx.fill()
+  }
+  if (receiver && Number.isFinite(receiver.depthM) && receiver.lon >= b.west && receiver.lon <= b.east && receiver.lat >= b.south && receiver.lat <= b.north) {
+    const p = project(receiver.lon, receiver.lat, -receiver.depthM)
+    ctx.fillStyle = '#49e68b'
+    ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill()
+  }
+  return { points, anchor, anchors, faces, project, mesh, lighting }
 }
 
 const AXIS_TICKS = 6

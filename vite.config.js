@@ -1,10 +1,17 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import path from 'path'
+import https from 'node:https'
 import { appendFileSync } from 'node:fs'
 import { fileURLToPath } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const bathymetryAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 4,
+  maxFreeSockets: 2,
+  timeout: 15000,
+})
 
 export default defineConfig({
   plugins: [vue()],
@@ -18,17 +25,23 @@ export default defineConfig({
     host: true,
     port: 5173,
     open: true,
+    watch: {
+      // 不监听本地临时构建/缓存/截图目录与代理错误日志，避免这些文件在
+      // 构建期间被占用时触发 FSWatcher 的 EBUSY 崩溃（Node 直接退出）。
+      ignored: ['**/.tmp/**', '**/.tmp_vid_frames/**', '**/*.log'],
+    },
     proxy: {
       '/bathy': {
-        target: 'https://s3.amazonaws.com',
+        // 使用 S3 虚拟主机端点并复用少量 TLS 连接，避免每张瓦片都重新握手导致
+        // “Client network socket disconnected before secure TLS connection” 连续出现。
+        target: 'https://elevation-tiles-prod.s3.amazonaws.com',
+        agent: bathymetryAgent,
         changeOrigin: true,
-        secure: false,
-        rewrite: (p) => p.replace(/^\/bathy/, '/elevation-tiles-prod/terrarium'),
+        secure: true,
+        rewrite: (p) => p.replace(/^\/bathy/, '/terrarium'),
         configure: (proxy) => {
           proxy.on('proxyReq', (proxyReq) => {
-            // S3 会间歇性重置 keep-alive 连接（表现为偶发 500），改为每请求新建连接，
-            // 避免复用被服务端关闭的陈旧 socket。
-            proxyReq.setHeader('Connection', 'close')
+            proxyReq.setHeader('Connection', 'keep-alive')
           })
           proxy.on('error', (err, _req, res) => {
             // 单个瓦片网络抖动时返回 502，交由前端按低分辨率重试，而不是让开发服务器崩掉。

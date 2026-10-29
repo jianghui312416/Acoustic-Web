@@ -9,8 +9,11 @@ export function pickTerrainPoint(scene, x, y) {
       const v = ((c.y-a.y)*(x-c.x)+(a.x-c.x)*(y-c.y))/d
       const w = 1-u-v
       if (Math.min(u,v,w) < -1e-6) continue
+      // Undo display perspective before interpolating physical coordinates.
+      const weights = [u * (a.perspective || 1), v * (b.perspective || 1), w * (c.perspective || 1)]
+      const sum = weights.reduce((total, value) => total + value, 0)
       const point = { x, y }
-      for (const key of ['lon','lat','elevation']) point[key] = u*a[key]+v*b[key]+w*c[key]
+      for (const key of ['lon','lat','elevation']) point[key] = (weights[0]*a[key]+weights[1]*b[key]+weights[2]*c[key]) / sum
       return point
     }
   }

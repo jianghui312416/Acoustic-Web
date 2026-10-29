@@ -23,6 +23,7 @@
       :fields="terrainJobFields"
       :texture="terrainTexture"
       :source="terrainRunVisible ? terrainSource : null"
+      :receiver="receiverArrayMarker"
       :radius-km="terrainRadiusKm"
       :ray-data="dynamicRaysActivated ? staticRayData : null"
       :ray-azimuth-deg="sliceAzimuthDeg"
@@ -532,7 +533,7 @@
         <!-- <label class="toggle-line"><input v-model="omni2dVisible" type="checkbox" @change="onOmni2dVisibleChange" /> 海面二维投影</label> -->
         <div class="mini-control">
           <span>垂直夸张（地形 + 声场） <b>{{ depthExaggeration }}×</b></span>
-          <input v-model.number="depthExaggeration" type="range" min="1" max="6" step="0.1" @input="onDepthExagChange" />
+          <input v-model.number="depthExaggeration" type="range" min="1" max="10" step="0.1" @input="onDepthExagChange" />
         </div>
         <div class="mini-control">
           <span>透明度 <b>{{ alphaPercent }}%</b></span>
@@ -1556,22 +1557,6 @@ function focusJobLayer(jobId) {
   globeSelectionToken.value += 1
 }
 
-function fitVisibleSoundFields() {
-  const entries = [...runHistoryLayers.value, ...jobLayers.value].filter(layer => layer.visible)
-    .map(layer => acousticTerrainBounds(layer.source, layer.radiusKm))
-  if (terrainRunVisible.value && terrainField.value) {
-    entries.push(acousticTerrainBounds(terrainSource.value, terrainRadiusKm.value))
-  }
-  if (!entries.length) return
-  globeSelection.value = normalizeTerrainBounds({
-    west: Math.min(...entries.map(bounds => bounds.west)),
-    east: Math.max(...entries.map(bounds => bounds.east)),
-    south: Math.min(...entries.map(bounds => bounds.south)),
-    north: Math.max(...entries.map(bounds => bounds.north)),
-  })
-  globeSelectionToken.value += 1
-}
-
 function minimizeJobLayer(jobId) {
   if (!jobLayers.value.some(item => item.id === jobId)) return
   jobPanelMinimizedOrder.value = [...jobPanelMinimizedOrder.value.filter(id => id !== jobId), jobId]
@@ -1648,7 +1633,6 @@ async function openWorkspaceJob(jobId) {
     activateJobLayer(id)
     markJobOpened(id)
     emitViewMode('terrain')
-    fitVisibleSoundFields()
   } catch (error) {
     console.error('[工作声场] 打开失败：', error)
     runtimeError.value = `工作 ${id} 打开失败：${error?.message || error}`
@@ -2115,7 +2099,7 @@ const staticRaySourceDepthM = computed(() => Number(staticRayModel.value?.source
 
 // 唯一垂直夸张倍率：与侧边栏 terrainExaggeration 双向同步，同时作用于
 // 地形、三维声场、声源、声线与垂直切面。1× 保持真实物理比例。
-const depthExaggeration = ref(1)
+const depthExaggeration = ref(3)
 const alphaPercent = ref(Math.round(Math.min(1.25, volumeRenderingControls.opacity / 4) * 100))
 /** 数据筛选范围（dB）：决定哪些体素参与渲染 */
 const valueRange = ref({ min: VOLUME_TL_COLOR_MIN, max: VOLUME_TL_COLOR_MAX })
@@ -2709,7 +2693,7 @@ watch(
 watch(
   () => volumeRenderingControls.terrainExaggeration,
   (value) => {
-    const next = Math.min(6, Math.max(1, Number(value) || 1))
+    const next = Math.min(10, Math.max(1, Number(value) || 3))
     if (Math.abs(Number(depthExaggeration.value) - next) < 1e-6) return
     depthExaggeration.value = next
     onDepthExagChange()
@@ -2718,7 +2702,7 @@ watch(
 )
 
 watch(depthExaggeration, (value) => {
-  const next = Math.min(6, Math.max(1, Number(value) || 1))
+  const next = Math.min(10, Math.max(1, Number(value) || 3))
   if (Math.abs(Number(depthExaggeration.value) - next) >= 1e-6) depthExaggeration.value = next
   if (Math.abs(Number(volumeRenderingControls.terrainExaggeration) - next) >= 1e-6) {
     volumeRenderingControls.terrainExaggeration = next
@@ -2797,6 +2781,7 @@ watch(
     if (!viewer || viewer.isDestroyed?.()) return
     nextTick(() => {
       if (typeof viewer.resize === 'function') viewer.resize()
+      onDepthExagChange()
       refreshVolumeRayScatterPoints()
       syncSoundField()
       setupAzimuthPointer()
@@ -4204,15 +4189,18 @@ function onColorRangeChange() {
 }
 
 function onDepthExagChange() {
-  const next = Math.min(6, Math.max(1, Number(depthExaggeration.value) || 1))
+  const next = Math.min(10, Math.max(1, Number(depthExaggeration.value) || 3))
   depthExaggeration.value = next
   if (Math.abs(Number(volumeRenderingControls.terrainExaggeration) - next) >= 1e-6) {
     volumeRenderingControls.terrainExaggeration = next
   }
+  // The regional scene shares one display projection. Do not rebuild the hidden
+  // globe's textures, rays or curtains on a terrain slider event.
+  if (props.viewMode === 'terrain') return
   if (!soundField?.loaded || depthExagSyncRaf) return
   depthExagSyncRaf = requestAnimationFrame(() => {
     depthExagSyncRaf = 0
-    if (!soundField?.loaded) return
+    if (!soundField?.loaded || props.viewMode === 'terrain') return
     volumeData.value = soundField.refinalize(Number(depthExaggeration.value))
     for (const layer of runHistoryLayers.value) {
       if (layer.renderer?.loaded) layer.renderer.refinalize(Number(depthExaggeration.value))
@@ -4222,7 +4210,7 @@ function onDepthExagChange() {
     clearTimeout(depthExagSyncTimer)
     depthExagSyncTimer = window.setTimeout(() => {
       depthExagSyncTimer = 0
-      if (!soundField?.loaded) return
+      if (!soundField?.loaded || props.viewMode === 'terrain') return
       syncSoundField()
       scheduleSliceCurtain()
     }, 180)
@@ -4287,7 +4275,6 @@ function submitCalculation() {
     terrainRunTime.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     terrainSource.value = { lon: Number(calcParams.value.coordX), lat: Number(calcParams.value.coordY), depth: Number(calcParams.value.srcDepth) }
     terrainRadiusKm.value = Number(calcParams.value.range) * 1.852
-    if (runHistoryLayers.value.length) fitVisibleSoundFields()
     parameterPanelOpen.value = false
   }
   return analysisMode.value === '3d' ? loadData() : load2dData()
@@ -4942,7 +4929,7 @@ async function loadTlrdData() {
   terrainTexture.value = texture
   // 地形、声场、声源、声线和切面共用侧边栏的唯一垂直夸张倍率。
   // 不再根据水深自动改写倍率，因此 1× 始终代表真实物理比例。
-  depthExaggeration.value = Math.min(6, Math.max(1, Number(volumeRenderingControls.terrainExaggeration) || 1))
+  depthExaggeration.value = Math.min(10, Math.max(1, Number(volumeRenderingControls.terrainExaggeration) || 3))
   soundField.depthExaggeration = depthExaggeration.value
   // SoundField.setVolume 会调用 decodeFn(texture) 得到纹理再 finalize；
   // 这里传入恒等函数，因为 texture 已经是解码结果。

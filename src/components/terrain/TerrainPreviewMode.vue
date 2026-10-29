@@ -64,6 +64,7 @@ const props = defineProps({
   fields: { type: Array, default: () => [] },
   texture: { type: Object, default: null },
   source: Object,
+  receiver: Object,
   radiusKm: { type: Number, default: 20 },
   rayData: { type: Object, default: null },
   rayAzimuthDeg: { type: Number, default: 0 },
@@ -127,6 +128,7 @@ function draw() {
     field: props.field,
     fields: props.fields,
     source: props.source,
+    receiver: props.receiver,
     camera: camera.value,
     controls: sceneControls(),
     rayScene: props.raysVisible && terrainRayFlow.value
@@ -223,7 +225,8 @@ async function loadTerrain(next) {
   error.value = ''
   hover.value = null
   try {
-    const data = await loadBathymetry(target)
+    // Read a finer grid from the same cached tiles once; camera/scale never fetch data.
+    const data = await loadBathymetry(target, 192)
     if (request !== token || disposed) return
     grid.value = data
     loadedBounds.value = target
@@ -250,15 +253,8 @@ function pickHover(event) {
   const rect = canvasEl.value.getBoundingClientRect()
   const x = event.clientX - rect.left
   const y = event.clientY - rect.top
-  let nearest = null
-  let nearestDistance = Infinity
-  for (const point of lastScene.points) {
-    const dx = point.x - x
-    const dy = point.y - y
-    const distance = dx * dx + dy * dy
-    if (distance < nearestDistance) { nearestDistance = distance; nearest = point }
-  }
-  hover.value = nearest && nearestDistance <= 34 * 34
+  const nearest = pickTerrainPoint(lastScene, x, y)
+  hover.value = nearest
     ? { lon: nearest.lon, lat: nearest.lat, elevation: nearest.elevation,
         x: Math.min(x, rect.width - 190), y }
     : null
@@ -372,6 +368,7 @@ watch(() => props.initialBoundsToken, () => {
 })
 watch(bounds, (value) => emit('bounds-change', { ...value }))
 watch(() => props.field, () => scheduleDraw())
+watch(() => props.receiver, () => scheduleDraw(), { deep: true })
 watch(() => props.fields, () => scheduleDraw(), { deep: true })
 watch(() => props.rayData, rebuildRayFlow)
 watch(() => [props.rayAzimuthDeg, props.raysVisible, props.directionLineVisible], () => {
@@ -382,15 +379,15 @@ watch(() => [props.source?.lon, props.source?.lat, props.source?.depth, props.ra
   if (!props.active) return
   const locationChanged = !previous || next[0] !== previous[0] || next[1] !== previous[1] || next[3] !== previous[3]
   if (!locationChanged || !props.source) { scheduleDraw(); return }
-  // 在标注位置运行声场时保持当前取景：声源仍落在已加载地形区域内时，不重新加载/扩展地形，
-  // 只重绘声场体到新位置；仅当声源落到可视区域之外才重新定位。
+  // 地形一旦加载即锁定范围。后续绘制多个声场时只重绘图层，不因声源位置或传播半径
+  // 主动扩大、平移或重新加载地形；范围只由用户重新框选/定位等明确操作改变。
   const viewBounds = normalizeTerrainBounds(loadedBounds.value || bounds.value)
   const lon = Number(props.source.lon)
   const lat = Number(props.source.lat)
   const inside = Number.isFinite(lon) && Number.isFinite(lat) &&
     lon >= Number(viewBounds.west) && lon <= Number(viewBounds.east) &&
     lat >= Number(viewBounds.south) && lat <= Number(viewBounds.north)
-  if (inside) scheduleDraw()
+  if (inside || grid.value) scheduleDraw()
   else locateSource()
 })
 watch(visualControls, () => scheduleDraw(), { deep: true })

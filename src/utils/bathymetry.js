@@ -44,7 +44,7 @@ function readTileImage(z, x, y) {
       } catch (error) { finish(error) }
     }
     image.onerror = () => finish(new Error(`海底高程连接失败（${z}/${x}/${y}）`))
-    const base = import.meta.env?.VITE_BATHYMETRY_TILE_URL || (import.meta.env?.DEV ? '/bathy' : 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium')
+    const base = import.meta.env?.VITE_BATHYMETRY_TILE_URL || (import.meta.env?.DEV ? '/bathy' : 'https://elevation-tiles-prod.s3.amazonaws.com/terrarium')
     image.src = `${base}/${z}/${x}/${y}.png`
   })
 }

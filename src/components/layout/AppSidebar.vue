@@ -107,8 +107,9 @@
             <p class="feature-section-title">显示</p>
             <label class="feature-slider">
               <span>垂直夸张（地形 + 声场） <b>{{ formatControl(visualControls.terrainExaggeration, 1) }}×</b></span>
-              <input v-model.number="visualControls.terrainExaggeration" type="range" min="1" max="6" step="0.1" @input="normalizeControls" />
+              <input v-model.number="visualControls.terrainExaggeration" aria-label="垂直夸张倍率" type="range" min="1" max="10" step="0.1" @input="normalizeControls" />
             </label>
+            <button type="button" @click="visualControls.terrainExaggeration = 1">真实比例（1 倍）</button>
           </div>
         </section>
 

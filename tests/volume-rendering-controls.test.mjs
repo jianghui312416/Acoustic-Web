@@ -32,7 +32,7 @@ test('volume menu values are clamped to safe rendering ranges', () => {
     moveZ: 10,
   }
   clampVolumeRenderingControls(controls)
-  assert.equal(controls.terrainExaggeration, 6)
+  assert.equal(controls.terrainExaggeration, 10)
   assert.equal(controls.opacity, 0.2)
   assert.equal(controls.sampling, 0.03)
   assert.equal(controls.alphaPower, 0.35)

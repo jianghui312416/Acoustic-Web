@@ -106,3 +106,24 @@ test('a new 3d calculation archives the previous sound field as an independent l
   assert.match(source, /\[\.\.\.runHistoryLayers\.value, \.\.\.jobLayers\.value\]/)
   assert.match(source, /function syncHistoricalSoundFields\(\)/)
 })
+
+test('drawing additional sound fields never auto-expands an already loaded terrain range', async () => {
+  const view = await readSource('../src/views/AcousticFieldView.vue')
+  const terrain = await readSource('../src/components/terrain/TerrainPreviewMode.vue')
+  const submit = view.match(/function submitCalculation\(\) \{[\s\S]*?\n\}/)?.[0] ?? ''
+  const openJob = view.match(/async function openWorkspaceJob\(jobId\) \{[\s\S]*?\n\}/)?.[0] ?? ''
+  assert.doesNotMatch(view, /function fitVisibleSoundFields\(/)
+  assert.doesNotMatch(submit, /fitVisibleSoundFields\(\)/)
+  assert.doesNotMatch(openJob, /fitVisibleSoundFields\(\)/)
+  assert.match(terrain, /if \(inside \|\| grid\.value\) scheduleDraw\(\)/)
+})
+
+test('bathymetry proxy reuses TLS connections through the stable S3 virtual-host endpoint', async () => {
+  const config = await readSource('../vite.config.js')
+  const bathymetry = await readSource('../src/utils/bathymetry.js')
+  assert.match(config, /https:\/\/elevation-tiles-prod\.s3\.amazonaws\.com/)
+  assert.match(config, /keepAlive:\s*true/)
+  assert.match(config, /maxSockets:\s*4/)
+  assert.doesNotMatch(config, /setHeader\('Connection', 'close'\)/)
+  assert.match(bathymetry, /elevation-tiles-prod\.s3\.amazonaws\.com\/terrarium/)
+})
