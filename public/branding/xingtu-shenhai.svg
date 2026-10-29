@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 372 96" role="img" aria-label="星图深海">
+  <g transform="translate(48 48)">
+    <circle cx="0" cy="0" r="38" fill="#f4f8ff"/>
+    <path d="M-29-24A38 38 0 0 1 28-25 31 31 0 0 0-23 33 38 38 0 0 1-29-24Z" fill="#f5a623"/>
+    <path d="M29 24A38 38 0 0 1-28 25 31 31 0 0 0 23-33 38 38 0 0 1 29 24Z" fill="#1758a8"/>
+    <circle cx="0" cy="0" r="17.5" fill="#f39c12"/>
+    <circle cx="-4" cy="-4" r="5" fill="#ffc857" opacity=".65"/>
+  </g>
+  <text x="102" y="64" fill="#1758a8" font-family="'Microsoft YaHei','PingFang SC','Hiragino Sans GB',sans-serif" font-size="47" font-weight="700" letter-spacing="6">星图深海</text>
+</svg>

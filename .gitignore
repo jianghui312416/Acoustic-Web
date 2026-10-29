@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*.log
+
+# 本地临时构建/缓存/截图目录，体积可达数 GB。
+.tmp/
+.tmp_vid_frames/
+
+# 大体积运行数据和第三方地图资源不纳入源码仓库。
+public/data/
+public/tiles/
+public/Assets/
+.tmp/
+.tmp_vid_frames/
