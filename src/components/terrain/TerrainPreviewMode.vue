@@ -26,7 +26,8 @@
       <small>拖动旋转 · 滚轮缩放 · 悬停查看水深</small>
     </div>
     <TerrainStationCard v-if="station" :point="station" :dataset="dataset" :time="time" :running="running"
-      @close="station = null" @run="runStation" @parameters="$emit('station-parameters', $event)" />
+      @close="station = null" @run="runStation" @parameters="$emit('station-parameters', $event)" @noise="openAmbientNoise" />
+    <AmbientNoiseProbe v-if="noiseProbeState.open" :point="probe" @close="closeProbe" />
     <slot :anchor="anchor" />
     <TerrainPreviewDock v-model:bounds="bounds" :collapsed="thumbnailCollapsed" :loading="status === 'loading'"
       @update:collapsed="$emit('update:thumbnailCollapsed', $event)" @load="loadTerrain" @locate="locateSource" />
@@ -35,7 +36,7 @@
       <span v-if="hover">经度 {{ hover.lon.toFixed(4) }}°　纬度 {{ hover.lat.toFixed(4) }}°　{{ hover.elevation < 0 ? '水深' : '高程' }} {{ Math.abs(hover.elevation).toFixed(0) }} m</span>
       <span v-else-if="error" class="terrain-warn">{{ error }}</span>
       <span v-else>{{ status === 'loading' ? '正在加载地形' : grid ? '地形已就绪 · 本地区域格网' : '等待加载地形' }}</span>
-      <a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md" target="_blank" rel="noreferrer">海底高程数据来源</a>
+      <a href="https://www.gebco.net/data-products-gridded-bathymetry-data/gebco2026-grid" target="_blank" rel="noreferrer">GEBCO 2026 海底高程</a>
     </footer>
   </section>
 </template>
@@ -47,11 +48,17 @@ import { loadBathymetry, acousticTerrainBounds } from '@/utils/bathymetry.js'
 import { drawTerrainScene } from '@/utils/terrainScene.js'
 import TerrainPreviewDock from './TerrainPreviewDock.vue'
 import TerrainStationCard from './TerrainStationCard.vue'
+import AmbientNoiseProbe from './AmbientNoiseProbe.vue'
 import { pickTerrainPoint } from '@/utils/terrainPicking.js'
 import { activeVolumeColorStops, volumeRenderingControls } from '@/modules/acoustic/volumeRenderingControls.js'
 import { parseAnalyse2DRtrd } from '@/sdk'
 import { resolveRayFlow, sampleRayFlow } from '@/utils/rayFlow.js'
 import { rayFlowClockElapsedMs } from '@/utils/rayFlowClock.js'
+import {
+  closeNoiseProbe, noiseProbeState, openNoiseProbe, setNoiseProbePicking,
+  setTerrainCenter, setWeatherNoisePoint, weatherNoiseState,
+} from '@/modules/weather/weatherNoiseStore.js'
+import { currentOverlayField, drawWeatherOverlay, weatherOverlayActive } from '@/utils/weatherOverlay.js'
 
 const props = defineProps({
   active: Boolean,
@@ -78,6 +85,14 @@ const props = defineProps({
 const emit = defineEmits(['anchor', 'layer-anchors', 'bounds-change', 'request-globe', 'station-run', 'station-parameters', 'update:thumbnailCollapsed'])
 const station = ref(null)
 function runStation(point) { emit('station-run', point); station.value = null }
+const probe = ref(null)
+function openAmbientNoise(point) {
+  probe.value = point || station.value
+  station.value = null
+  if (probe.value) setWeatherNoisePoint(probe.value)
+  openNoiseProbe({ picking: false })
+}
+function closeProbe() { closeNoiseProbe(); probe.value = null }
 
 const canvasEl = ref(null)
 const bounds = ref(normalizeTerrainBounds({ west: 115.4, east: 116.6, south: 15.4, north: 16.6 }))
@@ -109,6 +124,9 @@ const MIN_CAMERA_ZOOM = 0.55
 const MAX_CAMERA_ZOOM = 14
 const leavingForGlobe = ref(false)
 const terrainRayFlow = shallowRef(null)
+const overlayClockStart = performance.now()
+const weatherOverlayOn = computed(() => weatherOverlayActive(weatherNoiseState))
+const weatherFrame = computed(() => weatherNoiseState.result?.frames?.[weatherNoiseState.frameIndex]?.weather || null)
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
 
@@ -153,6 +171,12 @@ function draw() {
     anchor.value = nextAnchor
     emit('anchor', nextAnchor)
   }
+  if (weatherOverlayOn.value && lastScene?.project) {
+    const field = currentOverlayField(weatherNoiseState)
+    if (field && weatherFrame.value) {
+      drawWeatherOverlay(canvasEl.value, lastScene, grid.value, field, weatherFrame.value, performance.now() - overlayClockStart)
+    }
+  }
 }
 
 function scheduleDraw() {
@@ -166,14 +190,18 @@ function stopRayAnimation() {
   rayAnimationLastAt = 0
 }
 
+function terrainAnimating() {
+  return (props.raysVisible && !!terrainRayFlow.value) || weatherOverlayOn.value
+}
+
 function syncRayAnimation() {
   stopRayAnimation()
-  if (!props.active || !props.raysVisible || !terrainRayFlow.value || document.hidden) {
+  if (!props.active || !terrainAnimating() || document.hidden) {
     scheduleDraw()
     return
   }
   const tick = (now) => {
-    if (!props.active || !props.raysVisible || !terrainRayFlow.value || disposed) {
+    if (!props.active || !terrainAnimating() || disposed) {
       stopRayAnimation()
       return
     }
@@ -282,7 +310,19 @@ function onPointerUp(event) {
   try { canvasEl.value?.releasePointerCapture?.(event.pointerId) } catch {}
   if (!moved && event.type !== 'pointercancel') {
     const rect = canvasEl.value.getBoundingClientRect()
-    station.value = pickTerrainPoint(lastScene, event.clientX - rect.left, event.clientY - rect.top)
+    const picked = pickTerrainPoint(lastScene, event.clientX - rect.left, event.clientY - rect.top)
+    if (noiseProbeState.picking) {
+      if (picked) {
+        probe.value = picked
+        setWeatherNoisePoint(picked)
+        setNoiseProbePicking(false)
+      }
+      station.value = null
+      hover.value = null
+      return
+    }
+    if (noiseProbeState.open && picked) closeProbe()
+    station.value = picked
     hover.value = null
   }
 }
@@ -366,7 +406,11 @@ watch(() => props.initialBoundsToken, () => {
   if (!props.active) return
   applyInitialBounds()
 })
-watch(bounds, (value) => emit('bounds-change', { ...value }))
+watch(bounds, (value) => {
+  const next = { ...value }
+  setTerrainCenter({ lon: (next.west + next.east) / 2, lat: (next.south + next.north) / 2 })
+  emit('bounds-change', next)
+}, { immediate: true })
 watch(() => props.field, () => scheduleDraw())
 watch(() => props.receiver, () => scheduleDraw(), { deep: true })
 watch(() => props.fields, () => scheduleDraw(), { deep: true })
@@ -391,6 +435,10 @@ watch(() => [props.source?.lon, props.source?.lat, props.source?.depth, props.ra
   else locateSource()
 })
 watch(visualControls, () => scheduleDraw(), { deep: true })
+watch(() => [weatherNoiseState.terrainOverlay, weatherNoiseState.overlayField, weatherNoiseState.frameIndex], () => {
+  scheduleDraw()
+  syncRayAnimation()
+})
 
 onBeforeUnmount(() => {
   disposed = true

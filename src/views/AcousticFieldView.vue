@@ -533,7 +533,7 @@
         <!-- <label class="toggle-line"><input v-model="omni2dVisible" type="checkbox" @change="onOmni2dVisibleChange" /> 海面二维投影</label> -->
         <div class="mini-control">
           <span>垂直夸张（地形 + 声场） <b>{{ depthExaggeration }}×</b></span>
-          <input v-model.number="depthExaggeration" type="range" min="1" max="10" step="0.1" @input="onDepthExagChange" />
+          <input v-model.number="depthExaggeration" type="range" min="1" max="30" step="0.1" @input="onDepthExagChange" />
         </div>
         <div class="mini-control">
           <span>透明度 <b>{{ alphaPercent }}%</b></span>
@@ -905,7 +905,7 @@
               v-model.number="depthExaggeration"
               type="range"
               min="1"
-              max="6"
+              max="30"
               step="0.1"
               @input="onDepthExagChange"
             />
@@ -2693,7 +2693,7 @@ watch(
 watch(
   () => volumeRenderingControls.terrainExaggeration,
   (value) => {
-    const next = Math.min(10, Math.max(1, Number(value) || 3))
+    const next = Math.min(30, Math.max(1, Number(value) || 3))
     if (Math.abs(Number(depthExaggeration.value) - next) < 1e-6) return
     depthExaggeration.value = next
     onDepthExagChange()
@@ -2702,7 +2702,7 @@ watch(
 )
 
 watch(depthExaggeration, (value) => {
-  const next = Math.min(10, Math.max(1, Number(value) || 3))
+  const next = Math.min(30, Math.max(1, Number(value) || 3))
   if (Math.abs(Number(depthExaggeration.value) - next) >= 1e-6) depthExaggeration.value = next
   if (Math.abs(Number(volumeRenderingControls.terrainExaggeration) - next) >= 1e-6) {
     volumeRenderingControls.terrainExaggeration = next
@@ -3126,7 +3126,8 @@ function build2dCurtainVolume({
   const distances = (grid.distance || []).slice(0, col).map(Number)
   const depths = (grid.depth || []).slice(0, row).map(Number)
 
-  // 取值与剖面图使用**完全相同的口径**（parseAnalyse3DTlrd：已剔除 200/9999 与海底以下）。
+  // 取值与剖面图使用**完全相同的口径**（parseAnalyse3DTlrd：9999 与海底以下剔除为 NaN；
+  // 200 水体未覆盖保留为有限值，并在下方钳制到色标上限，等同显示为色标最大值）。
   // 关键：把超出色标范围（默认 60–120 dB）的值**钳制**到端点，而不是让体渲染跳过它们，
   // 否则地球剖面帘上会出现一片片空洞（左侧高 TL 区尤其明显）。
   const cMin = Number.isFinite(Number(colorMin)) ? Number(colorMin) : VOLUME_TL_COLOR_MIN
@@ -4189,7 +4190,7 @@ function onColorRangeChange() {
 }
 
 function onDepthExagChange() {
-  const next = Math.min(10, Math.max(1, Number(depthExaggeration.value) || 3))
+  const next = Math.min(30, Math.max(1, Number(depthExaggeration.value) || 3))
   depthExaggeration.value = next
   if (Math.abs(Number(volumeRenderingControls.terrainExaggeration) - next) >= 1e-6) {
     volumeRenderingControls.terrainExaggeration = next
@@ -4929,7 +4930,7 @@ async function loadTlrdData() {
   terrainTexture.value = texture
   // 地形、声场、声源、声线和切面共用侧边栏的唯一垂直夸张倍率。
   // 不再根据水深自动改写倍率，因此 1× 始终代表真实物理比例。
-  depthExaggeration.value = Math.min(10, Math.max(1, Number(volumeRenderingControls.terrainExaggeration) || 3))
+  depthExaggeration.value = Math.min(30, Math.max(1, Number(volumeRenderingControls.terrainExaggeration) || 3))
   soundField.depthExaggeration = depthExaggeration.value
   // SoundField.setVolume 会调用 decodeFn(texture) 得到纹理再 finalize；
   // 这里传入恒等函数，因为 texture 已经是解码结果。

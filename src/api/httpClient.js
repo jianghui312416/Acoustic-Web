@@ -34,3 +34,32 @@ export async function postJson(url, payload, options = {}) {
     clearTimeout(timer)
   }
 }
+
+/** GET JSON，超时和错误处理规则与 postJson 保持一致。 */
+export async function getJson(url, options = {}) {
+  const controller = new AbortController()
+  const timeoutMs = options.timeoutMs ?? apiTimeoutMs()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json', ...options.headers },
+      signal: controller.signal,
+    })
+    let data = null
+    try {
+      data = await response.json()
+    } catch {
+      // 交给调用方结合 HTTP 状态生成领域错误。
+    }
+    return { response, data }
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`接口请求超时（${timeoutMs} ms）`, { cause: error })
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}

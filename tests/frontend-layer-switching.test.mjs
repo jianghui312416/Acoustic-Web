@@ -118,12 +118,12 @@ test('drawing additional sound fields never auto-expands an already loaded terra
   assert.match(terrain, /if \(inside \|\| grid\.value\) scheduleDraw\(\)/)
 })
 
-test('bathymetry proxy reuses TLS connections through the stable S3 virtual-host endpoint', async () => {
+test('bathymetry reads bounded subsets from the configured local GEBCO NetCDF', async () => {
   const config = await readSource('../vite.config.js')
   const bathymetry = await readSource('../src/utils/bathymetry.js')
-  assert.match(config, /https:\/\/elevation-tiles-prod\.s3\.amazonaws\.com/)
-  assert.match(config, /keepAlive:\s*true/)
-  assert.match(config, /maxSockets:\s*4/)
-  assert.doesNotMatch(config, /setHeader\('Connection', 'close'\)/)
-  assert.match(bathymetry, /elevation-tiles-prod\.s3\.amazonaws\.com\/terrarium/)
+  assert.match(config, /GEBCO_NC_PATH/)
+  assert.match(config, /gebco_subset_server\.py/)
+  assert.match(bathymetry, /\/api\/gebco/)
+  assert.doesNotMatch(config, /elevation-tiles-prod|terrarium/i)
+  assert.doesNotMatch(bathymetry, /elevation-tiles-prod|terrarium/i)
 })

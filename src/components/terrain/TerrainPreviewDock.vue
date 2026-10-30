@@ -107,10 +107,11 @@ function scheduleBathyMap() {
       const data = ctx.createImageData(160, 160)
       for (let row = 0; row < 160; row++) {
         const lat = inverseMercatorY(view.y0 + row / 159 * (view.y1 - view.y0))
-        const gridRow = Math.max(0, Math.min(159, Math.round((grid.bounds.north - lat) / (grid.bounds.north - grid.bounds.south) * 159)))
+        const gridRow = Math.max(0, Math.min(grid.height - 1, Math.round((grid.bounds.north - lat) / (grid.bounds.north - grid.bounds.south) * (grid.height - 1))))
         for (let col = 0; col < 160; col++) {
-          const value = grid.values[gridRow * 160 + col]
-          const slope = value - grid.values[gridRow * 160 + Math.min(159, col + 1)]
+          const gridCol = Math.max(0, Math.min(grid.width - 1, Math.round(col / 159 * (grid.width - 1))))
+          const value = grid.values[gridRow * grid.width + gridCol]
+          const slope = value - grid.values[gridRow * grid.width + Math.min(grid.width - 1, gridCol + 1)]
           const shade = Math.max(.55, Math.min(1.4, .9 + slope / 200))
           const rgb = bathymetryColor(value, grid.min, grid.max).map(c => Math.min(255, c * shade))
           data.data.set([...rgb,255], (row * 160 + col) * 4)
@@ -406,7 +407,7 @@ onBeforeUnmount(() => {
   left: 16px;
   bottom: 16px;
   z-index: 4;
-  width: min(560px, 51%);
+  width: min(650px, 51%);
   overflow: visible;
   border: 1px solid rgba(63, 153, 190, 0.48);
   border-radius: 8px;

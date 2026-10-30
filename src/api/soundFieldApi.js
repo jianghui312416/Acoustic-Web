@@ -19,7 +19,7 @@
  *   ResultCode 0 = 成功，1 = 失败（Response 为 { ok: false, message }）。
  */
 
-import { postJson } from './httpClient.js'
+import { getJson, postJson } from './httpClient.js'
 import { portalApiUrl } from '../config/runtimeConfig.js'
 
 /**
@@ -258,6 +258,41 @@ const NOISE_PORTALS = Object.freeze({
 export function analyseEnvironmentNoise(params, ice = false) {
   const [sn, plugin] = NOISE_PORTALS[ice ? 'ice' : 'normal']
   return callPortal(sn, plugin, params)
+}
+
+function directEndpoint(path) {
+  return new URL(String(path).replace(/^\//, ''), portalApiUrl()).toString()
+}
+
+function directApiError(name, response, data) {
+  const detail = data?.detail || data?.message || data?.Response?.message
+  return new Error(detail ? `${name}失败：${detail}` : `${name}接口 HTTP ${response.status}`)
+}
+
+/**
+ * 浏览器直接 GET 实时 AIS。参数留空时由后端订阅全球范围；密钥不会下发到浏览器。
+ */
+export async function getRealtimeAis(params = {}) {
+  const url = new URL(directEndpoint('GetRealtimeAIS'))
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value))
+  }
+  const { response, data } = await getJson(url.toString(), { timeoutMs: 45_000 })
+  if (!response.ok || !data || !Array.isArray(data.vessels)) throw directApiError('AIS 获取', response, data)
+  return data
+}
+
+/** 固定前端 AIS 快照，并由后端天气接口生成 48 小时 Wenz 噪声帧。 */
+export async function analyseForecastEnvironmentNoise(params) {
+  const { response, data } = await postJson(
+    directEndpoint('AnalyseForecastEnvironmentNoise'),
+    params,
+    { timeoutMs: 180_000 }
+  )
+  if (!response.ok || !data || !Array.isArray(data.frames)) {
+    throw directApiError('天气噪声预报', response, data)
+  }
+  return data
 }
 
 /** 二维声线轨迹 (SN=19 → Analyse2DRTRD)。params 覆盖 / 补充通用缺省字段。*/

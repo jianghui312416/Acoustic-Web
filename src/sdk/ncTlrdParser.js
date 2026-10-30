@@ -21,9 +21,10 @@
  *   - 每行 col 个值，对应 profile.x（水平距离，米）
  *   - 值 = 传播损失 TL（dB）
  *
- * 无效值（必须在统计与渲染前剔除）：
- *   - 200  ：水体内的无效值（声线未覆盖 / 未参与解算）
- *   - 9999 ：海底以下与陆地部分（超出该扇区海深范围）
+ * 无效值语义：
+ *   - 200  ：水体未覆盖（声线未覆盖 / 未参与解算）。保留为有限值，显示层映射到
+ *            当前色标的最大值；valueMin/valueMax 统计仍剔除它。
+ *   - 9999 ：海底以下与陆地部分（超出该扇区海深范围），渲染前剔除。
  *
  * 数据本身不含经纬度，声源位置与方位基准由调用方指定。
  */
@@ -81,7 +82,7 @@ export class TlrdSoundFieldData {
     }
     /** @type {{sector:number, row:number, col:number, distance:number[], depth:number[], compassBearings:number[]}} */
     this.grid = { sector: 0, row: 0, col: 0, distance: [], depth: [], compassBearings: [] }
-    /** @type {Float32Array} TL 体数据，索引 = (sectorIndex * row + depthIndex) * col + distanceIndex，无效值为 NaN */
+    /** @type {Float32Array} TL 体数据，索引 = (sectorIndex * row + depthIndex) * col + distanceIndex，海底以下/陆地无效值为 NaN；200 保留为有限值 */
     this.tl = new Float32Array(0)
     /** @type {number[][]} 海底高程（m，海面 0、向下为负），[sectorIndex][distanceIndex] */
     this.bottom = []
@@ -113,7 +114,7 @@ export class TlrdSoundFieldData {
    * @param {number} sectorIndex 扇区索引（0 起）
    * @param {number} depthIndex 深度层索引（0 起）
    * @param {number} distanceIndex 距离点索引（0 起）
-   * @returns {number} TL（dB），越界或无效返回 NaN
+   * @returns {number} TL（dB），越界/海底以下/陆地返回 NaN；水体未覆盖的 200 原样返回
    */
   at(sectorIndex, depthIndex, distanceIndex) {
     const { sector, row, col } = this.grid
@@ -324,7 +325,10 @@ export function parseAnalyse3DTlrd(json, opts = {}) {
           continue
         }
         if (n === TLRD_INVALID_WATER) {
+          // 200 = 水体未覆盖（无射线/未参与解算）。保留为有限值而非 NaN，
+          // 让各显示层把它映射到当前色标的最大值；统计仍剔除它，避免抬高 valueMax。
           invalidWaterCount++
+          tl[base + ix] = n
           continue
         }
         if (n === TLRD_INVALID_SUBSTRATE) {

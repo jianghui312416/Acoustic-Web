@@ -101,7 +101,7 @@ export function clampVolumeRenderingControls(controls = volumeRenderingControls)
     const number = Number(value)
     return Math.min(max, Math.max(min, Number.isFinite(number) ? number : fallback))
   }
-  controls.terrainExaggeration = clamp(controls.terrainExaggeration, 1, 10, 3)
+  controls.terrainExaggeration = clamp(controls.terrainExaggeration, 1, 30, 3)
   controls.opacity = clamp(controls.opacity, 0.2, 5, 1.7)
   controls.sampling = clamp(controls.sampling, 0.004, 0.03, 0.01)
   controls.alphaPower = clamp(controls.alphaPower, 0.35, 3, 1.3)

@@ -1,7 +1,7 @@
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v))
 export const terrainLighting = Object.freeze({ enabled: true, hillshadeIntensity: .75, hillshadeAzimuth: 254, hillshadeAltitude: 45 })
 export function normalizeExaggeration(value) {
-  return clamp(Number.isFinite(Number(value)) ? Number(value) : 3, 1, 10)
+  return clamp(Number.isFinite(Number(value)) ? Number(value) : 3, 1, 30)
 }
 
 // Screen-space subdivision, bounded by the original raster and a fixed face budget.

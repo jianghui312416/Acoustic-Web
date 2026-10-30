@@ -1,15 +1,15 @@
 <template>
   <aside class="app-sidebar" :class="{ collapsed }" aria-label="主导航">
     <div class="sidebar-scroll">
-      <button type="button" class="run-button" title="模拟运行" aria-label="模拟运行" @click="$emit('run')">
+      <button type="button" class="run-button" title="运行示例位置的声场计算" aria-label="模拟运行" @click="$emit('run')">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M8 5.5v13l11-6.5-11-6.5Z" fill="currentColor" />
         </svg>
-        <span>模拟运行</span>
+        <span>运行</span>
       </button>
 
       <div class="brand-row">
-        <div class="brand-lockup" title="星图深海">
+        <div class="brand-lockup" title="星图深海公司研制">
           <img src="/branding/xingtu-shenhai.svg" alt="星图深海" />
         </div>
         <div class="view-switcher" role="group" aria-label="视图切换">
@@ -58,16 +58,16 @@
 
       <nav class="module-list" aria-label="业务模块">
         <section class="module-group work-module" :class="{ active: workOpen }">
-          <button type="button" class="module-entry" :class="{ active: workOpen }" title="工作" aria-label="工作" @click="workOpen = !workOpen">
+          <button type="button" class="module-entry" :class="{ active: workOpen }" title="运行记录恢复" aria-label="工作" @click="workOpen = !workOpen">
             <span class="module-icon work-module-icon" aria-hidden="true">▤</span>
-            <span class="module-label">工作</span>
+            <span class="module-label">工作区</span>
             <span class="work-refresh" :class="{ spinning: jobWorkspace.loading }" role="button" tabindex="0" title="刷新工作" aria-label="刷新工作" @click.stop="refreshJobWorkspace" @keydown.enter.stop="refreshJobWorkspace">↻</span>
             <span class="module-chevron" :class="{ open: workOpen }" aria-hidden="true">›</span>
           </button>
           <div v-if="workOpen" class="work-list" @click.stop>
             <p v-if="jobWorkspace.error" class="work-message error">{{ jobWorkspace.error }}</p>
-            <p v-else-if="jobWorkspace.loading && !jobWorkspace.jobs.length" class="work-message">正在读取工作…</p>
-            <p v-else-if="!jobWorkspace.jobs.length" class="work-message">暂无可打开的三维声场工作</p>
+            <p v-else-if="jobWorkspace.loading && !jobWorkspace.jobs.length" class="work-message">正在读取工作区项目…</p>
+            <p v-else-if="!jobWorkspace.jobs.length" class="work-message">暂无可打开的三维声场历史工作项目</p>
             <article v-for="job in jobWorkspace.jobs" :key="job.job_id" class="work-card">
               <div class="work-card-title">
                 <span>◆</span><b>{{ job.model_label || job.model || '三维声场' }}</b><i :class="job.status === 'completed' ? 'ready' : ''">{{ job.status_label || (job.openable ? '完成' : '处理中') }}</i>
@@ -106,10 +106,9 @@
           <div v-if="terrainControlsOpen" class="feature-controls terrain-controls" @click.stop>
             <p class="feature-section-title">显示</p>
             <label class="feature-slider">
-              <span>垂直夸张（地形 + 声场） <b>{{ formatControl(visualControls.terrainExaggeration, 1) }}×</b></span>
-              <input v-model.number="visualControls.terrainExaggeration" aria-label="垂直夸张倍率" type="range" min="1" max="10" step="0.1" @input="normalizeControls" />
+              <span>垂直夸张 <b>{{ formatControl(visualControls.terrainExaggeration, 1) }}×</b></span>
+              <input v-model.number="visualControls.terrainExaggeration" aria-label="垂直夸张倍率" type="range" min="1" max="30" step="0.1" @input="normalizeControls" />
             </label>
-            <button type="button" @click="visualControls.terrainExaggeration = 1">真实比例（1 倍）</button>
           </div>
         </section>
 
@@ -219,7 +218,7 @@
             type="button"
             class="module-entry"
             :class="{ active: sliceControlsOpen }"
-            title="垂直切面"
+            title="声场体垂直切面"
             aria-label="垂直切面"
             @click="toggleSliceControls"
           >
@@ -238,7 +237,7 @@
             <label class="feature-switch">
               <input v-model="sliceControls.showSlice" type="checkbox" />
               <span class="switch-track"><i></i></span>
-              <span>显示切面（Show Slice）</span>
+              <span>显示切面</span>
             </label>
             <label class="feature-slider">
               <span>方位角（正北 0°）<b>{{ Math.round(sliceControls.sliceAzimuthDeg) }}°</b></span>
@@ -246,11 +245,11 @@
             </label>
             <p class="feature-section-title">dB 范围</p>
             <div class="db-control-grid">
-              <span>最小值</span><span>最大值</span>
+              <span>Min</span><span>Max</span>
               <div class="stepper"><button type="button" @click="stepSliceDb('dbMin', -1)">−</button><input v-model.number="sliceControls.dbMin" type="number" min="0" max="199" @change="normalizeSliceControls" /><em>dB</em><button type="button" @click="stepSliceDb('dbMin', 1)">＋</button></div>
               <div class="stepper"><button type="button" @click="stepSliceDb('dbMax', -1)">−</button><input v-model.number="sliceControls.dbMax" type="number" min="1" max="200" @change="normalizeSliceControls" /><em>dB</em><button type="button" @click="stepSliceDb('dbMax', 1)">＋</button></div>
             </div>
-            <p class="feature-section-title">显示（Display）</p>
+            <p class="feature-section-title">显示</p>
             <label class="feature-switch">
               <input v-model="sliceControls.seafloorLineAndMask" type="checkbox" />
               <span class="switch-track"><i></i></span>
@@ -278,6 +277,15 @@
             </label>
           </div>
         </section>
+
+        <section class="module-group weather-noise-module" :class="{ active: weatherNoiseOpen }">
+          <button type="button" class="module-entry" :class="{ active: weatherNoiseOpen }" title="预报天气（海面10米风速、降雨、海况）与环境噪声" aria-label="天气与环境噪声" @click="weatherNoiseOpen = !weatherNoiseOpen">
+            <span class="module-icon weather-module-icon" aria-hidden="true">◒</span>
+            <span class="module-label">天气与环境噪声</span>
+            <span class="module-chevron" :class="{ open: weatherNoiseOpen }" aria-hidden="true">›</span>
+          </button>
+          <WeatherNoiseSidebar v-if="weatherNoiseOpen" @pick-on-map="$emit('select-view-mode', 'terrain')" />
+        </section>
       </nav>
     </div>
 
@@ -303,6 +311,7 @@ import {
 } from '@/modules/acoustic/verticalSliceControls.js'
 import { deleteAcousticJob } from '@/api/jobWorkspaceApi.js'
 import { jobWorkspace, refreshJobWorkspace, requestCloseJob, requestOpenJob } from '@/modules/acoustic/jobWorkspace.js'
+import WeatherNoiseSidebar from '@/components/weather/WeatherNoiseSidebar.vue'
 
 const props = defineProps({
   collapsed: { type: Boolean, default: false },
@@ -317,12 +326,14 @@ const props = defineProps({
 const emit = defineEmits(['select-module', 'select-submodule', 'select-view-mode', 'toggle-collapse', 'toggle-thumbnail', 'run'])
 
 const clockText = ref('')
-const workOpen = ref(true)
+const workOpen = ref(false)
 const openingJobId = ref('')
 const deletingJobId = ref('')
 const terrainControlsOpen = ref(false)
+const weatherNoiseOpen = ref(false)
 const sliceControlsOpen = ref(false)
-const expandedModuleIds = ref(new Set(props.activeModuleId ? [props.activeModuleId] : []))
+// 刷新后侧边栏全部收起：不根据当前模块预展开任何下拉。
+const expandedModuleIds = ref(new Set())
 const visualControls = volumeRenderingControls
 const sliceControls = verticalSliceControls
 const volumeColormaps = VOLUME_COLORMAPS
@@ -789,7 +800,7 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
 </style>
 
 <style scoped>
-.app-sidebar { width: 300px; background: linear-gradient(#101d2e, #0b1420); box-shadow: none; }
+.app-sidebar { width: 320px; background: linear-gradient(#101d2e, #0b1420); box-shadow: none; }
 .sidebar-scroll { padding: 4px 7px 12px; flex: 1; }
 .run-button { height: 28px; font-size: 12px; letter-spacing: 0; color: #00d4b5; background: #10373c; box-shadow: none; }
 .brand-row { margin: 8px -7px 0; padding: 10px 8px; border: 0; border-bottom: 1px solid #203348; border-radius: 0; background: #0e1b2c; }
@@ -847,7 +858,7 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
 .app-sidebar.collapsed { width: 52px; }
 .collapsed .sidebar-scroll { padding: 4px 5px; overflow-x: hidden; }
 .collapsed .run-button span, .collapsed .brand-lockup, .collapsed .module-label, .collapsed .module-chevron,
-.collapsed .module-children, .collapsed .feature-controls, .collapsed .work-list, .collapsed .work-refresh, .collapsed .sidebar-footer { display: none; }
+.collapsed .module-children, .collapsed .feature-controls, .collapsed .work-list, .collapsed .work-refresh, .collapsed .sidebar-footer, .collapsed .wn-panel { display: none; }
 .collapsed .brand-row { margin: 8px 0; padding: 8px 0; }
 .collapsed .view-switcher { flex-direction: column; width: 100%; gap: 7px; }
 .collapsed .module-entry { grid-template-columns: 1fr; padding: 0; min-height: 36px; }

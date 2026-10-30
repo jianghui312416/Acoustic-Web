@@ -1,22 +1,48 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { decodeTerrarium, terrainTilePoint, acousticTerrainBounds, loadBathymetry } from '../src/utils/bathymetry.js'
+import { acousticTerrainBounds, buildLocalGebcoUrl, loadBathymetry } from '../src/utils/bathymetry.js'
 import { bathymetryColor, createTerrainProjection } from '../src/utils/terrainScene.js'
 
-test('Terrarium decoding preserves negative seafloor elevations and fractional metres', () => {
-  assert.equal(decodeTerrarium(128, 0, 0), 0)
-  assert.equal(decodeTerrarium(108, 120, 0), -5000)
-  assert.equal(decodeTerrarium(128, 100, 128), 100.5)
-  assert.equal(decodeTerrarium(127, 255, 128), -.5)
+test('local GEBCO request carries normalized bounds and a bounded resolution', () => {
+  const request = buildLocalGebcoUrl({ west: 117, east: 115, south: 17, north: 15 }, 900)
+  const url = new URL(request.url, 'http://localhost')
+  assert.equal(url.pathname, '/api/gebco')
+  assert.equal(url.searchParams.get('west'), '115')
+  assert.equal(url.searchParams.get('east'), '117')
+  assert.equal(url.searchParams.get('south'), '15')
+  assert.equal(url.searchParams.get('north'), '17')
+  assert.equal(url.searchParams.get('resolution'), '512')
 })
 
-test('geographic tile coordinates cover poles and antimeridian without requesting an invalid tile', () => {
-  assert.deepEqual(terrainTilePoint(0, 0, 1), { x: 1, y: 1, px: 0, py: 0 })
-  for (const [lon, lat] of [[180,85],[-180,-85],[116,16]]) {
-    const p = terrainTilePoint(lon, lat, 8)
-    assert.ok(p.x >= 0 && p.x < 256 && p.y >= 0 && p.y < 256)
-    assert.ok(p.px >= 0 && p.px < 256 && p.py >= 0 && p.py < 256)
+test('local GEBCO values remain signed metre elevations and rows stay north to south', async () => {
+  const payload = {
+    width: 3, height: 2,
+    values: [-3200, -3100, -3000, -4200, -4100, -4000],
+    bounds: { west: 115, east: 116, south: 15, north: 16 },
+    source: 'GEBCO_2026_sub_ice',
   }
+  const grid = await loadBathymetry(payload.bounds, 3, { baseUrl: '/test-gebco', fetchJson: async () => payload })
+  assert.deepEqual([...grid.values], payload.values)
+  assert.equal(grid.min, -4200)
+  assert.equal(grid.max, -3000)
+  assert.equal(grid.count, 6)
+  assert.equal(grid.source, 'GEBCO_2026_sub_ice')
+})
+
+test('local GEBCO reader retries transient errors and rejects invalid grids', async () => {
+  let attempts = 0
+  const bounds = { west: -61, east: -59, south: 70, north: 71 }
+  const payload = { width: 2, height: 2, values: [-100, -200, -300, -400], bounds }
+  const grid = await loadBathymetry(bounds, 8, { baseUrl: '/retry-gebco', fetchJson: async () => {
+    attempts++
+    if (attempts === 1) throw new Error('temporary')
+    return payload
+  } })
+  assert.equal(attempts, 2)
+  assert.equal(grid.min, -400)
+  await assert.rejects(loadBathymetry(bounds, 9, {
+    baseUrl: '/invalid-gebco', fetchJson: async () => ({ width: 2, height: 2, values: [0] }),
+  }), /本地 GEBCO_2026_sub_ice/)
 })
 
 test('terrain and acoustic source share a geographic projection with depth below sea level', () => {
@@ -45,38 +71,4 @@ test('default terrain leaves room around the full acoustic radius at Arctic lati
   const heightKm = (bounds.north - bounds.south) * 110.574
   assert.ok(Math.abs(2 * radius / widthKm - 1/3) < .001)
   assert.ok(Math.abs(2 * radius / heightKm - 1/3) < .001)
-})
-
-function oceanPixels() {
-  const pixels = new Uint8ClampedArray(256 * 256 * 4)
-  for (let i = 0; i < pixels.length; i += 4) pixels.set([108,120,0,255],i)
-  return pixels
-}
-
-test('a failed Arctic tile falls back to a coarser level with the same bounds and real negative elevation', async () => {
-  const bounds = acousticTerrainBounds({ lon: -60, lat: 70.8 }, 73.34)
-  const attempted = []
-  let firstZoom
-  const pixels = oceanPixels()
-  const grid = await loadBathymetry(bounds, 8, { readTile: async z => {
-    attempted.push(z)
-    firstZoom ??= z
-    if (z === firstZoom) throw new Error('TLS disconnected')
-    return pixels
-  } })
-  assert.equal(grid.reducedResolution, true)
-  assert.equal(grid.zoom, firstZoom - 1)
-  assert.deepEqual(grid.bounds, bounds)
-  assert.equal(grid.min, -5000)
-  assert.equal(grid.count, 64)
-  assert.ok(attempted.includes(firstZoom - 1))
-})
-
-test('persistent tile failures are bounded and never produce fake or zero depth', async () => {
-  const levels = new Set()
-  await assert.rejects(loadBathymetry({west:-61,east:-59,south:70,north:71},4,{readTile: async z => {
-    levels.add(z)
-    throw new Error('offline')
-  }}), /重试及较低分辨率/)
-  assert.equal(levels.size,3)
 })

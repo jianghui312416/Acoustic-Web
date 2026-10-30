@@ -350,7 +350,7 @@ export function buildTlrdOmniModel(json, opts = {}) {
   // 方位行与三维纹理严格同轴：第 s 行是门户实际计算的 s × 360/sector 导航方位。
   const azimuths = tlrdSectorAzimuths(sector, parsed.grid.compassBearings)
 
-  // TL 层：layers[depthIdx][sector][col]，复用 tlAt 的数组分支（无效值为 NaN）
+  // TL 层：layers[depthIdx][sector][col]，复用 tlAt 的数组分支（海底以下/陆地为 NaN；水体未覆盖的 200 保留为有限值）
   const layers = []
   for (let d = 0; d < depthCount; d++) {
     const perDepth = []
