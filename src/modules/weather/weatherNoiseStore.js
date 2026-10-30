@@ -79,6 +79,24 @@ export const currentWeatherNoiseCurves = computed(() => {
   }
 })
 
+/** 所选频带在全部预报帧上的总噪声级，用于时间滑杆下方的 AN 趋势图。 */
+export const weatherNoiseBandTrend = computed(() => {
+  const result = weatherNoiseState.result
+  const frames = result?.frames || []
+  const frequency = result?.frequency_hz || []
+  if (!frames.length || !frequency.length) return []
+  const fixed = result.fixed_components_db || {}
+  const shipping = coatesStojanovicShippingCurve(frequency, activeShippingActivity.value)
+  const band = activeWeatherNoiseBand.value
+  return frames.map(frame => {
+    const varying = frame?.varying_components_db || {}
+    const total = powerSumCurvesDb([
+      fixed.turbulence, shipping, fixed.thermal, varying.wind, varying.rain,
+    ])
+    return bandNoiseMetricsDb(frequency, total, band.low_hz, band.high_hz).bandLevelDb
+  })
+})
+
 export const forecastNoiseSummary = computed(() => {
   const result = weatherNoiseState.result
   const frame = currentWeatherNoiseFrame.value

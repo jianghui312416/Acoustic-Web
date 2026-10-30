@@ -91,6 +91,11 @@ export const volumeRenderingControls = reactive({
   rangeRings: false,
 })
 
+/** 声场视图向侧边栏同步的只读运行状态。 */
+export const acousticSceneState = reactive({
+  hasTerrainVolume: false,
+})
+
 export function activeVolumeColorStops(id = volumeRenderingControls.colormap) {
   const palette = VOLUME_COLORMAPS.find((item) => item.id === id) ?? VOLUME_COLORMAPS[0]
   return palette.stops.map(([position, rgb]) => [position, [...rgb]])

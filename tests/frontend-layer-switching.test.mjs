@@ -18,6 +18,39 @@ test('sidebar switches keep their focus box inside the visible row', async () =>
   assert.doesNotMatch(source, /\.feature-switch input \{[^}]*width:\s*1px[^}]*height:\s*1px/s)
 })
 
+test('weather forecast requests are gated by terrain mode and volume tools require a loaded terrain field', async () => {
+  const sidebar = await readSource('../src/components/layout/AppSidebar.vue')
+  const weather = await readSource('../src/components/weather/WeatherNoiseSidebar.vue')
+  const view = await readSource('../src/views/AcousticFieldView.vue')
+  assert.match(sidebar, /weatherNoiseOpen && viewMode === 'terrain'/)
+  assert.match(sidebar, /进入地形模式（M）加载场景的预报/)
+  assert.match(sidebar, /props\.viewMode === 'terrain' && acousticSceneState\.hasTerrainVolume/)
+  assert.match(weather, /onMounted\(async \(\) => \{[\s\S]*?loadWeatherNoiseForecast\(\)/)
+  assert.match(view, /acousticSceneState\.hasTerrainVolume = value/)
+  assert.ok(
+    view.indexOf('const volumeData = ref(null)') < view.indexOf('watch(hasTerrainVolume'),
+    '声场可用状态的立即监听必须在 volumeData 初始化之后启动'
+  )
+  assert.ok(
+    view.indexOf('const raySourceData = shallowRef(null)') < view.indexOf('watch(hasTerrainVolume'),
+    '声场可用状态的立即监听必须在 raySourceData 初始化之后启动'
+  )
+})
+
+test('AN trend uses selected-band total noise for all 48 frames', async () => {
+  const sidebar = await readSource('../src/components/weather/WeatherNoiseSidebar.vue')
+  const store = await readSource('../src/modules/weather/weatherNoiseStore.js')
+  assert.match(store, /export const weatherNoiseBandTrend = computed/)
+  assert.match(store, /frames\.map\(frame =>/)
+  assert.match(store, /bandNoiseMetricsDb\(frequency, total, band\.low_hz, band\.high_hz\)\.bandLevelDb/)
+  assert.match(sidebar, /AN \{\{ num\(noiseTrendMin, 1\) \}\}–\{\{ num\(noiseTrendMax, 1\) \}\} dB · 48小时预报/)
+  assert.match(sidebar, /:points="noiseTrendPoints"/)
+  assert.match(sidebar, /:points="activeNoiseTrendPoints"/)
+  assert.match(sidebar, /slice\(0, state\.frameIndex \+ 1\)/)
+  assert.match(sidebar, /class="trend-level"[\s\S]*:y1="cursorY"[\s\S]*:y2="cursorY"/)
+  assert.doesNotMatch(sidebar, /windPoints/)
+})
+
 test('application height chain can shrink without pushing the document', async () => {
   const shell = await readSource('../src/layouts/ApplicationShell.vue')
   const view = await readSource('../src/views/AcousticFieldView.vue')

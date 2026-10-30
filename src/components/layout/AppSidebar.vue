@@ -142,10 +142,11 @@
           </button>
 
           <div v-if="moduleItem.viewKey === 'acoustic-field' && isModuleExpanded(moduleItem.id)" class="feature-controls volume-controls" @click.stop>
-            <div class="volume-state">
-              <span class="volume-cube" aria-hidden="true">◆</span>
-              <span>{{ visualControls.volumeVisible ? '体数据已显示' : '体数据已隐藏' }}</span>
-            </div>
+            <template v-if="volumeControlsAvailable">
+              <div class="volume-state">
+                <span class="volume-cube" aria-hidden="true">◆</span>
+                <span>{{ visualControls.volumeVisible ? '体数据已显示' : '体数据已隐藏' }}</span>
+              </div>
 
             <p class="feature-section-title">外观</p>
             <label class="feature-slider">
@@ -196,6 +197,11 @@
               <button type="button" :class="{ active: visualControls.rangeRings }" @click="visualControls.rangeRings = !visualControls.rangeRings">距离环</button>
               <button type="button" class="danger-action" @click="visualControls.volumeVisible = !visualControls.volumeVisible">{{ visualControls.volumeVisible ? '移除' : '显示' }}</button>
             </div>
+            </template>
+            <template v-else>
+              <div class="feature-unavailable"><span aria-hidden="true">📦</span><b>未加载卷</b></div>
+              <p class="feature-unavailable-hint">进入地形模式并使用模拟或上传面板加载三维声场体。</p>
+            </template>
           </div>
 
           <div v-else-if="isModuleExpanded(moduleItem.id)" class="module-children">
@@ -234,11 +240,12 @@
           </button>
 
           <div v-if="sliceControlsOpen" class="feature-controls vertical-slice-controls" @click.stop>
-            <label class="feature-switch">
-              <input v-model="sliceControls.showSlice" type="checkbox" />
-              <span class="switch-track"><i></i></span>
-              <span>显示切面</span>
-            </label>
+            <template v-if="volumeControlsAvailable">
+              <label class="feature-switch">
+                <input v-model="sliceControls.showSlice" type="checkbox" />
+                <span class="switch-track"><i></i></span>
+                <span>显示切面</span>
+              </label>
             <label class="feature-slider">
               <span>方位角（正北 0°）<b>{{ Math.round(sliceControls.sliceAzimuthDeg) }}°</b></span>
               <input v-model.number="sliceControls.sliceAzimuthDeg" type="range" min="0" max="359" step="1" @input="normalizeSliceControls" />
@@ -275,6 +282,11 @@
               <span class="switch-track"><i></i></span>
               <span>光标读取</span>
             </label>
+            </template>
+            <template v-else>
+              <div class="feature-unavailable disabled"><span aria-hidden="true">📦</span><b>切片功能已禁用</b></div>
+              <p class="feature-unavailable-hint">请先进入地形模式并显示三维声场体。</p>
+            </template>
           </div>
         </section>
 
@@ -284,7 +296,8 @@
             <span class="module-label">天气与环境噪声</span>
             <span class="module-chevron" :class="{ open: weatherNoiseOpen }" aria-hidden="true">›</span>
           </button>
-          <WeatherNoiseSidebar v-if="weatherNoiseOpen" @pick-on-map="$emit('select-view-mode', 'terrain')" />
+          <WeatherNoiseSidebar v-if="weatherNoiseOpen && viewMode === 'terrain'" @pick-on-map="$emit('select-view-mode', 'terrain')" />
+          <p v-else-if="weatherNoiseOpen" class="module-mode-hint">进入地形模式（M）加载场景的预报。</p>
         </section>
       </nav>
     </div>
@@ -299,9 +312,10 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   VOLUME_COLORMAPS,
+  acousticSceneState,
   clampVolumeRenderingControls,
   volumeRenderingControls,
 } from '@/modules/acoustic/volumeRenderingControls.js'
@@ -337,6 +351,7 @@ const expandedModuleIds = ref(new Set())
 const visualControls = volumeRenderingControls
 const sliceControls = verticalSliceControls
 const volumeColormaps = VOLUME_COLORMAPS
+const volumeControlsAvailable = computed(() => props.viewMode === 'terrain' && acousticSceneState.hasTerrainVolume)
 const rotationAxes = Object.freeze([
   { key: 'rotationX', label: 'X' },
   { key: 'rotationY', label: 'Y' },
@@ -817,6 +832,12 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
 .slice-module-icon { color: #7f9fe8; }
 .feature-controls { margin: 5px 0 3px; padding: 9px 10px 11px; border: 1px solid #20384c; border-radius: 7px; background: #101f30; box-shadow: inset 0 1px #223b50; }
 .feature-controls, .feature-controls * { box-sizing: border-box; }
+.feature-unavailable { min-height: 45px; display: flex; align-items: center; gap: 8px; padding: 0 11px; color: #a9c5d3; border: 1px solid #29465d; border-radius: 6px; background: #182b40; font-size: 10px; }
+.feature-unavailable span { color: #ef7894; font-size: 13px; }
+.feature-unavailable b { font-weight: 500; }
+.feature-unavailable.disabled { min-height: 34px; }
+.feature-unavailable-hint,.module-mode-hint { margin: 8px 3px 1px; color: #6f8da0; text-align: center; font-size: 9px; line-height: 1.5; }
+.module-mode-hint { margin: 5px 0 3px; padding: 9px 8px 10px; border: 1px solid #20384c; border-radius: 7px; background: #101f30; }
 .feature-section-title { display: flex; align-items: center; gap: 7px; margin: 8px 0 7px; color: #5f849c; font-size: 9px; letter-spacing: 1px; text-transform: uppercase; }
 .feature-section-title::after { content: ''; height: 1px; flex: 1; background: #274257; }
 .feature-slider { display: grid; gap: 5px; margin: 0 0 10px; color: #8eb0c4; font-size: 10px; }

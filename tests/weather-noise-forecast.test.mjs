@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   bandNoiseMetricsDb,
   clampFrameIndex, clampShippingActivity, coatesStojanovicShippingCurve, directionLabel,
-  meanBandLevelDb, nearestFrequencyIndex, powerSumCurvesDb,
+  meanBandLevelDb, nearestFrequencyIndex, powerSumCurvesDb, shippingActivityCountCurve,
 } from '../src/utils/weatherNoiseForecast.js'
 
 test('48 小时时间滑杆索引始终限制在有效帧内', () => {
@@ -45,4 +45,17 @@ test('远距离航运活动度按 Coates/Stojanovic 连续改变船舶与总噪�
   assert.equal(clampShippingActivity(-3), 0)
   assert.equal(clampShippingActivity(2), 1)
   assert.ok(powerSumCurvesDb([[low], [40]])[0] < powerSumCurvesDb([[high], [40]])[0])
+})
+
+test('船舶数量曲线按当前 AIS 平均权重通过观测点', () => {
+  const curve = shippingActivityCountCurve({
+    modeled_vessel_count: 156,
+    effective_ais_activity: 0.03,
+    activity_scale: 6,
+  })
+  assert.equal(curve.observedCount, 156)
+  assert.equal(curve.maxCount, 312)
+  assert.ok(Math.abs(curve.observedActivity - (1 - Math.exp(-0.03 / 6))) < 1e-12)
+  assert.equal(curve.points[0].shippingActivity, 0)
+  assert.ok(curve.points.at(-1).shippingActivity > curve.observedActivity)
 })

@@ -26,8 +26,7 @@
       <small>拖动旋转 · 滚轮缩放 · 悬停查看水深</small>
     </div>
     <TerrainStationCard v-if="station" :point="station" :dataset="dataset" :time="time" :running="running"
-      @close="station = null" @run="runStation" @parameters="$emit('station-parameters', $event)" @noise="openAmbientNoise" />
-    <AmbientNoiseProbe v-if="noiseProbeState.open" :point="probe" @close="closeProbe" />
+      @close="station = null" @run="runStation" @parameters="$emit('station-parameters', $event)" @noise="$emit('noise', $event)" />
     <slot :anchor="anchor" />
     <TerrainPreviewDock v-model:bounds="bounds" :collapsed="thumbnailCollapsed" :loading="status === 'loading'"
       @update:collapsed="$emit('update:thumbnailCollapsed', $event)" @load="loadTerrain" @locate="locateSource" />
@@ -48,14 +47,13 @@ import { loadBathymetry, acousticTerrainBounds } from '@/utils/bathymetry.js'
 import { drawTerrainScene } from '@/utils/terrainScene.js'
 import TerrainPreviewDock from './TerrainPreviewDock.vue'
 import TerrainStationCard from './TerrainStationCard.vue'
-import AmbientNoiseProbe from './AmbientNoiseProbe.vue'
 import { pickTerrainPoint } from '@/utils/terrainPicking.js'
 import { activeVolumeColorStops, volumeRenderingControls } from '@/modules/acoustic/volumeRenderingControls.js'
 import { parseAnalyse2DRtrd } from '@/sdk'
 import { resolveRayFlow, sampleRayFlow } from '@/utils/rayFlow.js'
 import { rayFlowClockElapsedMs } from '@/utils/rayFlowClock.js'
 import {
-  closeNoiseProbe, noiseProbeState, openNoiseProbe, setNoiseProbePicking,
+  noiseProbeState, setNoiseProbePicking,
   setTerrainCenter, setWeatherNoisePoint, weatherNoiseState,
 } from '@/modules/weather/weatherNoiseStore.js'
 import { currentOverlayField, drawWeatherOverlay, weatherOverlayActive } from '@/utils/weatherOverlay.js'
@@ -82,17 +80,9 @@ const props = defineProps({
   initialBoundsToken: { type: Number, default: 0 },
   thumbnailCollapsed: { type: Boolean, default: false },
 })
-const emit = defineEmits(['anchor', 'layer-anchors', 'bounds-change', 'request-globe', 'station-run', 'station-parameters', 'update:thumbnailCollapsed'])
+const emit = defineEmits(['anchor', 'layer-anchors', 'bounds-change', 'request-globe', 'station-run', 'station-parameters', 'noise', 'update:thumbnailCollapsed'])
 const station = ref(null)
 function runStation(point) { emit('station-run', point); station.value = null }
-const probe = ref(null)
-function openAmbientNoise(point) {
-  probe.value = point || station.value
-  station.value = null
-  if (probe.value) setWeatherNoisePoint(probe.value)
-  openNoiseProbe({ picking: false })
-}
-function closeProbe() { closeNoiseProbe(); probe.value = null }
 
 const canvasEl = ref(null)
 const bounds = ref(normalizeTerrainBounds({ west: 115.4, east: 116.6, south: 15.4, north: 16.6 }))
@@ -313,15 +303,12 @@ function onPointerUp(event) {
     const picked = pickTerrainPoint(lastScene, event.clientX - rect.left, event.clientY - rect.top)
     if (noiseProbeState.picking) {
       if (picked) {
-        probe.value = picked
         setWeatherNoisePoint(picked)
         setNoiseProbePicking(false)
       }
-      station.value = null
       hover.value = null
       return
     }
-    if (noiseProbeState.open && picked) closeProbe()
     station.value = picked
     hover.value = null
   }

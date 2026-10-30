@@ -11,8 +11,8 @@
     <strong class="weather-summary" v-if="frame">≋ {{ num(weather.wind10_mps, 1) }} 米/秒 {{ directionLabel(weather.wind_direction_deg) }}　☂ {{ num(weather.precipitation_mmh, 2) }}　≈ {{ num(weather.wave_hs_m, 2) }} 米</strong>
     <strong class="weather-summary" v-else>{{ state.loading ? '正在读取 48 小时天气与噪声…' : '天气暂不可用' }}</strong>
     <nav>
-      <button :disabled="running" title="在这里运行模拟" @click="$emit('run', point)"><svg viewBox="0 0 24 24"><path d="m8 4 12 8-12 8Z" fill="currentColor"/></svg><span>在这里运行模拟</span></button>
-      <button title="环境噪声" @click="$emit('noise', point)"><svg viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4ZM16 8q6 4 0 8M18 4q10 8 0 16" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>噪音</span></button>
+      <button :disabled="running" title="点击即在光标位置运行" @click="$emit('run', point)"><svg viewBox="0 0 24 24"><path d="m8 4 12 8-12 8Z" fill="currentColor"/></svg><span>在这里运行</span></button>
+      <button title="环境噪声" @click="$emit('noise', point)"><svg viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4ZM16 8q6 4 0 8M18 4q10 8 0 16" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>噪声</span></button>
       <button :disabled="running" title="加载此位置参数" @click="$emit('parameters', point)"><svg viewBox="0 0 24 24"><path d="M5 3v18M12 3v18M19 3v18M2 8h6M9 16h6M16 9h6" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
     </nav>
 
@@ -30,7 +30,7 @@
         <div><span>🚢 距离 ≤100 公里的船舶 · {{ nearbyShips }}（快速，AIS 固定）</span><b>{{ result?.fixed_ais?.modeled_vessel_count || 0 }} 艘</b></div>
         <div><span>船舶 + 环境</span><strong>{{ score }} 分贝</strong></div>
       </article>
-      <p class="hint">拖动左侧“天气与环境噪音”时间滑杆，可同步查看未来 48 小时逐小时天气及各噪声分量变化。</p>
+      <p class="hint">拖动左侧“天气与环境噪声”时间滑杆，可同步查看未来 48 小时逐小时天气及各噪声分量变化。</p>
     </div>
     <div v-else-if="expanded && state.error" class="station-error">{{ state.error }}<button @click="refreshWeatherNoiseForecast">重新加载</button></div>
   </section>

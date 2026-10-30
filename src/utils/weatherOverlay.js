@@ -6,7 +6,8 @@
  * 雨（precipitation_mmh）、海况（wave_hs_m / wave_direction_deg）等标量。
  *
  * 覆盖层把单点预报值作为「场强度」，驱动分布在区域地形表面的一组稳定粒子：
- *  - 风 / 海况：沿流向（风向 / 浪向）推进的短划线（streamline / swell crests）；
+ *  - 风：明亮的头部 + 沿风向向后渐隐的拖尾（拖尾），整条线沿风向推进；
+ *  - 海况：等长浪峰线，线身垂直于浪向（法线沿浪向），整线沿浪向推进；
  *  - 雨：垂直方向的短竖线，随降雨强度提升密度与亮度。
  * 图例（范围、单位、色带）随选中字段切换，颜色取粒子着色所需的同一条色带。
  */
@@ -187,18 +188,24 @@ export function drawWeatherOverlay(canvas, scene, grid, field, weather, elapsedM
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
   const bounds = grid.bounds
+  const span = Math.max(bounds.east - bounds.west, bounds.north - bounds.south)
   const particles = particlesFor(bounds)
-  const visibleCount = Math.round(particles.length * (0.12 + intensity * 0.88))
+  const visibleCount = Math.round(particles.length * (0.25 + intensity * 0.75))
   const direction = field.directionOf(weather)
   const flow = Number.isFinite(direction) ? bearingUnit(direction) : null
-  const span = Math.max(bounds.east - bounds.west, bounds.north - bounds.south)
   const cell = span * 0.3
   const time = (elapsedMs || 0) * 0.001
   const color = colorAt(field, clamp(intensity, 0, 1))
   const isRain = field.key === 'rain'
+  const isSea = field.key === 'sea'
 
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
+
+  // 表面略微抬升 +8 m，避免与不透明地形网格同高而难以辨认。
+  const lift = 8
+  const projectAt = (lon, lat) => project(lon, lat, sampleElevation(grid, lon, lat) + lift)
+  const rgba = (rgb, alpha) => `rgba(${rgb.join(',')},${alpha.toFixed(3)})`
 
   for (let i = 0; i < visibleCount; i++) {
     const p = particles[i]
@@ -216,27 +223,59 @@ export function drawWeatherOverlay(canvas, scene, grid, field, weather, elapsedM
       lat = wrap(p.lat + (1 - t) * 0.02 * span, bounds.south, bounds.north)
     }
 
-    const elevHere = sampleElevation(grid, lon, lat)
-    const head = project(lon, lat, elevHere + 8)
+    const head = projectAt(lon, lat)
     if (!head || ![head.x, head.y].every(Number.isFinite)) continue
     if (head.x < -30 || head.x > width + 30 || head.y < -30 || head.y > height + 30) continue
 
-    let tail
-    if (flow) {
-      const tailLon = lon - flow.kLon * span * 0.012 * p.length
-      const tailLat = lat - flow.kLat * span * 0.012 * p.length
-      tail = project(tailLon, tailLat, sampleElevation(grid, tailLon, tailLat) + 8)
-    } else {
-      tail = project(lon, wrap(lat - 0.012 * span, bounds.south, bounds.north), elevHere + 8)
-    }
-    if (!tail || ![tail.x, tail.y].every(Number.isFinite)) continue
+    const flicker = 0.72 + 0.28 * ((time * 1.7 + p.phase) % 1)
+    const alpha = (0.28 + 0.72 * intensity) * flicker
 
-    const flicker = 0.55 + 0.45 * ((time * 1.7 + p.phase) % 1)
-    const alpha = (0.2 + 0.8 * intensity) * flicker
-    ctx.strokeStyle = isRain
-      ? `rgba(190,225,255,${alpha.toFixed(3)})`
-      : `rgba(${color.join(',')},${alpha.toFixed(3)})`
-    ctx.lineWidth = isRain ? 1.2 : 1.6
+    if (isSea) {
+      // 海况：等长浪峰线，线身垂直于浪向（法线沿浪向）；整线随相位沿浪向推进。
+      const crestHalf = span * 0.014
+      const perpLon = -flow.kLat
+      const perpLat = flow.kLon
+      const a = projectAt(lon + perpLon * crestHalf, lat + perpLat * crestHalf)
+      const b = projectAt(lon - perpLon * crestHalf, lat - perpLat * crestHalf)
+      if (!a || !b || ![a.x, a.y, b.x, b.y].every(Number.isFinite)) continue
+      const grad = ctx.createLinearGradient(a.x, a.y, b.x, b.y)
+      grad.addColorStop(0, rgba(color, alpha * 0.22))
+      grad.addColorStop(0.5, rgba(color, alpha))
+      grad.addColorStop(1, rgba(color, alpha * 0.22))
+      ctx.strokeStyle = grad
+      ctx.lineWidth = 1.5
+      ctx.beginPath()
+      ctx.moveTo(a.x, a.y)
+      ctx.lineTo(b.x, b.y)
+      ctx.stroke()
+      continue
+    }
+
+    if (flow) {
+      // 风：明亮的头部 + 沿风向向后渐隐的拖尾（拖尾），整线沿风向推进。
+      const trailLen = span * (0.028 + intensity * 0.03) * p.length
+      const tailLon = lon - flow.kLon * trailLen
+      const tailLat = lat - flow.kLat * trailLen
+      const tail = projectAt(tailLon, tailLat)
+      if (!tail || ![tail.x, tail.y].every(Number.isFinite)) continue
+      const grad = ctx.createLinearGradient(tail.x, tail.y, head.x, head.y)
+      grad.addColorStop(0, rgba(color, alpha * 0.02))
+      grad.addColorStop(0.72, rgba(color, alpha * 0.48))
+      grad.addColorStop(1, rgba(color, alpha))
+      ctx.strokeStyle = grad
+      ctx.lineWidth = 1.8
+      ctx.beginPath()
+      ctx.moveTo(tail.x, tail.y)
+      ctx.lineTo(head.x, head.y)
+      ctx.stroke()
+      continue
+    }
+
+    // 雨：垂直短竖线
+    const tail = projectAt(lon, wrap(lat - 0.012 * span, bounds.south, bounds.north))
+    if (!tail || ![tail.x, tail.y].every(Number.isFinite)) continue
+    ctx.strokeStyle = rgba([190, 225, 255], alpha)
+    ctx.lineWidth = 1.2
     ctx.beginPath()
     ctx.moveTo(tail.x, tail.y)
     ctx.lineTo(head.x, head.y)

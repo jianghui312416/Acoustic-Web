@@ -42,6 +42,7 @@
       @request-globe="leaveTerrainForGlobe"
       @update:view-mode="emitViewMode"
       @update:thumbnail-collapsed="$emit('update:thumbnailCollapsed', $event)"
+      @noise="openNoiseFromStation"
     />
 
     <AcousticRunPanel v-if="viewMode === 'terrain' && terrainRunVisible" :minimized="terrainRunMinimized"
@@ -99,11 +100,13 @@
       </header>
       <SoundSpeedProfile :profile="terrainField?.soundProfile" />
     </section>
+    <AmbientNoiseProbe v-show="viewMode === 'terrain' && noiseProbeState.open && !terrainNoiseMinimized"
+      @minimize="minimizeTerrainWindow('noise')" @close="closeTerrainWindow('noise')" />
 
     <nav v-if="viewMode === 'terrain' && minimizedTerrainWindows.length" class="terrain-window-dock" aria-label="已最小化窗口">
       <div v-for="windowId in minimizedTerrainWindows" :key="windowId" class="terrain-window-dock-item">
         <button type="button" class="terrain-window-dock-restore" :title="`恢复${terrainWindowTitle(windowId)}`" @click="restoreTerrainWindow(windowId)">
-          <span>{{ windowId === 'slice' ? '◩' : '◖' }}</span>
+          <span>{{ windowId === 'slice' ? '◩' : windowId === 'profile' ? '◖' : '♫' }}</span>
           <b>{{ terrainWindowTitle(windowId) }}</b>
           <i aria-hidden="true">▴</i>
         </button>
@@ -1234,8 +1237,11 @@ import TerrainGlobeSelector from '@/components/terrain/TerrainGlobeSelector.vue'
 import AcousticRunPanel from '@/components/terrain/AcousticRunPanel.vue'
 import JobFieldPanel from '@/components/terrain/JobFieldPanel.vue'
 import SoundSpeedProfile from '@/components/terrain/SoundSpeedProfile.vue'
+import AmbientNoiseProbe from '@/components/terrain/AmbientNoiseProbe.vue'
+import { closeNoiseProbe, noiseProbeState, openNoiseProbe, setWeatherNoisePoint } from '@/modules/weather/weatherNoiseStore.js'
 import { normalizeTerrainBounds } from '@/utils/terrainPreview.js'
 import {
+  acousticSceneState,
   activeVolumeColorStops,
   volumeRenderingControls,
 } from '@/modules/acoustic/volumeRenderingControls.js'
@@ -1322,6 +1328,7 @@ const terrainSliceMinimized = ref(false)
 const terrainProfileMinimized = ref(false)
 /** 按最小化发生的先后顺序排列；恢复后移出，再次最小化时追加到队尾。 */
 const terrainWindowDockOrder = ref([])
+const terrainNoiseMinimized = ref(false)
 const terrainSource = ref({ lon: 116, lat: 16, depth: 150 })
 const terrainRadiusKm = ref(20)
 const jobLayers = shallowRef([])
@@ -1547,6 +1554,9 @@ const terrainField = computed(() => {
   if (analysisMode.value !== '3d' || !volumeData.value || !raySourceData.value || loading.value) return null
   try { return parseAnalyse3DTlrd(raySourceData.value) } catch { return null }
 })
+const hasTerrainVolume = computed(() => Boolean(terrainField.value) || terrainJobFields.value.some(
+  layer => layer.visible !== false && Boolean(layer.field)
+))
 
 function focusJobLayer(jobId) {
   const layer = jobLayers.value.find(item => item.id === jobId)
@@ -1654,13 +1664,15 @@ const terrainSliceAngleLabel = computed(() => {
   const cardinal = compass === 0 ? 'N' : compass === 90 ? 'E' : compass === 180 ? 'S' : compass === 270 ? 'W' : ''
   return `${compass}°${cardinal ? ` ${cardinal}` : ''}`
 })
-const minimizedTerrainWindows = computed(() => terrainWindowDockOrder.value.filter((id) =>
-  id === 'slice'
-    ? terrainSliceOpen.value && terrainSliceMinimized.value
-    : terrainProfileOpen.value && terrainProfileMinimized.value
-))
+const minimizedTerrainWindows = computed(() => terrainWindowDockOrder.value.filter((id) => {
+  if (id === 'slice') return terrainSliceOpen.value && terrainSliceMinimized.value
+  if (id === 'profile') return terrainProfileOpen.value && terrainProfileMinimized.value
+  return noiseProbeState.open && terrainNoiseMinimized.value
+}))
 function terrainWindowTitle(id) {
-  return id === 'slice' ? `垂直切面 · ${terrainSliceAngleLabel.value}` : '声速剖面'
+  if (id === 'slice') return `垂直切面 · ${terrainSliceAngleLabel.value}`
+  if (id === 'profile') return '声速剖面'
+  return '环境噪声'
 }
 function removeTerrainWindowFromDock(id) {
   terrainWindowDockOrder.value = terrainWindowDockOrder.value.filter((item) => item !== id)
@@ -1669,9 +1681,11 @@ function minimizeTerrainWindow(id) {
   if (id === 'slice') {
     terrainSliceOpen.value = true
     terrainSliceMinimized.value = true
-  } else {
+  } else if (id === 'profile') {
     terrainProfileOpen.value = true
     terrainProfileMinimized.value = true
+  } else {
+    terrainNoiseMinimized.value = true
   }
   // 已在任务条中的窗口重新最小化时也排到最后。
   terrainWindowDockOrder.value = [...terrainWindowDockOrder.value.filter((item) => item !== id), id]
@@ -1680,8 +1694,10 @@ function restoreTerrainWindow(id) {
   if (id === 'slice') {
     terrainSliceMinimized.value = false
     nextTick(() => terrainLossChartRef.value?.refreshLayout?.())
-  } else {
+  } else if (id === 'profile') {
     terrainProfileMinimized.value = false
+  } else {
+    terrainNoiseMinimized.value = false
   }
   removeTerrainWindowFromDock(id)
 }
@@ -1689,9 +1705,12 @@ function closeTerrainWindow(id) {
   if (id === 'slice') {
     terrainSliceOpen.value = false
     terrainSliceMinimized.value = false
-  } else {
+  } else if (id === 'profile') {
     terrainProfileOpen.value = false
     terrainProfileMinimized.value = false
+  } else {
+    closeNoiseProbe()
+    terrainNoiseMinimized.value = false
   }
   removeTerrainWindowFromDock(id)
 }
@@ -1809,6 +1828,12 @@ function runAtTerrainStation(point) {
   if (loading.value) return
   loadTerrainStationParameters(point)
   runTerrainField()
+}
+function openNoiseFromStation(point) {
+  if (point) setWeatherNoisePoint(point)
+  openNoiseProbe({ picking: false })
+  terrainNoiseMinimized.value = false
+  removeTerrainWindowFromDock('noise')
 }
 /** 分析结果窗口：计算成功后自动展开，可在右上角关闭 */
 const resultPanelOpen = ref(false)
@@ -2028,6 +2053,11 @@ const volumeData = ref(null)
  * 也保证各消费方（体解码 / 二维声场 / 剖面图）复用同一个对象引用。
  */
 const raySourceData = shallowRef(null)
+// 必须在 volumeData / raySourceData 初始化之后启动立即监听；否则 setup 阶段会
+// 访问处于暂时性死区的变量，导致整个数字地球视图无法挂载。
+watch(hasTerrainVolume, value => {
+  acousticSceneState.hasTerrainVolume = value
+}, { immediate: true })
 const texWidth = ref(0)
 const texHeight = ref(0)
 const texDepth = ref(0)

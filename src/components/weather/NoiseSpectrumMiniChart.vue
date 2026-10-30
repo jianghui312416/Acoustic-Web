@@ -1,9 +1,9 @@
 <template>
-  <svg class="noise-chart" viewBox="0 0 248 98" role="img" :aria-label="`${band.label} 环境噪声频谱曲线`">
-    <rect class="band-area" :x="bandStartX" y="8" :width="bandWidth" height="70" />
-    <g class="grid"><path d="M25 8V78H243M25 12H243M25 29H243M25 45H243M25 62H243M79 8V78M134 8V78M188 8V78" /></g>
-    <line class="band-edge" :x1="bandStartX" y1="8" :x2="bandStartX" y2="78" />
-    <line class="band-edge" :x1="bandEndX" y1="8" :x2="bandEndX" y2="78" />
+  <svg class="noise-chart" viewBox="0 0 248 128" role="img" :aria-label="`${band.label} 环境噪声频谱曲线`">
+    <rect class="band-area" :x="bandStartX" y="8" :width="bandWidth" height="100" />
+    <g class="grid"><path d="M25 8V108H243M25 24.7H243M25 41.3H243M25 58H243M25 74.7H243M25 91.3H243M79 8V108M134 8V108M188 8V108" /></g>
+    <line class="band-edge" :x1="bandStartX" y1="8" :x2="bandStartX" y2="108" />
+    <line class="band-edge" :x1="bandEndX" y1="8" :x2="bandEndX" y2="108" />
     <polyline v-if="paths.shipping" :points="paths.shipping" class="shipping" />
     <polyline v-if="paths.wind" :points="paths.wind" class="wind" />
     <polyline v-if="paths.rain" :points="paths.rain" class="rain" />
@@ -11,8 +11,8 @@
     <polyline v-if="paths.thermal" :points="paths.thermal" class="thermal" />
     <polyline v-if="paths.total" :points="paths.total" class="total" />
     <line v-if="meanLineY !== null" class="band-mean" :x1="bandStartX" :y1="meanLineY" :x2="bandEndX" :y2="meanLineY" />
-    <g class="axis y-axis"><text x="4" y="14">100</text><text x="8" y="31">80</text><text x="8" y="47">60</text><text x="8" y="64">40</text><text x="8" y="80">20</text></g>
-    <g class="axis"><text x="22" y="90">10</text><text x="72" y="90">100</text><text x="128" y="90">1k</text><text x="181" y="90">10k</text><text x="229" y="90">100k</text><text class="band-label" x="26" y="7">{{ band.label }}</text><text x="175" y="7">dB re 1 μPa²/Hz</text></g>
+    <g class="axis y-axis"><text x="22" y="8">120</text><text x="22" y="24.7">100</text><text x="22" y="41.3">80</text><text x="22" y="58">60</text><text x="22" y="74.7">40</text><text x="22" y="91.3">20</text><text x="22" y="108">0</text></g>
+    <g class="axis"><text x="22" y="120">10</text><text x="72" y="120">100</text><text x="128" y="120">1k</text><text x="181" y="120">10k</text><text x="229" y="120">100k</text><text class="band-label" x="26" y="7">{{ band.label }}</text><text x="175" y="7">dB re 1 μPa²/Hz</text></g>
   </svg>
 </template>
 
@@ -29,7 +29,7 @@ const paths = computed(() => {
   const points = (values) => {
     const source = crop(values)
     if (source.length < 2) return ''
-    return chartPoints(source, 218, 70, 20, 105).split(' ').map(pair => {
+    return chartPoints(source, 218, 100, 0, 120).split(' ').map(pair => {
       const [x, y] = pair.split(',').map(Number)
       return `${(x + 25).toFixed(1)},${(y + 8).toFixed(1)}`
     }).join(' ')
@@ -60,12 +60,12 @@ const bandWidth = computed(() => Math.max(0, bandEndX.value - bandStartX.value))
 const meanLineY = computed(() => {
   const value = Number(forecastNoiseSummary.value?.meanPsdDb)
   if (!Number.isFinite(value)) return null
-  return Math.min(78, Math.max(8, 8 + (105 - value) * 70 / 85))
+  return Math.min(108, Math.max(8, 8 + (120 - value) * 100 / 120))
 })
 </script>
 
 <style scoped>
-.noise-chart { width:100%; height:auto; display:block; border-radius:6px; background:#0b1929; }
+.noise-chart { width:100%; height:140px; display:block; border-radius:6px; background:#0b1929; }
 .band-area { fill:#2f9fc3; opacity:.12; }
 .grid path { fill:none; stroke:#21374c; stroke-width:.8; }
 .band-edge { stroke:#48b9dc; stroke-width:.65; opacity:.8; }
@@ -73,5 +73,6 @@ const meanLineY = computed(() => {
 polyline { fill:none; stroke-width:1.35; stroke-linejoin:round; vector-effect:non-scaling-stroke; }
 .shipping { stroke:#eebc58; stroke-dasharray:5 2; }.wind { stroke:#59dff5; stroke-dasharray:2 2; }.rain { stroke:#5aa8ff; stroke-dasharray:4 2; }.turbulence { stroke:#8ca0b3; stroke-dasharray:3 2; }.thermal { stroke:#b993ff; stroke-dasharray:2 2; }.total { stroke:#f5f8fb; stroke-width:2; }
 .axis { fill:#718ca0; font:7px ui-monospace,monospace; }
+.y-axis { text-anchor:end; dominant-baseline:middle; }
 .axis .band-label { fill:#76cbe4; }
 </style>

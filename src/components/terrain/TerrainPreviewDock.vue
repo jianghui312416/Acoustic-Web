@@ -13,10 +13,18 @@
     >
       <canvas ref="mapCanvas" class="thumb-canvas" aria-hidden="true"></canvas>
       <div class="thumb-shade" aria-hidden="true"></div>
-      <span class="thumb-axis thumb-axis-n">N</span>
-      <span class="thumb-axis thumb-axis-s">S</span>
-      <span class="thumb-axis thumb-axis-w">W</span>
-      <span class="thumb-axis thumb-axis-e">E</span>
+      <span
+        v-for="(tick, i) in graticuleTicks.lonTicks"
+        :key="`lon-${i}`"
+        class="thumb-grid-label thumb-grid-lon"
+        :style="tick.style"
+      >{{ tick.label }}</span>
+      <span
+        v-for="(tick, i) in graticuleTicks.latTicks"
+        :key="`lat-${i}`"
+        class="thumb-grid-label thumb-grid-lat"
+        :style="tick.style"
+      >{{ tick.label }}</span>
 
       <button
         type="button"
@@ -155,6 +163,44 @@ const loadButtonStyle = computed(() => {
     left: `${left * 100}%`,
     top: `${top * 100}%`,
   }
+})
+
+function tickLabel(value, decimals, isLon) {
+  const absolute = Math.abs(value)
+  const threshold = 0.5 / Math.pow(10, decimals)
+  if (absolute < threshold) return '0°'
+  if (isLon && Math.abs(absolute - 180) < threshold) return '180°'
+  return `${absolute.toFixed(decimals)}°${isLon ? (value >= 0 ? 'E' : 'W') : (value >= 0 ? 'N' : 'S')}`
+}
+
+const graticuleTicks = computed(() => {
+  const view = thumbView.value
+  const west = view.x0 * 360 - 180
+  const east = view.x1 * 360 - 180
+  const north = inverseMercatorY(view.y0)
+  const south = inverseMercatorY(view.y1)
+  const lonSpan = east - west
+  const latSpan = north - south
+  const lonDecimals = lonSpan >= 10 ? 0 : lonSpan >= 1 ? 1 : 2
+  const latDecimals = latSpan >= 10 ? 0 : latSpan >= 1 ? 1 : 2
+
+  const lonTicks = []
+  for (let i = 0; i < 5; i += 1) {
+    const f = i / 4
+    const lon = west + lonSpan * f
+    const transform = i === 0 ? 'translateX(4px)' : i === 4 ? 'translateX(calc(-100% - 4px))' : 'translateX(-50%)'
+    lonTicks.push({ style: { left: `${f * 100}%`, transform }, label: tickLabel(lon, lonDecimals, true) })
+  }
+
+  const latTicks = []
+  for (let i = 0; i < 4; i += 1) {
+    const f = i / 3
+    const lat = inverseMercatorY(view.y0 + (view.y1 - view.y0) * f)
+    const transform = i === 0 ? 'translateY(4px)' : i === 3 ? 'translateY(calc(-100% - 4px))' : 'translateY(-50%)'
+    latTicks.push({ style: { top: `${f * 100}%`, transform }, label: tickLabel(lat, latDecimals, false) })
+  }
+
+  return { lonTicks, latTicks }
 })
 
 function clamp01(value) {
@@ -340,27 +386,18 @@ function renderMap() {
 }
 
 function drawGraticule(ctx, width, height, view) {
-  const viewWidth = view.x1 - view.x0
-  const viewHeight = view.y1 - view.y0
-  const lonStep = viewWidth > 0.5 ? 30 : viewWidth > 0.2 ? 10 : 5
-  const latStep = viewHeight > 0.5 ? 30 : viewHeight > 0.2 ? 10 : 5
-
   ctx.save()
   ctx.strokeStyle = 'rgba(105, 196, 230, 0.18)'
   ctx.lineWidth = 1
-  for (let lon = -180 + lonStep; lon < 180; lon += lonStep) {
-    const worldX = (lon + 180) / 360
-    if (worldX < view.x0 || worldX > view.x1) continue
-    const x = ((worldX - view.x0) / viewWidth) * width
+  for (let i = 0; i < 5; i += 1) {
+    const x = (i / 4) * width
     ctx.beginPath()
     ctx.moveTo(x, 0)
     ctx.lineTo(x, height)
     ctx.stroke()
   }
-  for (let lat = -80; lat <= 80; lat += latStep) {
-    const worldY = mercatorY(lat)
-    if (worldY < view.y0 || worldY > view.y1) continue
-    const y = ((worldY - view.y0) / viewHeight) * height
+  for (let i = 0; i < 4; i += 1) {
+    const y = (i / 3) * height
     ctx.beginPath()
     ctx.moveTo(0, y)
     ctx.lineTo(width, y)
@@ -455,20 +492,21 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
-.thumb-axis {
+.thumb-grid-label {
   position: absolute;
   z-index: 2;
-  color: rgba(180, 231, 249, 0.62);
+  color: rgba(205, 235, 250, 0.9);
   font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 1px;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
   pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 10, 20, 0.9);
 }
 
-.thumb-axis-n { top: 5px; left: 50%; transform: translateX(-50%); }
-.thumb-axis-s { bottom: 5px; left: 50%; transform: translateX(-50%); }
-.thumb-axis-w { top: 50%; left: 5px; transform: translateY(-50%); }
-.thumb-axis-e { top: 50%; right: 5px; transform: translateY(-50%); }
+.thumb-grid-lon { bottom: 4px; }
+.thumb-grid-lat { left: 6px; }
 
 .thumb-locate {
   position: absolute;

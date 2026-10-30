@@ -295,6 +295,19 @@ export async function analyseForecastEnvironmentNoise(params) {
   return data
 }
 
+/** 获取一个预报整点的 3×3 区域风、雨与海况网格。 */
+export async function getRegionalWeatherForecast(params) {
+  const { response, data } = await postJson(
+    directEndpoint('GetRegionalWeatherForecast'),
+    params,
+    { timeoutMs: 180_000 }
+  )
+  if (!response.ok || !data || !data.grid || !data.data) {
+    throw directApiError('区域天气预报', response, data)
+  }
+  return data
+}
+
 /** 二维声线轨迹 (SN=19 → Analyse2DRTRD)。params 覆盖 / 补充通用缺省字段。*/
 export function analyse2dRTRD(params) {
   return callPortal(

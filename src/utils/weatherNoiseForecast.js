@@ -97,6 +97,33 @@ export function clampShippingActivity(value) {
   return Number.isFinite(activity) ? Math.min(1, Math.max(0, activity)) : 0
 }
 
+/**
+ * 以本次 AIS 船群的平均单船权重，估算“船舶数量 -> 航运活动度 s”曲线。
+ * 实际 s 同时受距离、航速和船长影响，因此这条曲线只代表当前船群条件，
+ * 并保证在 observedCount 处通过接口返回的当前 AIS 活动度。
+ */
+export function shippingActivityCountCurve(fixedAis, sampleCount = 65) {
+  const observedCount = Math.max(0, Math.round(Number(fixedAis?.modeled_vessel_count) || 0))
+  const effectiveActivity = Math.max(0, Number(fixedAis?.effective_ais_activity) || 0)
+  const activityScale = Math.max(1e-9, Number(fixedAis?.activity_scale) || 6)
+  const averageVesselWeight = observedCount ? effectiveActivity / observedCount : 0
+  const maxCount = Math.min(5000, Math.max(200, observedCount * 2))
+  const count = Math.max(2, Math.round(Number(sampleCount) || 65))
+  const activityAt = vesselCount => 1 - Math.exp(-vesselCount * averageVesselWeight / activityScale)
+  const points = Array.from({ length: count }, (_, index) => {
+    const vesselCount = maxCount * index / (count - 1)
+    return { vesselCount, shippingActivity: activityAt(vesselCount) }
+  })
+  return {
+    observedCount,
+    observedActivity: activityAt(observedCount),
+    averageVesselWeight,
+    maxCount,
+    maxActivity: activityAt(maxCount),
+    points,
+  }
+}
+
 /** Coates/Stojanovic 的 Wenz 远距离航运噪声经验谱，频率单位 Hz。 */
 export function coatesStojanovicShippingCurve(frequencies, shippingActivity) {
   const activity = clampShippingActivity(shippingActivity)
