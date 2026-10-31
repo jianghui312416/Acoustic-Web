@@ -32,6 +32,17 @@ export function createTerrainProjection(bounds, size, floor, camera = {}) {
   }
 }
 
+/** 视口中心处每屏幕像素对应的水平米数，用于绘制比例尺。 */
+export function terrainMetersPerPixel(bounds, size, camera = {}) {
+  const cosLat = Math.max(.1, Math.cos((bounds.north + bounds.south) / 2 * Math.PI / 180))
+  const spanX = (bounds.east - bounds.west) * cosLat
+  const spanY = bounds.north - bounds.south
+  const span = Math.max(spanX, spanY)
+  const horizontalSpanM = Math.max(1, span * 110574)
+  const scale = Math.min(size.width * .72, size.height * 1.2) * (camera.zoom || 1)
+  return horizontalSpanM / scale
+}
+
 function polygon(ctx, points, color) {
   ctx.beginPath()
   points.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))
@@ -264,7 +275,8 @@ export function drawTerrainScene(canvas, grid, {
     }
 
     // 顶面：只绘制一个由共享顶点连接的 TL 表面，不再堆叠独立水平圆盘。
-    const topZ = 0
+    // 信号余量场在目标最小深度取顶面；普通场仍在 0 m（海面）取顶面。
+    const topZ = Number.isFinite(field.topDepthIndex) ? clamp(field.topDepthIndex, 0, row - 1) : 0
     for (let s = 0; s < sector; s++) {
       const { a0, a1, subdivisions } = sectorGeometry(s)
       for (let subdivision = 0; subdivision < subdivisions; subdivision++) {

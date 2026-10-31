@@ -19,15 +19,15 @@
       @station-run="runAtTerrainStation" @station-parameters="loadTerrainStationParameters"
       :viewer="activeViewer"
       :initial-center="{ lon: calcParams.coordX, lat: calcParams.coordY }"
-      :field="terrainRunVisible ? terrainField : null"
-      :fields="terrainJobFields"
+      :field="terrainRunVisible ? terrainRenderField : null"
+      :fields="terrainRenderFields"
       :texture="terrainTexture"
       :source="terrainRunVisible ? terrainSource : null"
       :receiver="receiverArrayMarker"
       :radius-km="terrainRadiusKm"
-      :ray-data="dynamicRaysActivated ? staticRayData : null"
+      :ray-data="dynamicRaysActivated && !signalExcessState.enabled ? staticRayData : null"
       :ray-azimuth-deg="sliceAzimuthDeg"
-      :rays-visible="earthRaysVisible"
+      :rays-visible="earthRaysVisible && !signalExcessState.enabled"
       :direction-line-visible="verticalSliceControls.east90Indicator"
       :initial-bounds="globeSelection"
       :initial-bounds-token="globeSelectionToken"
@@ -1238,7 +1238,9 @@ import AcousticRunPanel from '@/components/terrain/AcousticRunPanel.vue'
 import JobFieldPanel from '@/components/terrain/JobFieldPanel.vue'
 import SoundSpeedProfile from '@/components/terrain/SoundSpeedProfile.vue'
 import AmbientNoiseProbe from '@/components/terrain/AmbientNoiseProbe.vue'
-import { closeNoiseProbe, noiseProbeState, openNoiseProbe, setWeatherNoisePoint } from '@/modules/weather/weatherNoiseStore.js'
+import { closeNoiseProbe, forecastNoiseSummary, noiseProbeState, openNoiseProbe, setWeatherNoisePoint } from '@/modules/weather/weatherNoiseStore.js'
+import { signalExcessState } from '@/modules/acoustic/signalExcessState.js'
+import { createSignalExcessField } from '@/utils/signalExcess.js'
 import { normalizeTerrainBounds } from '@/utils/terrainPreview.js'
 import {
   acousticSceneState,
@@ -1557,6 +1559,36 @@ const terrainField = computed(() => {
 const hasTerrainVolume = computed(() => Boolean(terrainField.value) || terrainJobFields.value.some(
   layer => layer.visible !== false && Boolean(layer.field)
 ))
+
+/** 信号余量 NL：天气与环境噪声当前选定频带的环境噪声（WENZ）总噪声级。 */
+const signalExcessNoiseLevel = computed(() => {
+  const level = Number(forecastNoiseSummary.value?.bandLevelDb)
+  return Number.isFinite(level) ? level : null
+})
+/** 打开信号余量且 NL 可用时的 SE 参数；否则返回 null（保持原场渲染）。 */
+const signalExcessParams = computed(() => {
+  const noiseLevel = signalExcessNoiseLevel.value
+  if (!signalExcessState.enabled || !Number.isFinite(noiseLevel)) return null
+  return {
+    sourceLevel: signalExcessState.sourceLevel,
+    noiseLevel,
+    detectionThreshold: signalExcessState.detectionThreshold,
+    arrayGain: signalExcessState.arrayGain,
+    minDepth: signalExcessState.minDepth,
+    maxDepth: signalExcessState.maxDepth,
+  }
+})
+/** 把单个 TL 场包成 SE 场；未启用或参数无效时原样返回。 */
+function wrapSignalExcess(field) {
+  const params = signalExcessParams.value
+  if (!params || !field) return field
+  return createSignalExcessField(field, params) || field
+}
+/** 打开信号余量时用 SE 体替换主声场体；历史/工作图层同样替换，确保当前可见的声场都变成 SE。 */
+const terrainRenderField = computed(() => wrapSignalExcess(terrainField.value))
+const terrainRenderFields = computed(() => terrainJobFields.value.map(layer => (
+  layer.field ? { ...layer, field: wrapSignalExcess(layer.field) } : layer
+)))
 
 function focusJobLayer(jobId) {
   const layer = jobLayers.value.find(item => item.id === jobId)

@@ -8,9 +8,30 @@
       <span>{{ formatTerrainBounds(loadedBounds || bounds) }}</span>
       <small>{{ status === 'loading' ? '正在读取海底高程…' : grid ? '区域海底地形 · 本地区域格网' : '等待加载区域海底地形' }}</small>
     </header>
-    <button class="compass" title="恢复正北视角" aria-label="恢复正北视角" @click="resetCamera">
-      <span>N</span><i :style="{ transform: `rotate(${-headingDeg}deg)` }">✦</i><small>{{ headingLabel }}</small>
-    </button>
+    <div class="compass-stack">
+      <button class="compass" title="恢复正北视角" aria-label="恢复正北视角" @click="resetCamera">
+        <svg class="compass-dial" viewBox="0 0 120 120" aria-hidden="true">
+          <circle cx="60" cy="60" r="56" fill="#0b1d30" stroke="#2f5a78" stroke-width="2" />
+          <circle cx="60" cy="60" r="47" fill="none" stroke="#1f4663" stroke-width="1" />
+          <g>
+            <line v-for="(tick, index) in compassTicks" :key="index"
+              :x1="tick.x1" :y1="tick.y1" :x2="tick.x2" :y2="tick.y2"
+              :stroke="tick.major ? '#cfe6f5' : tick.mid ? '#7fa9c4' : '#456b86'"
+              :stroke-width="tick.major ? 1.8 : tick.mid ? 1.1 : 0.7" />
+          </g>
+          <g :transform="`rotate(${-headingDeg} 60 60)`">
+            <polygon :points="compassRoseLong" fill="#4a7ba6" />
+            <polygon :points="compassRoseShort" fill="#2c5474" />
+            <polygon points="60,58 55,68 60,101 65,68" fill="#e0897a" />
+            <text x="60" y="19" text-anchor="middle" font-size="10" font-weight="700" fill="#f19e9e">N</text>
+          </g>
+        </svg>
+      </button>
+      <div class="compass-heading">{{ headingLabel }}</div>
+      <div v-if="scaleBar" class="scale-bar" :style="{ width: `${Math.round(scaleBar.widthPx)}px` }">
+        <span>{{ scaleBar.label }}</span>
+      </div>
+    </div>
     <div v-if="error && !grid" class="terrain-error" role="alert">
       {{ error }}<button @click="loadTerrain(bounds)">重试</button>
     </div>
@@ -18,12 +39,6 @@
     <div v-if="hover" class="depth-tooltip" :style="{ left: `${hover.x + 14}px`, top: `${hover.y - 42}px` }">
       {{ hover.lon.toFixed(4) }}° / {{ hover.lat.toFixed(4) }}°<br />
       <b>{{ hover.elevation < 0 ? '水深' : '高程' }} {{ Math.abs(hover.elevation).toFixed(0) }} m</b>
-    </div>
-    <div v-if="grid" class="terrain-readout">
-      <span>海底高程 · m <small>海面为 0，向下为负</small></span>
-      <div class="depth-gradient"></div>
-      <div class="legend-values"><b>{{ Math.round(grid.min).toLocaleString() }}</b><b>{{ Math.round(grid.max).toLocaleString() }}</b></div>
-      <small>拖动旋转 · 滚轮缩放 · 悬停查看水深</small>
     </div>
     <TerrainStationCard v-if="station" :point="station" :dataset="dataset" :time="time" :running="running"
       @close="station = null" @run="runStation" @parameters="$emit('station-parameters', $event)" @noise="$emit('noise', $event)" />
@@ -44,7 +59,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { formatTerrainBounds, normalizeTerrainBounds } from '@/utils/terrainPreview.js'
 import { loadBathymetry, acousticTerrainBounds } from '@/utils/bathymetry.js'
-import { drawTerrainScene } from '@/utils/terrainScene.js'
+import { drawTerrainScene, terrainMetersPerPixel } from '@/utils/terrainScene.js'
 import TerrainPreviewDock from './TerrainPreviewDock.vue'
 import TerrainStationCard from './TerrainStationCard.vue'
 import { pickTerrainPoint } from '@/utils/terrainPicking.js'
@@ -53,10 +68,12 @@ import { parseAnalyse2DRtrd } from '@/sdk'
 import { resolveRayFlow, sampleRayFlow } from '@/utils/rayFlow.js'
 import { rayFlowClockElapsedMs } from '@/utils/rayFlowClock.js'
 import {
-  noiseProbeState, setNoiseProbePicking,
-  setTerrainCenter, setWeatherNoisePoint, weatherNoiseState,
+  loadRegionalWeatherForecast, noiseProbeState, setNoiseProbePicking,
+  setTerrainBounds, setTerrainCenter, setWeatherNoisePoint, weatherNoiseState,
 } from '@/modules/weather/weatherNoiseStore.js'
 import { currentOverlayField, drawWeatherOverlay, weatherOverlayActive } from '@/utils/weatherOverlay.js'
+import { SIGNAL_EXCESS_COLOR_STOPS } from '@/utils/signalExcess.js'
+import { signalExcessState } from '@/modules/acoustic/signalExcessState.js'
 
 const props = defineProps({
   active: Boolean,
@@ -98,6 +115,58 @@ const visualControls = volumeRenderingControls
 const headingDeg = computed(() => ((camera.value.yaw * 180 / Math.PI) % 360 + 360) % 360)
 const headingLabel = computed(() => `${Math.round(headingDeg.value).toString().padStart(3, '0')}°`)
 
+const canvasSize = ref({ width: 0, height: 0 })
+
+const SCALE_STEPS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000]
+function formatScaleDistance(meters) {
+  return meters >= 1000 ? `${meters / 1000} km` : `${meters} m`
+}
+const scaleBar = computed(() => {
+  const bounds = grid.value?.bounds
+  const { width, height } = canvasSize.value
+  if (!bounds || !width || !height) return null
+  const metersPerPixel = terrainMetersPerPixel(bounds, { width, height }, camera.value)
+  if (!Number.isFinite(metersPerPixel) || metersPerPixel <= 0) return null
+  const targetMeters = metersPerPixel * 90
+  let meters = SCALE_STEPS[SCALE_STEPS.length - 1]
+  for (const step of SCALE_STEPS) {
+    meters = step
+    if (step >= targetMeters) break
+  }
+  return { widthPx: meters / metersPerPixel, label: formatScaleDistance(meters) }
+})
+
+function sparklePoints(cx, cy, outer, inner, offsetDeg) {
+  const points = []
+  for (let i = 0; i < 8; i++) {
+    const angle = (i * 45 + offsetDeg) * Math.PI / 180
+    const radius = i % 2 === 0 ? outer : inner
+    points.push(`${(cx + Math.sin(angle) * radius).toFixed(2)},${(cy - Math.cos(angle) * radius).toFixed(2)}`)
+  }
+  return points.join(' ')
+}
+const compassRoseLong = sparklePoints(60, 60, 40, 6, 0)
+const compassRoseShort = sparklePoints(60, 60, 26, 6, 45)
+const compassTicks = computed(() => {
+  const ticks = []
+  for (let i = 0; i < 72; i++) {
+    const angle = i * 5 * Math.PI / 180
+    const major = i % 18 === 0
+    const mid = i % 9 === 0
+    const outer = 54
+    const inner = major ? 45 : mid ? 48 : 51
+    ticks.push({
+      x1: +(60 + Math.sin(angle) * outer).toFixed(2),
+      y1: +(60 - Math.cos(angle) * outer).toFixed(2),
+      x2: +(60 + Math.sin(angle) * inner).toFixed(2),
+      y2: +(60 - Math.cos(angle) * inner).toFixed(2),
+      major,
+      mid,
+    })
+  }
+  return ticks
+})
+
 let resizeObserver = null
 let drawRaf = 0
 let rayAnimationRaf = 0
@@ -116,7 +185,6 @@ const leavingForGlobe = ref(false)
 const terrainRayFlow = shallowRef(null)
 const overlayClockStart = performance.now()
 const weatherOverlayOn = computed(() => weatherOverlayActive(weatherNoiseState))
-const weatherFrame = computed(() => weatherNoiseState.result?.frames?.[weatherNoiseState.frameIndex]?.weather || null)
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
 
@@ -126,7 +194,19 @@ function sourceBounds() {
 }
 
 function sceneControls() {
-  return { ...visualControls, colorStops: activeVolumeColorStops(visualControls.colormap) }
+  const controls = { ...visualControls, colorStops: activeVolumeColorStops(visualControls.colormap) }
+  const seActive = Boolean(props.field?.signalExcess)
+    || (props.fields || []).some(layer => layer?.field?.signalExcess)
+  if (seActive) {
+    const dbMin = Number(signalExcessState.dbMin)
+    const dbMax = Number(signalExcessState.dbMax)
+    if (Number.isFinite(dbMin) && Number.isFinite(dbMax) && dbMax > dbMin) {
+      controls.dbMin = dbMin
+      controls.dbMax = dbMax
+    }
+    controls.colorStops = SIGNAL_EXCESS_COLOR_STOPS
+  }
+  return controls
 }
 
 function draw() {
@@ -163,8 +243,12 @@ function draw() {
   }
   if (weatherOverlayOn.value && lastScene?.project) {
     const field = currentOverlayField(weatherNoiseState)
-    if (field && weatherFrame.value) {
-      drawWeatherOverlay(canvasEl.value, lastScene, grid.value, field, weatherFrame.value, performance.now() - overlayClockStart)
+    if (field && weatherNoiseState.regionalWeather) {
+      drawWeatherOverlay(
+        canvasEl.value, lastScene, grid.value, field,
+        weatherNoiseState.regionalWeather, weatherNoiseState.overlayDynamic,
+        performance.now() - overlayClockStart,
+      )
     }
   }
 }
@@ -181,7 +265,8 @@ function stopRayAnimation() {
 }
 
 function terrainAnimating() {
-  return (props.raysVisible && !!terrainRayFlow.value) || weatherOverlayOn.value
+  return (props.raysVisible && !!terrainRayFlow.value) ||
+    (weatherOverlayOn.value && weatherNoiseState.overlayDynamic)
 }
 
 function syncRayAnimation() {
@@ -362,8 +447,12 @@ function onWheel(event) {
 }
 
 onMounted(() => {
-  resizeObserver = new ResizeObserver(() => scheduleDraw())
-  if (canvasEl.value) resizeObserver.observe(canvasEl.value)
+  const updateCanvasSize = () => {
+    const rect = canvasEl.value?.getBoundingClientRect()
+    if (rect) canvasSize.value = { width: rect.width, height: rect.height }
+  }
+  resizeObserver = new ResizeObserver(() => { updateCanvasSize(); scheduleDraw() })
+  if (canvasEl.value) { updateCanvasSize(); resizeObserver.observe(canvasEl.value) }
   if (props.active && !applyInitialBounds()) locateSource()
   document.addEventListener('visibilitychange', syncRayAnimation)
   rebuildRayFlow()
@@ -396,6 +485,8 @@ watch(() => props.initialBoundsToken, () => {
 watch(bounds, (value) => {
   const next = { ...value }
   setTerrainCenter({ lon: (next.west + next.east) / 2, lat: (next.south + next.north) / 2 })
+  setTerrainBounds(next)
+  if (weatherNoiseState.terrainOverlay) loadRegionalWeatherForecast().then(() => scheduleDraw())
   emit('bounds-change', next)
 }, { immediate: true })
 watch(() => props.field, () => scheduleDraw())
@@ -422,7 +513,15 @@ watch(() => [props.source?.lon, props.source?.lat, props.source?.depth, props.ra
   else locateSource()
 })
 watch(visualControls, () => scheduleDraw(), { deep: true })
-watch(() => [weatherNoiseState.terrainOverlay, weatherNoiseState.overlayField, weatherNoiseState.frameIndex], () => {
+watch(() => [
+  weatherNoiseState.terrainOverlay,
+  weatherNoiseState.overlayField,
+  weatherNoiseState.overlayDynamic,
+  weatherNoiseState.frameIndex,
+], () => {
+  if (weatherNoiseState.terrainOverlay) {
+    loadRegionalWeatherForecast().then(() => scheduleDraw())
+  }
   scheduleDraw()
   syncRayAnimation()
 })
@@ -448,16 +547,18 @@ onBeforeUnmount(() => {
 .terrain-canvas:active { cursor: grabbing; }
 .terrain-caption { position: absolute; top: 18px; left: 22px; z-index: 6; display: grid; gap: 6px; pointer-events: none; font: 11px monospace; text-shadow: 0 1px 4px #00101d; }
 .terrain-caption small { color: #87aac8; font: 10px 'Microsoft YaHei',sans-serif; }
-.compass { position: absolute; right: 32px; top: 18px; z-index: 6; width: 78px; height: 78px; border: 1px solid #7aabc3; border-radius: 50%; color: #c4dff0; background: #112337; box-shadow: inset 0 0 0 5px #193448; cursor: pointer; }
-.compass span { position: absolute; top: 4px; left: 35px; font-size: 9px; color: #f19e9e; }.compass i { display: block; font: 62px/64px serif; transition: transform .12s ease; }.compass small { position: absolute; top: 80px; left: 16px; width: 46px; background: #102435; }
+.compass-stack { position: absolute; right: 22px; top: 14px; z-index: 6; display: flex; flex-direction: column; align-items: center; pointer-events: none; }
+.compass { width: 84px; height: 84px; padding: 0; border: 0; background: none; cursor: pointer; pointer-events: auto; }
+.compass-dial { display: block; width: 100%; height: 100%; filter: drop-shadow(0 3px 7px #00101d99); }
+.compass-heading { margin-top: -3px; padding: 2px 9px; border-radius: 5px; background: #102435dd; color: #d6ecf8; font: 600 11px ui-monospace, monospace; letter-spacing: .5px; }
+.scale-bar { margin-top: 12px; height: 7px; border-left: 1px solid #4f95d6; border-right: 1px solid #4f95d6; border-bottom: 1px solid #4f95d6; position: relative; pointer-events: none; }
+.scale-bar span { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); color: #8fbfe0; font: 9px ui-monospace, monospace; text-shadow: 0 1px 3px #00101d; white-space: nowrap; }
 .terrain-loading,.terrain-error { position: absolute; top: 40%; left: 50%; z-index: 7; transform: translate(-50%,-50%); padding: 18px; background: #0c1b2ceb; border: 1px solid #42627e; border-radius: 8px; }
 .terrain-loading i { display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: #00d5bd; animation: pulse .8s infinite alternate; }
 .terrain-error { color: #f1c38c; max-width: 400px; line-height: 1.8; }.terrain-error button { margin-left: 10px; background: #22435b; border: 1px solid #5c90b3; color: #dff6ff; cursor: pointer; }
 .depth-tooltip { position: absolute; z-index: 7; pointer-events: none; background: #071b2ee8; border: 1px solid #42748e; border-radius: 4px; padding: 7px 10px; font: 11px/1.7 monospace; }.depth-tooltip b { color: #66ebda; }
-.terrain-readout { position: absolute; right: 22px; bottom: 48px; z-index: 6; width: 225px; background: #0d2031df; border: 1px solid #46657b; border-radius: 6px; padding: 12px; display: grid; gap: 7px; font-size: 11px; pointer-events: none; }
-.terrain-readout small { font-size: 9px; color: #86a6be; }.depth-gradient { height: 7px; background: linear-gradient(90deg, rgb(12,30,65),rgb(34,108,157)); }.legend-values { display: flex; justify-content: space-between; font: 10px monospace; }
 .terrain-status { position: absolute; bottom: 0; left: 0; right: 0; z-index: 6; height: 24px; display: flex; align-items: center; gap: 8px; padding: 0 14px; box-sizing: border-box; background: #101e30; border-top: 1px solid #304256; font-size: 10px; }
 .terrain-status i { width: 6px; height: 6px; border-radius: 50%; background: #00c8b0; }.terrain-status a { margin-left: auto; color: #83a9c0; text-decoration: none; }.terrain-warn { color: #f1c38c; }
 @keyframes pulse { to { opacity: .3; } }
-@media(max-width: 900px) { .terrain-readout { width: 170px; right: 12px; } .terrain-caption { max-width: 60%; } }
+@media(max-width: 900px) { .terrain-caption { max-width: 60%; } }
 </style>

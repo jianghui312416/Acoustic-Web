@@ -81,9 +81,11 @@
         <div v-if="overlayField" class="overlay-legend">
           <div class="overlay-legend-title"><span>{{ overlayField.legendLabel }}</span><b>{{ num(overlayValue, 1) }} {{ overlayField.unit }}</b></div>
           <div class="overlay-gradient" :style="{ background: overlayGradient(overlayField) }"></div>
-          <div class="overlay-ticks"><span v-for="t in overlayField.ticks" :key="t">{{ t }}</span></div>
+          <div class="overlay-ticks"><span v-for="t in overlayTicks" :key="t">{{ tickLabel(t) }}</span></div>
         </div>
-        <p v-else class="overlay-off-hint">已关闭地形表层动态效果</p>
+        <label class="toggle-row overlay-dynamic"><span>动态显示</span><input v-model="state.overlayDynamic" type="checkbox"><i></i></label>
+        <p v-if="state.regionalWeatherLoading" class="overlay-loading">正在加载区域天气网格…</p>
+        <p v-else-if="state.regionalWeatherError" class="overlay-error">{{ state.regionalWeatherError }}</p>
       </div>
     </template>
     <div v-else-if="!state.loading && !state.error" class="status-message">请选择地图点以加载天气和噪声。</div>
@@ -99,7 +101,7 @@ import {
   setWeatherNoiseFrame, setWeatherNoisePoint, weatherNoiseBands, weatherNoiseBandTrend, weatherNoiseState,
 } from '@/modules/weather/weatherNoiseStore.js'
 import { chartPoints, directionLabel, formatForecastTime, shippingActivityCountCurve } from '@/utils/weatherNoiseForecast.js'
-import { currentOverlayField, overlayGradient } from '@/utils/weatherOverlay.js'
+import { currentOverlayField, overlayFieldDataRange, overlayGradient } from '@/utils/weatherOverlay.js'
 
 const emit = defineEmits(['pick-on-map'])
 
@@ -107,7 +109,6 @@ const overlayFieldOptions = [
   { value: 'wind', label: '风' },
   { value: 'rain', label: '雨' },
   { value: 'sea', label: '海况' },
-  { value: 'off', label: '关' },
 ]
 
 const state = weatherNoiseState
@@ -144,6 +145,23 @@ const shippingObservedY = computed(() => 34 - Math.min(
 const shippingText = computed(() => `s=${formatActivity(activeShippingActivity.value)} · ${result.value?.fixed_ais?.modeled_vessel_count || 0}艘`)
 const overlayField = computed(() => currentOverlayField(state))
 const overlayValue = computed(() => overlayField.value ? overlayField.value.valueOf(frame.value?.weather) || 0 : 0)
+const overlayRange = computed(() => overlayFieldDataRange(overlayField.value, state.regionalWeather))
+const overlayTicks = computed(() => {
+  const range = overlayRange.value
+  if (range && Number.isFinite(range.min) && Number.isFinite(range.max) && range.max >= range.min) {
+    if (range.max - range.min < 1e-9) return [range.min]
+    return [range.min, (range.min + range.max) / 2, range.max]
+  }
+  return overlayField.value?.ticks || []
+})
+const tickLabel = value => {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '—'
+  if (number === 0) return '0'
+  const abs = Math.abs(number)
+  if (Number.isInteger(number)) return number.toString()
+  return number.toFixed(abs >= 10 ? 1 : 2)
+}
 
 const coord = value => Number(value).toFixed(3)
 const num = (value, digits = 1) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : '—'
@@ -174,5 +192,5 @@ button { color:#9fd9e9; border:1px solid #2e6078; border-radius:5px; background:
 .status-message,.error-message{margin:8px 0;padding:8px;border-radius:5px;background:#12283a;line-height:1.5}.error-message{color:#efb18c;border:1px solid #674b43}.error-message button{display:block;margin-top:6px;padding:3px 9px}.forecast-head{display:flex;justify-content:space-between;gap:8px;margin-top:7px}.forecast-head b{color:#c2d9e4;font-size:9px;text-align:right}.time-slider,.shipping-level input{width:100%;height:3px;margin:9px 0 5px;accent-color:#35d5e7}.weather-spark{display:block;width:100%;height:43px}.weather-spark path{stroke:#263d50}.weather-spark polyline{fill:none}.weather-spark .trend-context{stroke:#376d82;stroke-width:1}.weather-spark .trend-active{stroke:#65def8;stroke-width:1.6}.weather-spark line{stroke:#e4c55e;stroke-width:.7}.weather-spark .trend-level{stroke:#5aa8ff;stroke-width:.65;stroke-dasharray:2 2;opacity:.75}.weather-spark circle{fill:#65def8;stroke:#dffbff;stroke-width:.7}.forecast-range{display:flex;justify-content:space-between;color:#5e7e91;font-size:8px}.weather-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:7px 0}.weather-grid article{min-width:0;padding:7px;border:1px solid #223e55;border-radius:6px;background:#102033}.weather-grid small{display:block;color:#66899d}.weather-grid strong{display:block;margin:2px 0;color:#edf8fb;font-size:17px}.weather-grid strong em{margin-left:3px;color:#a7bfcb;font-size:8px;font-style:normal}.weather-grid p{margin:0;color:#718fa1;font-size:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.noise-title{display:flex;justify-content:space-between;margin:8px 0 4px}.noise-title b{color:#d7e8ef;font-size:9px}.noise-summary{padding:7px;border:1px solid #28617b;border-radius:6px;background:#0c2537}.noise-summary div{display:flex;align-items:baseline;gap:5px}.noise-summary div strong{color:#61e4f8;font:700 21px ui-monospace,monospace}.noise-summary div span{color:#87a7b7;font-size:8px}.noise-summary small{display:block;color:#7799ab}.noise-summary p{margin:4px 0 0;color:#58cfe8}.noise-summary p b{color:#e3eef2}.component-values{display:flex;flex-wrap:wrap;gap:2px 7px;margin:5px 1px;font:8px ui-monospace,monospace}.component-values span{white-space:nowrap}.component-values .wind{color:#59dff5}.component-values .rain{color:#5aa8ff}.component-values .shipping{color:#eebc58}.component-values .turbulence{color:#8ca0b3}.component-values .thermal{color:#b993ff}.noise-band-switch{display:flex;flex-wrap:wrap;gap:4px;margin:5px 0}.noise-band-switch button{height:18px;padding:0 6px;color:#a9cad9;border-color:#35617b;background:#102b40;font-size:8px}.noise-band-switch button.active{color:#eafaff;border-color:#62ccea;background:#174966;box-shadow:inset 0 0 0 1px #2b809f}.chart-note{margin:4px 0 8px;color:#5f8194;font-size:8px}.shipping-level{display:grid;grid-template-columns:1fr auto;align-items:center;color:#7899aa}.shipping-level b{color:#59dce8}.shipping-level input{grid-column:1/-1;cursor:pointer}
 .shipping-scale{grid-column:1/-1;display:flex;justify-content:space-between;color:#58798d;font-size:8px;font-style:normal}
 .shipping-count-curve{margin:7px 0 9px;padding-top:6px;border-top:1px solid #20384b}.shipping-curve-title,.shipping-curve-range{display:flex;justify-content:space-between;gap:8px}.shipping-curve-title{color:#7899aa}.shipping-curve-title b{color:#eebc58;font-family:ui-monospace,monospace}.shipping-count-curve svg{display:block;width:100%;height:36px;margin-top:4px}.shipping-count-curve path{fill:none;stroke:#263d50;stroke-width:.7}.shipping-count-curve polyline{fill:none;stroke:#eebc58;stroke-width:1.4}.shipping-count-curve line{stroke:#65def8;stroke-width:.7;stroke-dasharray:2 2}.shipping-count-curve circle{fill:#65def8;stroke:#dffbff;stroke-width:.7}.shipping-curve-range{color:#58798d;font:8px ui-monospace,monospace}.shipping-count-curve small{display:block;margin-top:3px;color:#5f8194;font-size:8px}
-.overlay-control{margin:2px 1px 0;padding:7px;border:1px solid #2a4b63;border-radius:6px;background:#0a2030}.overlay-field-switch{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}.overlay-field-switch button{height:24px;padding:0;color:#9fd9e9;border:1px solid #2e6078;border-radius:5px;background:#102b40;font-size:10px;cursor:pointer}.overlay-field-switch button.active{color:#04121f;background:#45c6e8;border-color:#7eeaff;font-weight:600}.overlay-legend{margin-top:7px}.overlay-legend-title{display:flex;justify-content:space-between;color:#86aac2;font-size:9px}.overlay-legend-title b{color:#e3f4ff;font-family:ui-monospace,monospace}.overlay-gradient{height:7px;margin:5px 0 3px;border-radius:3px}.overlay-ticks{display:flex;justify-content:space-between;color:#6b8ba0;font:8px ui-monospace,monospace}.overlay-off-hint{margin:6px 0 0;color:#5f8194;font-size:9px}
+.overlay-control{margin:2px 1px 0;padding:7px;border:1px solid #2a4b63;border-radius:6px;background:#0a2030}.overlay-field-switch{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}.overlay-field-switch button{height:24px;padding:0;color:#9fd9e9;border:1px solid #2e6078;border-radius:5px;background:#102b40;font-size:10px;cursor:pointer}.overlay-field-switch button.active{color:#04121f;background:#45c6e8;border-color:#7eeaff;font-weight:600}.overlay-legend{margin-top:7px}.overlay-legend-title{display:flex;justify-content:space-between;color:#86aac2;font-size:9px}.overlay-legend-title b{color:#e3f4ff;font-family:ui-monospace,monospace}.overlay-gradient{height:7px;margin:5px 0 3px;border-radius:3px}.overlay-ticks{display:flex;justify-content:space-between;color:#6b8ba0;font:8px ui-monospace,monospace}.overlay-dynamic{margin:8px 0 0;padding-top:7px;border-top:1px solid #20384b}.overlay-loading{margin:7px 0 0;color:#6ba3c0;font-size:9px}.overlay-error{margin:7px 0 0;color:#efb18c;font-size:9px}
 </style>

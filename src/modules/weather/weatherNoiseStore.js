@@ -1,5 +1,5 @@
 import { computed, reactive } from 'vue'
-import { analyseForecastEnvironmentNoise, getRealtimeAis } from '@/api/soundFieldApi.js'
+import { analyseForecastEnvironmentNoise, getRealtimeAis, getRegionalWeatherForecast } from '@/api/soundFieldApi.js'
 import {
   bandNoiseMetricsDb,
   clampFrameIndex, clampShippingActivity, coatesStojanovicShippingCurve,
@@ -23,6 +23,12 @@ export const weatherNoiseState = reactive({
   hoverSampling: true,
   terrainOverlay: false,
   overlayField: 'wind',
+  overlayDynamic: false,
+  regionalWeather: null,
+  regionalWeatherLoading: false,
+  regionalWeatherError: '',
+  regionalWeatherKey: '',
+  terrainBounds: { west: 115.4, east: 116.6, south: 15.4, north: 16.6 },
   selectedBandId: DEFAULT_NOISE_BANDS[0].id,
   shippingActivity: 0.5,
   loadedPointKey: '',
@@ -150,6 +156,76 @@ export function centerWeatherNoiseToScene() {
   const center = weatherNoiseState.terrainCenter
   if (!center || !Number.isFinite(center.lon) || !Number.isFinite(center.lat)) return
   setWeatherNoisePoint({ lon: center.lon, lat: center.lat })
+}
+
+export function setTerrainBounds(bounds) {
+  const west = Number(bounds?.west)
+  const south = Number(bounds?.south)
+  const east = Number(bounds?.east)
+  const north = Number(bounds?.north)
+  if (![west, south, east, north].every(Number.isFinite)) return
+  weatherNoiseState.terrainBounds = { west, south, east, north }
+}
+
+/** 把当前预报帧的整点时间转成后端 GetRegionalWeatherForecast 所需的 ISO 8601（UTC）。 */
+function frameForecastTimeIso(frame) {
+  const text = String(frame?.time || '').trim()
+  if (!text) return null
+  if (text.endsWith('Z')) return text
+  const normalized = text.replace(' ', 'T')
+  // 后端逐小时轴形如 2025-01-04T12:00（UTC），补上时区后缀。
+  if (normalized.length >= 16) return `${normalized.slice(0, 16)}Z`
+  return null
+}
+
+/** 当前帧对应的区域预报整点（用于区域风 / 雨 / 海况覆盖层）。 */
+export const overlayForecastTimeIso = computed(() => frameForecastTimeIso(currentWeatherNoiseFrame.value))
+
+let regionalRequestGeneration = 0
+let regionalActivePromise = null
+
+/** 请求指定地形范围与当前帧整点的 3×3 区域风 / 雨 / 海况网格。 */
+export async function loadRegionalWeatherForecast(options = {}) {
+  const bounds = weatherNoiseState.terrainBounds
+  const forecastTime = overlayForecastTimeIso.value
+  if (!bounds || !forecastTime) return weatherNoiseState.regionalWeather
+  const key = `${bounds.west},${bounds.south},${bounds.east},${bounds.north}|${forecastTime}`
+  if (!options.force && weatherNoiseState.regionalWeather && weatherNoiseState.regionalWeatherKey === key) {
+    return weatherNoiseState.regionalWeather
+  }
+  if (!options.force && regionalActivePromise) return regionalActivePromise
+
+  const generation = ++regionalRequestGeneration
+  weatherNoiseState.regionalWeatherLoading = true
+  weatherNoiseState.regionalWeatherError = ''
+  regionalActivePromise = (async () => {
+    try {
+      const result = await getRegionalWeatherForecast({
+        bottomLeftX: bounds.west,
+        bottomLeftY: bounds.south,
+        topRightX: bounds.east,
+        topRightY: bounds.north,
+        forecastTime,
+      })
+      if (generation !== regionalRequestGeneration) return null
+      weatherNoiseState.regionalWeather = result
+      weatherNoiseState.regionalWeatherKey = key
+      return result
+    } catch (error) {
+      if (generation === regionalRequestGeneration) {
+        weatherNoiseState.regionalWeatherError = '请求失败'
+      }
+      // 侧边栏只提示「请求失败」，具体错误保留在网络面板与控制台查看。
+      console.error('[区域天气覆盖层] 请求失败：', error)
+      return null
+    } finally {
+      if (generation === regionalRequestGeneration) {
+        weatherNoiseState.regionalWeatherLoading = false
+        regionalActivePromise = null
+      }
+    }
+  })()
+  return regionalActivePromise
 }
 
 export function openNoiseProbe(options = {}) {

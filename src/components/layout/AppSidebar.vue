@@ -175,6 +175,7 @@
               <div class="stepper"><button type="button" @click="stepDb('dbMin', -1)">−</button><input v-model.number="visualControls.dbMin" type="number" min="0" max="199" @change="normalizeControls" /><em>dB</em><button type="button" @click="stepDb('dbMin', 1)">＋</button></div>
               <div class="stepper"><button type="button" @click="stepDb('dbMax', -1)">−</button><input v-model.number="visualControls.dbMax" type="number" min="1" max="200" @change="normalizeControls" /><em>dB</em><button type="button" @click="stepDb('dbMax', 1)">＋</button></div>
             </div>
+            <div class="color-scale-bar" :style="{ background: volumeColorGradient }"></div>
 
             <details class="feature-fold">
               <summary><span>▣ 方向</span><small>旋转</small></summary>
@@ -200,7 +201,7 @@
             </template>
             <template v-else>
               <div class="feature-unavailable"><span aria-hidden="true">📦</span><b>未加载卷</b></div>
-              <p class="feature-unavailable-hint">进入地形模式并使用模拟或上传面板加载三维声场体。</p>
+              <p class="feature-unavailable-hint">进入地形模式并加载三维声场体</p>
             </template>
           </div>
 
@@ -256,6 +257,7 @@
               <div class="stepper"><button type="button" @click="stepSliceDb('dbMin', -1)">−</button><input v-model.number="sliceControls.dbMin" type="number" min="0" max="199" @change="normalizeSliceControls" /><em>dB</em><button type="button" @click="stepSliceDb('dbMin', 1)">＋</button></div>
               <div class="stepper"><button type="button" @click="stepSliceDb('dbMax', -1)">−</button><input v-model.number="sliceControls.dbMax" type="number" min="1" max="200" @change="normalizeSliceControls" /><em>dB</em><button type="button" @click="stepSliceDb('dbMax', 1)">＋</button></div>
             </div>
+            <div class="color-scale-bar" :style="{ background: sliceColorGradient }"></div>
             <p class="feature-section-title">显示</p>
             <label class="feature-switch">
               <input v-model="sliceControls.seafloorLineAndMask" type="checkbox" />
@@ -285,9 +287,33 @@
             </template>
             <template v-else>
               <div class="feature-unavailable disabled"><span aria-hidden="true">📦</span><b>切片功能已禁用</b></div>
-              <p class="feature-unavailable-hint">请先进入地形模式并显示三维声场体。</p>
+              <p class="feature-unavailable-hint">请先进入地形模式并显示三维声场体</p>
             </template>
           </div>
+        </section>
+
+        <section class="module-group signal-excess-module" :class="{ active: signalExcessOpen }">
+          <button
+            type="button"
+            class="module-entry"
+            :class="{ active: signalExcessOpen }"
+            title="信号余量"
+            aria-label="信号余量"
+            @click="signalExcessOpen = !signalExcessOpen"
+          >
+            <span class="module-icon signal-excess-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M3 16a9 9 0 0 1 18 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+                <path d="M7 16a5 5 0 0 1 10 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+                <circle cx="12" cy="16" r="1.3" fill="currentColor" />
+                <path d="M4 20h16" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+              </svg>
+            </span>
+            <span class="module-label">信号余量</span>
+            <span class="module-chevron" :class="{ open: signalExcessOpen }" aria-hidden="true">›</span>
+          </button>
+          <SignalExcessPanel v-if="signalExcessOpen && volumeControlsAvailable" />
+          <p v-else-if="signalExcessOpen" class="module-mode-hint">进入地形模式并运行声场——声场体成为接收器。</p>
         </section>
 
         <section class="module-group weather-noise-module" :class="{ active: weatherNoiseOpen }">
@@ -297,7 +323,7 @@
             <span class="module-chevron" :class="{ open: weatherNoiseOpen }" aria-hidden="true">›</span>
           </button>
           <WeatherNoiseSidebar v-if="weatherNoiseOpen && viewMode === 'terrain'" @pick-on-map="$emit('select-view-mode', 'terrain')" />
-          <p v-else-if="weatherNoiseOpen" class="module-mode-hint">进入地形模式（M）加载场景的预报。</p>
+          <p v-else-if="weatherNoiseOpen" class="module-mode-hint">进入地形模式加载场景预报。</p>
         </section>
       </nav>
     </div>
@@ -316,9 +342,11 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   VOLUME_COLORMAPS,
   acousticSceneState,
+  activeVolumeColorStops,
   clampVolumeRenderingControls,
   volumeRenderingControls,
 } from '@/modules/acoustic/volumeRenderingControls.js'
+import { VOLUME_TL_COLOR_STOPS } from '@/sdk/tlColor.js'
 import {
   clampVerticalSliceControls,
   verticalSliceControls,
@@ -326,6 +354,7 @@ import {
 import { deleteAcousticJob } from '@/api/jobWorkspaceApi.js'
 import { jobWorkspace, refreshJobWorkspace, requestCloseJob, requestOpenJob } from '@/modules/acoustic/jobWorkspace.js'
 import WeatherNoiseSidebar from '@/components/weather/WeatherNoiseSidebar.vue'
+import SignalExcessPanel from '@/components/acoustic/SignalExcessPanel.vue'
 
 const props = defineProps({
   collapsed: { type: Boolean, default: false },
@@ -346,12 +375,18 @@ const deletingJobId = ref('')
 const terrainControlsOpen = ref(false)
 const weatherNoiseOpen = ref(false)
 const sliceControlsOpen = ref(false)
+const signalExcessOpen = ref(false)
 // 刷新后侧边栏全部收起：不根据当前模块预展开任何下拉。
 const expandedModuleIds = ref(new Set())
 const visualControls = volumeRenderingControls
 const sliceControls = verticalSliceControls
 const volumeColormaps = VOLUME_COLORMAPS
 const volumeControlsAvailable = computed(() => props.viewMode === 'terrain' && acousticSceneState.hasTerrainVolume)
+function stopsToGradient(stops) {
+  return `linear-gradient(90deg, ${(stops || []).map(([t, rgb]) => `rgb(${rgb.join(',')}) ${(Number(t) * 100).toFixed(1)}%`).join(', ')})`
+}
+const volumeColorGradient = computed(() => stopsToGradient(activeVolumeColorStops(visualControls.colormap)))
+const sliceColorGradient = computed(() => stopsToGradient(VOLUME_TL_COLOR_STOPS))
 const rotationAxes = Object.freeze([
   { key: 'rotationX', label: 'X' },
   { key: 'rotationY', label: 'Y' },
@@ -830,6 +865,7 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
 .module-chevron.open { transform: rotate(90deg); color: #67e1ff; }
 .terrain-module-icon { color: #80cdb9; }
 .slice-module-icon { color: #7f9fe8; }
+.signal-excess-icon { color: #5ad7ea; }
 .feature-controls { margin: 5px 0 3px; padding: 9px 10px 11px; border: 1px solid #20384c; border-radius: 7px; background: #101f30; box-shadow: inset 0 1px #223b50; }
 .feature-controls, .feature-controls * { box-sizing: border-box; }
 .feature-unavailable { min-height: 45px; display: flex; align-items: center; gap: 8px; padding: 0 11px; color: #a9c5d3; border: 1px solid #29465d; border-radius: 6px; background: #182b40; font-size: 10px; }
@@ -858,6 +894,7 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
 .volume-state { min-height: 29px; display: flex; align-items: center; gap: 8px; padding: 0 9px; color: #98bacb; font: 9px ui-monospace, monospace; border: 1px solid #28536a; border-radius: 5px; background: #153346; }
 .volume-cube { color: #dc807f; font-size: 11px; }
 .db-control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 8px; color: #7f9eaf; font-size: 9px; }
+.color-scale-bar { height: 7px; margin: 6px 0 2px; border-radius: 3px; border: 1px solid #274257; }
 .stepper { min-width: 0; height: 27px; display: grid; grid-template-columns: 26px minmax(0, 1fr) auto 26px; align-items: center; border: 1px solid #2b4960; border-radius: 4px; overflow: hidden; background: #172b40; }
 .stepper button { height: 100%; padding: 0; color: #75bee0; border: 0; background: #203d57; cursor: pointer; }
 .stepper input { min-width: 0; width: 100%; height: 100%; padding: 0 2px; color: #d5ebf3; text-align: center; border: 0; background: transparent; outline: 0; font: 10px ui-monospace, monospace; appearance: textfield; }
