@@ -1,4 +1,5 @@
 import { sampleRayFlow } from '../utils/rayFlow.js'
+import { rayFlowClockElapsedMs } from '../utils/rayFlowClock.js'
 import { clipRayPathsByProfile } from './ncFieldModel.js'
 
 /** Reuse a polyline pool so animation never removes/recreates hundreds of map features. */
@@ -8,14 +9,13 @@ export function createCurtainRayFlow({ viewer, flow, geometry, project, visible 
   const pool = []
   let raf = 0
   let lastTime = 0
-  let elapsed = 0
   let suspended = false
   let destroyed = false
   collection.show = visible
 
   function draw() {
     let used = 0
-    for (const trail of sampleRayFlow(flow, elapsed)) {
+    for (const trail of sampleRayFlow(flow, rayFlowClockElapsedMs())) {
       for (let i = 1; i < trail.length; i++) {
         const alpha = (trail[i - 1].alpha + trail[i].alpha) * 0.48
         if (alpha < 0.015) continue
@@ -50,7 +50,6 @@ export function createCurtainRayFlow({ viewer, flow, geometry, project, visible 
     const tick = now => {
       if (destroyed || viewer.isDestroyed?.()) return
       if (!lastTime || now - lastTime >= 32) {
-        if (lastTime) elapsed += now - lastTime
         lastTime = now
         draw()
       }

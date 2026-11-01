@@ -4,10 +4,7 @@
       aria-label="区域海底地形，拖动旋转，滚轮缩放，悬停查看深度"
       @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp"
       @pointercancel="onPointerUp" @pointerleave="onPointerLeave" @wheel.prevent="onWheel"></canvas>
-    <header class="terrain-caption">
-      <span>{{ formatTerrainBounds(loadedBounds || bounds) }}</span>
-      <small>{{ status === 'loading' ? '正在读取海底高程…' : grid ? '区域海底地形 · 本地区域格网' : '等待加载区域海底地形' }}</small>
-    </header>
+    <canvas ref="rayCanvasEl" class="ray-canvas" aria-hidden="true"></canvas>
     <div class="compass-stack">
       <button class="compass" title="恢复正北视角" aria-label="恢复正北视角" @click="resetCamera">
         <svg class="compass-dial" viewBox="0 0 120 120" aria-hidden="true">
@@ -41,7 +38,7 @@
       <b>{{ hover.elevation < 0 ? '水深' : '高程' }} {{ Math.abs(hover.elevation).toFixed(0) }} m</b>
     </div>
     <TerrainStationCard v-if="station" :point="station" :dataset="dataset" :time="time" :running="running"
-      @close="station = null" @run="runStation" @parameters="$emit('station-parameters', $event)" @noise="$emit('noise', $event)" />
+      @close="station = null" @run="runStation" @parameters="openStationParameters" @noise="$emit('noise', $event)" />
     <slot :anchor="anchor" />
     <TerrainPreviewDock v-model:bounds="bounds" :collapsed="thumbnailCollapsed" :loading="status === 'loading'"
       @update:collapsed="$emit('update:thumbnailCollapsed', $event)" @load="loadTerrain" @locate="locateSource" />
@@ -57,7 +54,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
-import { formatTerrainBounds, normalizeTerrainBounds } from '@/utils/terrainPreview.js'
+import { normalizeTerrainBounds } from '@/utils/terrainPreview.js'
 import { loadBathymetry, acousticTerrainBounds } from '@/utils/bathymetry.js'
 import { drawTerrainScene, terrainMetersPerPixel } from '@/utils/terrainScene.js'
 import TerrainPreviewDock from './TerrainPreviewDock.vue'
@@ -65,7 +62,7 @@ import TerrainStationCard from './TerrainStationCard.vue'
 import { pickTerrainPoint } from '@/utils/terrainPicking.js'
 import { activeVolumeColorStops, volumeRenderingControls } from '@/modules/acoustic/volumeRenderingControls.js'
 import { parseAnalyse2DRtrd } from '@/sdk'
-import { resolveRayFlow, sampleRayFlow } from '@/utils/rayFlow.js'
+import { resolveRayFlow, sampleRayMotion } from '@/utils/rayFlow.js'
 import { rayFlowClockElapsedMs } from '@/utils/rayFlowClock.js'
 import {
   loadRegionalWeatherForecast, noiseProbeState, setNoiseProbePicking,
@@ -87,21 +84,37 @@ const props = defineProps({
   texture: { type: Object, default: null },
   source: Object,
   receiver: Object,
-  radiusKm: { type: Number, default: 20 },
+  radiusKm: { type: Number, default: 100 / 6 },
   rayData: { type: Object, default: null },
   rayAzimuthDeg: { type: Number, default: 0 },
   raysVisible: { type: Boolean, default: true },
+  /** 静态声线：绘制完整声线路径，不播放行进动画 */
+  raysStatic: { type: Boolean, default: false },
   directionLineVisible: { type: Boolean, default: false },
   /** 全球视图红框选中的区域；token 变化时才重新加载，避免覆盖运行后的声源取景。 */
   initialBounds: { type: Object, default: null },
   initialBoundsToken: { type: Number, default: 0 },
   thumbnailCollapsed: { type: Boolean, default: false },
+  /** 参数卡片打开期间暂时隐藏站点卡片，关闭后恢复。 */
+  stationParametersOpen: { type: Boolean, default: false },
 })
 const emit = defineEmits(['anchor', 'layer-anchors', 'bounds-change', 'request-globe', 'station-run', 'station-parameters', 'noise', 'update:thumbnailCollapsed'])
 const station = ref(null)
+let suspendedStation = null
 function runStation(point) { emit('station-run', point); station.value = null }
+function openStationParameters(point) {
+  suspendedStation = station.value ? { ...station.value } : { ...point }
+  emit('station-parameters', point)
+  station.value = null
+}
+watch(() => props.stationParametersOpen, (open, previous) => {
+  if (open || !previous || !suspendedStation) return
+  if (!station.value) station.value = suspendedStation
+  suspendedStation = null
+})
 
 const canvasEl = ref(null)
+const rayCanvasEl = ref(null)
 const bounds = ref(normalizeTerrainBounds({ west: 115.4, east: 116.6, south: 15.4, north: 16.6 }))
 const loadedBounds = ref(null)
 const grid = shallowRef(null)
@@ -188,9 +201,13 @@ const weatherOverlayOn = computed(() => weatherOverlayActive(weatherNoiseState))
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
 
+/** 首次加载地形时固定使用 100 km × 100 km，避免直接运行时被传播距离提前改写。 */
+const DEFAULT_TERRAIN_SPAN_KM = 100
+
 function sourceBounds() {
   const center = props.source || props.initialCenter || { lon: 116, lat: 16 }
-  return acousticTerrainBounds(center, props.radiusKm)
+  const radiusKm = grid.value ? props.radiusKm : DEFAULT_TERRAIN_SPAN_KM / 6
+  return acousticTerrainBounds(center, radiusKm)
 }
 
 function sceneControls() {
@@ -219,12 +236,7 @@ function draw() {
     receiver: props.receiver,
     camera: camera.value,
     controls: sceneControls(),
-    rayScene: props.raysVisible && terrainRayFlow.value
-      ? {
-          azimuthDeg: props.rayAzimuthDeg,
-          trails: sampleRayFlow(terrainRayFlow.value, rayFlowClockElapsedMs()),
-        }
-      : null,
+    rayScene: null,
     directionLine: {
       visible: props.directionLineVisible,
       azimuthDeg: props.rayAzimuthDeg,
@@ -251,6 +263,117 @@ function draw() {
       )
     }
   }
+  drawRays()
+}
+
+function drawRays() {
+  if (!rayCanvasEl.value || !props.active) return
+  const canvas = rayCanvasEl.value
+  const rect = canvas.getBoundingClientRect()
+  const width = rect.width
+  const height = rect.height
+  if (!width || !height) return
+  const dpr = Math.min(2, globalThis.devicePixelRatio || 1)
+  if (canvas.width !== Math.round(width * dpr)) canvas.width = Math.round(width * dpr)
+  if (canvas.height !== Math.round(height * dpr)) canvas.height = Math.round(height * dpr)
+  const ctx = canvas.getContext('2d')
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, width, height)
+  const projector = lastScene?.projectPolar
+  if (!props.raysVisible || !terrainRayFlow.value || typeof projector !== 'function') return
+
+  const rayAngle = (Number(props.rayAzimuthDeg) || 0) * Math.PI / 180
+
+  ctx.save()
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+
+  const project = (point) => {
+    const p = projector(rayAngle, Number(point?.[0]) || 0, Number(point?.[1]) || 0)
+    return p && Number.isFinite(p.x) && Number.isFinite(p.y) ? p : null
+  }
+  const projectList = (points) => points.map(project).filter(Boolean)
+  const stroke = (pts) => {
+    ctx.beginPath()
+    pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))
+    ctx.stroke()
+  }
+
+  if (props.raysStatic) {
+    for (const track of terrainRayFlow.value.tracks ?? []) {
+      const pts = projectList(track.points)
+      if (pts.length < 2) continue
+      ctx.strokeStyle = 'rgba(235,248,255,0.72)'
+      ctx.lineWidth = 1.3
+      stroke(pts)
+    }
+    ctx.restore()
+    return
+  }
+
+  const motions = sampleRayMotion(terrainRayFlow.value, rayFlowClockElapsedMs())
+  if (!motions.length) {
+    ctx.restore()
+    return
+  }
+
+  for (const motion of motions) {
+    // 1) 淡显完整已走路径（保留已走过的声线）。
+    if (Array.isArray(motion.path) && motion.path.length > 1) {
+      const pts = projectList(motion.path)
+      if (pts.length > 1) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.22)'
+        ctx.lineWidth = 1.2
+        stroke(pts)
+      }
+    }
+    // 2) 头部多层拖尾（无发光，仅分层，与「拖尾发光 0%」一致）。
+    const tail = motion.tail
+    if (Array.isArray(tail) && tail.length > 1) {
+      const tailPoints = tail.map(n => n.point)
+      const layers = [
+        { width: 2, alpha: 0.12, frac: 1.0 },
+        { width: 1, alpha: 0.42, frac: 0.55 },
+        { width: 1.65, alpha: 0.96, frac: 0.23 },
+      ]
+      for (const layer of layers) {
+        const startIdx = Math.max(0, tailPoints.length - 1 - Math.round((tailPoints.length - 1) * layer.frac))
+        const sub = tailPoints.slice(startIdx)
+        if (sub.length < 2) continue
+        const pts = projectList(sub)
+        if (pts.length < 2) continue
+        const tailP = pts[0]
+        const headP = pts[pts.length - 1]
+        const gradient = ctx.createLinearGradient(tailP.x, tailP.y, headP.x, headP.y)
+        gradient.addColorStop(0, 'rgba(255,255,255,0)')
+        gradient.addColorStop(1, `rgba(255,255,255,${layer.alpha.toFixed(3)})`)
+        ctx.strokeStyle = gradient
+        ctx.lineWidth = layer.width
+        stroke(pts)
+      }
+    }
+    // 3) 传播前沿头点。
+    const head = motion.head
+    if (head) {
+      const hp = project(head)
+      if (hp) {
+        const radius = 3
+        const radial = ctx.createRadialGradient(hp.x, hp.y, 0, hp.x, hp.y, radius * 5)
+        radial.addColorStop(0, 'rgba(255,255,255,0.9)')
+        radial.addColorStop(0.28, 'rgba(200,240,255,0.5)')
+        radial.addColorStop(1, 'rgba(200,240,255,0)')
+        ctx.fillStyle = radial
+        ctx.beginPath()
+        ctx.arc(hp.x, hp.y, radius * 5, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.fillStyle = 'rgba(255,255,255,0.96)'
+        ctx.beginPath()
+        ctx.arc(hp.x, hp.y, Math.max(1.3, radius * 0.4), 0, Math.PI * 2)
+        ctx.fill()
+      }
+    }
+  }
+  ctx.restore()
 }
 
 function scheduleDraw() {
@@ -264,9 +387,14 @@ function stopRayAnimation() {
   rayAnimationLastAt = 0
 }
 
+function raysAnimating() {
+  return props.raysVisible && !!terrainRayFlow.value && !props.raysStatic
+}
+function weatherDynamic() {
+  return weatherOverlayOn.value && weatherNoiseState.overlayDynamic
+}
 function terrainAnimating() {
-  return (props.raysVisible && !!terrainRayFlow.value) ||
-    (weatherOverlayOn.value && weatherNoiseState.overlayDynamic)
+  return raysAnimating() || weatherDynamic()
 }
 
 function syncRayAnimation() {
@@ -276,13 +404,20 @@ function syncRayAnimation() {
     return
   }
   const tick = (now) => {
-    if (!props.active || !terrainAnimating() || disposed) {
+    if (!props.active || disposed) {
       stopRayAnimation()
       return
     }
-    if (!rayAnimationLastAt || now - rayAnimationLastAt >= 32) {
+    const rayOn = raysAnimating()
+    const weatherOn = weatherDynamic()
+    if (!rayOn && !weatherOn) {
+      stopRayAnimation()
+      return
+    }
+    if (!rayAnimationLastAt || now - rayAnimationLastAt >= 16) {
       rayAnimationLastAt = now
-      scheduleDraw()
+      if (rayOn) drawRays()
+      if (weatherOn) scheduleDraw()
     }
     rayAnimationRaf = requestAnimationFrame(tick)
   }
@@ -493,7 +628,7 @@ watch(() => props.field, () => scheduleDraw())
 watch(() => props.receiver, () => scheduleDraw(), { deep: true })
 watch(() => props.fields, () => scheduleDraw(), { deep: true })
 watch(() => props.rayData, rebuildRayFlow)
-watch(() => [props.rayAzimuthDeg, props.raysVisible, props.directionLineVisible], () => {
+watch(() => [props.rayAzimuthDeg, props.raysVisible, props.raysStatic, props.directionLineVisible], () => {
   scheduleDraw()
   syncRayAnimation()
 })
@@ -545,8 +680,7 @@ onBeforeUnmount(() => {
 .terrain-preview-mode { position: absolute; inset: 0; z-index: 8; overflow: hidden; color: #b8d6ec; background: radial-gradient(ellipse at 20% 0%, #244777, transparent 80%), linear-gradient(140deg,#162a4d 15%,#4b617d 65%,#9399a3); font: 12px 'Microsoft YaHei', sans-serif; }
 .terrain-canvas { position: absolute; inset: 0 0 25px; z-index: 0; width: 100%; height: calc(100% - 25px); display: block; cursor: grab; touch-action: none; }
 .terrain-canvas:active { cursor: grabbing; }
-.terrain-caption { position: absolute; top: 18px; left: 22px; z-index: 6; display: grid; gap: 6px; pointer-events: none; font: 11px monospace; text-shadow: 0 1px 4px #00101d; }
-.terrain-caption small { color: #87aac8; font: 10px 'Microsoft YaHei',sans-serif; }
+.ray-canvas { position: absolute; inset: 0 0 25px; z-index: 1; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
 .compass-stack { position: absolute; right: 22px; top: 14px; z-index: 6; display: flex; flex-direction: column; align-items: center; pointer-events: none; }
 .compass { width: 84px; height: 84px; padding: 0; border: 0; background: none; cursor: pointer; pointer-events: auto; }
 .compass-dial { display: block; width: 100%; height: 100%; filter: drop-shadow(0 3px 7px #00101d99); }
@@ -560,5 +694,4 @@ onBeforeUnmount(() => {
 .terrain-status { position: absolute; bottom: 0; left: 0; right: 0; z-index: 6; height: 24px; display: flex; align-items: center; gap: 8px; padding: 0 14px; box-sizing: border-box; background: #101e30; border-top: 1px solid #304256; font-size: 10px; }
 .terrain-status i { width: 6px; height: 6px; border-radius: 50%; background: #00c8b0; }.terrain-status a { margin-left: auto; color: #83a9c0; text-decoration: none; }.terrain-warn { color: #f1c38c; }
 @keyframes pulse { to { opacity: .3; } }
-@media(max-width: 900px) { .terrain-caption { max-width: 60%; } }
 </style>

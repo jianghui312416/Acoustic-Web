@@ -41,7 +41,7 @@
     <div v-show="open" class="rp-body">
       <div class="rp-chart-wrap" :class="{ 'is-placing-receiver': receiverPlacementEnabled }" :style="{ height }">
         <div ref="chartEl" class="rp-chart"></div>
-        <RayFlowOverlay ref="rayOverlay" :flow="rayFlow" :geometry="rayGeometry" :viewport="rayViewport" :playing="raysPlaying" :visible="raysVisible" show-time />
+        <RayFlowOverlay ref="rayOverlay" :flow="rayFlow" :geometry="rayGeometry" :viewport="rayViewport" :playing="raysPlaying" :visible="raysVisible" :static-mode="staticRays && !animated" show-time />
         <button
           v-if="zoomedIn"
           type="button"
@@ -98,6 +98,8 @@ const props = defineProps({
   /** 当前方位的真实声线；无声线时不从 TL 场编造波前。 */
   rayData: { type: Object, default: null },
   animated: { type: Boolean, default: true },
+  /** 静态声线开关：动态关闭时仍绘制完整声线路径 */
+  staticRays: { type: Boolean, default: false },
   /** 数据源类型：'tlrd' */
   sourceId: { type: String, default: 'tlrd' },
   /** 当前方位角（度，0 = 正东，逆时针为正），支持 v-model:azimuth-deg */
@@ -157,7 +159,7 @@ const rayOverlay = ref(null)
 const raysVisible = ref(true)
 const raysPlaying = ref(true)
 const rayFlow = computed(() => {
-  if (!props.animated || !props.rayData) return null
+  if (!props.rayData || (!props.animated && !props.staticRays)) return null
   const paths = parseAnalyse2DRtrd(props.rayData)?.rays ?? []
   return resolveRayFlow(props.rayData, paths)
 })

@@ -129,6 +129,7 @@ export function drawTerrainScene(canvas, grid, {
   drawTerrainAxes(ctx, project, b, grid)
 
   let anchor = null
+  let rayProjector = null
   const anchors = {}
   const fieldLayers = [
     ...(field && source ? [{ id: 'current', field, source, visible: controls.volumeVisible !== false, primary: true }] : []),
@@ -190,6 +191,7 @@ export function drawTerrainScene(canvas, grid, {
       const lat = source.lat + local.y / 110574
       return project(lon, lat, local.z)
     }
+    if (fieldLayer.primary) rayProjector = projectPolar
 
     const axisNodes = (count, step) => {
       const nodes = []
@@ -388,28 +390,81 @@ export function drawTerrainScene(canvas, grid, {
       }
       ctx.restore()
     }
-    if (fieldLayer.primary && Array.isArray(rayScene?.trails) && rayScene.trails.length) {
+    if (fieldLayer.primary && Array.isArray(rayScene?.motions) && rayScene.motions.length) {
       const rayAngle = (Number(rayScene.azimuthDeg) || 0) * Math.PI / 180
       ctx.save()
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
-      for (const trail of rayScene.trails) {
-        if (!Array.isArray(trail) || trail.length < 2) continue
-        for (let i = 1; i < trail.length; i++) {
-          const a = trail[i - 1]
-          const z = trail[i]
-          const from = projectPolar(rayAngle, Number(a?.point?.[0]) || 0, Number(a?.point?.[1]) || 0)
-          const to = projectPolar(rayAngle, Number(z?.point?.[0]) || 0, Number(z?.point?.[1]) || 0)
-          if (![from.x, from.y, to.x, to.y].every(Number.isFinite)) continue
-          const gradient = ctx.createLinearGradient(from.x, from.y, to.x, to.y)
-          gradient.addColorStop(0, `rgba(255,92,142,${Math.max(0.08, Number(a.alpha) || 0) * .78})`)
-          gradient.addColorStop(1, `rgba(255,244,250,${Math.max(0.12, Number(z.alpha) || 0) * .98})`)
-          ctx.strokeStyle = gradient
-          ctx.lineWidth = 1.7
-          ctx.beginPath()
-          ctx.moveTo(from.x, from.y)
-          ctx.lineTo(to.x, to.y)
-          ctx.stroke()
+      const projectPoints = (points) => {
+        const out = []
+        for (const p of points) {
+          const pt = projectPolar(rayAngle, Number(p?.[0]) || 0, Number(p?.[1]) || 0)
+          if (pt && Number.isFinite(pt.x) && Number.isFinite(pt.y)) out.push(pt)
+        }
+        return out
+      }
+      const strokePath = (pts) => {
+        ctx.beginPath()
+        pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))
+        ctx.stroke()
+      }
+      const layers = [
+        { width: 6, factor: 0.13, blur: 9 },
+        { width: 2.8, factor: 0.45, blur: 5 },
+        { width: 1.3, factor: 0.95, blur: 0 },
+      ]
+      for (const motion of rayScene.motions) {
+        const path = motion?.path
+        const tail = motion?.tail
+        const head = motion?.head
+        // 1) 淡显完整已走路径（生长轨迹）。
+        if (Array.isArray(path) && path.length > 1) {
+          const pts = projectPoints(path)
+          if (pts.length > 1) {
+            ctx.strokeStyle = 'rgba(255,255,255,0.18)'
+            ctx.lineWidth = 1.2
+            strokePath(pts)
+          }
+        }
+        // 2) 头部三层光晕拖尾。
+        if (Array.isArray(tail) && tail.length > 1) {
+          const pts = tail.map(n => projectPolar(rayAngle, Number(n?.point?.[0]) || 0, Number(n?.point?.[1]) || 0))
+            .filter(p => p && Number.isFinite(p.x) && Number.isFinite(p.y))
+          if (pts.length > 1) {
+            const tailPoint = pts[0]
+            const headPoint = pts[pts.length - 1]
+            for (const layer of layers) {
+              const gradient = ctx.createLinearGradient(tailPoint.x, tailPoint.y, headPoint.x, headPoint.y)
+              gradient.addColorStop(0, 'rgba(255,255,255,0)')
+              gradient.addColorStop(0.62, `rgba(255,255,255,${(layer.factor * 0.5).toFixed(3)})`)
+              gradient.addColorStop(1, `rgba(255,255,255,${layer.factor.toFixed(3)})`)
+              ctx.strokeStyle = gradient
+              ctx.lineWidth = layer.width
+              ctx.shadowColor = 'rgba(200,240,255,0.85)'
+              ctx.shadowBlur = layer.blur
+              strokePath(pts)
+            }
+            ctx.shadowBlur = 0
+          }
+        }
+        // 3) 发光头点：径向光斑 + 白色核心。
+        if (head) {
+          const hp = projectPolar(rayAngle, Number(head?.[0]) || 0, Number(head?.[1]) || 0)
+          if (hp && Number.isFinite(hp.x) && Number.isFinite(hp.y)) {
+            const radius = 3.5
+            const radial = ctx.createRadialGradient(hp.x, hp.y, 0, hp.x, hp.y, radius * 5)
+            radial.addColorStop(0, 'rgba(255,255,255,0.9)')
+            radial.addColorStop(0.28, 'rgba(200,240,255,0.5)')
+            radial.addColorStop(1, 'rgba(200,240,255,0)')
+            ctx.fillStyle = radial
+            ctx.beginPath()
+            ctx.arc(hp.x, hp.y, radius * 5, 0, Math.PI * 2)
+            ctx.fill()
+            ctx.fillStyle = 'rgba(255,255,255,0.96)'
+            ctx.beginPath()
+            ctx.arc(hp.x, hp.y, Math.max(1.3, radius * 0.4), 0, Math.PI * 2)
+            ctx.fill()
+          }
         }
       }
       ctx.restore()
@@ -483,7 +538,7 @@ export function drawTerrainScene(canvas, grid, {
     ctx.fillStyle = '#49e68b'
     ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill()
   }
-  return { points, anchor, anchors, faces, project, mesh, lighting }
+  return { points, anchor, anchors, faces, project, mesh, lighting, projectPolar: rayProjector }
 }
 
 const AXIS_TICKS = 6

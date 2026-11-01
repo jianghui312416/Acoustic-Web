@@ -112,6 +112,111 @@
           </div>
         </section>
 
+        <section class="module-group" :class="{ active: simulationControlsOpen }">
+          <button
+            type="button"
+            class="module-entry"
+            :class="{ active: simulationControlsOpen }"
+            title="仿真配置"
+            aria-label="仿真配置"
+            @click="toggleSimulationControls"
+          >
+            <span class="module-icon simulation-module-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M4 17.5 8.6 10l3 4.6 2.4-3.4 5.5 7.3H4Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+                <circle cx="17.2" cy="6.6" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3" />
+                <path d="M17.2 3.4v1.1M17.2 8.7v1.1M14 6.6h1.1M19.3 6.6h1.1" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" />
+              </svg>
+            </span>
+            <span class="module-label">仿真配置</span>
+            <span class="module-chevron" :class="{ open: simulationControlsOpen }" aria-hidden="true">›</span>
+          </button>
+
+          <div v-if="simulationControlsOpen" class="feature-controls simulation-controls" @click.stop>
+            <label class="feature-select">
+              <span>仿真模型</span>
+              <select v-model="simulation.model" @change="normalizeSimulationControls">
+                <option v-for="item in simulationModels" :key="item.id" :value="item.id">{{ item.label }}</option>
+              </select>
+            </label>
+
+            <div class="feature-select simulation-time">
+              <span>仿真时间</span>
+              <div class="simulation-time-field">
+                <button type="button" class="simulation-time-trigger" @click="openSimulationTimePicker">
+                  <span>UTC {{ simulationTimeText }}</span>
+                  <svg class="simulation-time-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="3.5" y="5" width="17" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" />
+                    <path d="M3.5 9h17M8 3.5v3M16 3.5v3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                    <path d="M7.5 12.5h3M7.5 16h3M13.5 12.5h3M13.5 16h3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+                  </svg>
+                </button>
+                <input
+                  ref="simulationTimeInputRef"
+                  class="simulation-time-native"
+                  type="datetime-local"
+                  step="60"
+                  :value="simulationTimeInputValue"
+                  aria-label="仿真时间"
+                  @input="onSimulationTimeInput"
+                />
+              </div>
+            </div>
+
+            <div class="simulation-grid">
+              <label>
+                <span>经度</span>
+                <input v-model.number="simulation.coordX" type="number" step="0.0001" min="-180" max="180" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>纬度</span>
+                <input v-model.number="simulation.coordY" type="number" step="0.0001" min="-90" max="90" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>声源深度 (m)</span>
+                <input v-model.number="simulation.srcDepth" type="number" step="1" min="0" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>运行频率 (Hz)</span>
+                <input v-model.number="simulation.frequency" type="number" step="1" min="1" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>距离 (nmi)</span>
+                <input v-model.number="simulation.range" type="number" step="0.1" min="0.1" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>俯角 (°)</span>
+                <input v-model.number="simulation.grazingAngleMin" type="number" step="1" min="-90" max="90" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>仰角 (°)</span>
+                <input v-model.number="simulation.grazingAngleMax" type="number" step="1" min="-90" max="90" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>方位数</span>
+                <input v-model.number="simulation.sector" type="number" step="1" min="1" max="360" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>声线条数</span>
+                <input v-model.number="simulation.lineCount" type="number" step="1" min="0" @change="normalizeSimulationControls" />
+              </label>
+            </div>
+
+            <label class="feature-select">
+              <span>相干性</span>
+              <select v-model="simulation.coherent" @change="normalizeSimulationControls">
+                <option :value="true">相干</option>
+                <option :value="false">非相干</option>
+              </select>
+            </label>
+
+            <button type="button" class="simulation-run-button" @click="$emit('run')">
+              <span aria-hidden="true">▶</span>
+              运行仿真
+            </button>
+          </div>
+        </section>
+
         <section
           v-for="moduleItem in modules"
           :key="moduleItem.id"
@@ -284,6 +389,30 @@
               <span class="switch-track"><i></i></span>
               <span>光标读取</span>
             </label>
+            <details class="feature-fold ray-playback-fold">
+              <summary>
+                <span>声线播放</span>
+                <small>{{ sliceControls.dynamicRays ? '动态' : sliceControls.staticRays ? '静态' : '已关闭' }}</small>
+              </summary>
+              <label class="feature-switch compact-switch">
+                <input v-model="sliceControls.dynamicRays" type="checkbox" />
+                <span class="switch-track"><i></i></span>
+                <span>动态声线</span>
+              </label>
+              <label class="feature-switch compact-switch">
+                <input v-model="sliceControls.staticRays" type="checkbox" />
+                <span class="switch-track"><i></i></span>
+                <span>静态声线</span>
+              </label>
+              <label class="feature-slider compact-slider">
+                <span>播放速度<b>{{ Number(sliceControls.raySpeed).toFixed(2) }}×</b></span>
+                <input v-model.number="sliceControls.raySpeed" type="range" min="0.25" max="8" step="0.05" @input="normalizeSliceControls" />
+              </label>
+              <label class="feature-slider compact-slider">
+                <span>播放时间<b>t ~ {{ (rayTimeMs / 1000).toFixed(2) }} s</b></span>
+                <input :value="rayTimeMs" type="range" min="0" :max="sliceControls.rayTimelineMs" :step="RAY_TIME_STEP_MS" aria-label="声线播放时间" @input="onRayTimeInput" />
+              </label>
+            </details>
             </template>
             <template v-else>
               <div class="feature-unavailable disabled"><span aria-hidden="true">📦</span><b>切片功能已禁用</b></div>
@@ -351,6 +480,12 @@ import {
   clampVerticalSliceControls,
   verticalSliceControls,
 } from '@/modules/acoustic/verticalSliceControls.js'
+import {
+  SIMULATION_MODELS,
+  clampSimulationControls,
+  simulationControls,
+} from '@/modules/acoustic/simulationControls.js'
+import { rayFlowTimelinePositionMs, seekRayFlowClock } from '@/utils/rayFlowClock.js'
 import { deleteAcousticJob } from '@/api/jobWorkspaceApi.js'
 import { jobWorkspace, refreshJobWorkspace, requestCloseJob, requestOpenJob } from '@/modules/acoustic/jobWorkspace.js'
 import WeatherNoiseSidebar from '@/components/weather/WeatherNoiseSidebar.vue'
@@ -369,10 +504,13 @@ const props = defineProps({
 const emit = defineEmits(['select-module', 'select-submodule', 'select-view-mode', 'toggle-collapse', 'toggle-thumbnail', 'run'])
 
 const clockText = ref('')
+const rayTimeMs = ref(0)
+const simulationTimeInputRef = ref(null)
 const workOpen = ref(false)
 const openingJobId = ref('')
 const deletingJobId = ref('')
 const terrainControlsOpen = ref(false)
+const simulationControlsOpen = ref(false)
 const weatherNoiseOpen = ref(false)
 const sliceControlsOpen = ref(false)
 const signalExcessOpen = ref(false)
@@ -380,7 +518,15 @@ const signalExcessOpen = ref(false)
 const expandedModuleIds = ref(new Set())
 const visualControls = volumeRenderingControls
 const sliceControls = verticalSliceControls
+const simulation = simulationControls
+const simulationModels = SIMULATION_MODELS
 const volumeColormaps = VOLUME_COLORMAPS
+const simulationTimeText = computed(() => {
+  const raw = String(simulation.time || '').replace('T', ' ')
+  const match = raw.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})/)
+  return match ? `${match[1]} ${match[2]}` : '2025-01-02 12:00'
+})
+const simulationTimeInputValue = computed(() => simulationTimeText.value.replace(' ', 'T'))
 const volumeControlsAvailable = computed(() => props.viewMode === 'terrain' && acousticSceneState.hasTerrainVolume)
 function stopsToGradient(stops) {
   return `linear-gradient(90deg, ${(stops || []).map(([t, rgb]) => `rgb(${rgb.join(',')}) ${(Number(t) * 100).toFixed(1)}%`).join(', ')})`
@@ -398,6 +544,9 @@ const moveAxes = Object.freeze([
   { key: 'moveZ', label: 'Z' },
 ])
 let clockTimer = 0
+let rayTimeTimer = 0
+let lastRaySeekAt = 0
+const RAY_TIME_STEP_MS = 50
 
 function normalizeControls() {
   clampVolumeRenderingControls(visualControls)
@@ -405,6 +554,43 @@ function normalizeControls() {
 
 function normalizeSliceControls() {
   clampVerticalSliceControls(sliceControls)
+}
+
+function normalizeSimulationControls() {
+  clampSimulationControls(simulation)
+}
+
+function openSimulationTimePicker() {
+  const input = simulationTimeInputRef.value
+  if (!input) return
+  try {
+    if (typeof input.showPicker === 'function') {
+      input.showPicker()
+      return
+    }
+  } catch {}
+  input.focus()
+  input.click()
+}
+
+function onSimulationTimeInput(event) {
+  const value = String(event?.target?.value || '')
+  if (!value) return
+  simulation.time = value.length === 16 ? `${value}:00` : value
+}
+
+function syncRayTimePosition() {
+  if (!sliceControlsOpen.value) return
+  if (performance.now() - lastRaySeekAt < 600) return
+  const position = rayFlowTimelinePositionMs(sliceControls.rayTimelineMs)
+  rayTimeMs.value = Math.round(position / RAY_TIME_STEP_MS) * RAY_TIME_STEP_MS
+}
+
+function onRayTimeInput(event) {
+  const value = Number(event?.target?.value)
+  rayTimeMs.value = Number.isFinite(value) ? value : 0
+  lastRaySeekAt = performance.now()
+  seekRayFlowClock(rayTimeMs.value)
 }
 
 function formatControl(value, digits = 1) {
@@ -417,8 +603,16 @@ function toggleTerrainControls() {
   emit('select-view-mode', 'terrain')
 }
 
+function toggleSimulationControls() {
+  simulationControlsOpen.value = !simulationControlsOpen.value
+}
+
 function toggleSliceControls() {
   sliceControlsOpen.value = !sliceControlsOpen.value
+  if (sliceControlsOpen.value) {
+    lastRaySeekAt = 0
+    syncRayTimePosition()
+  }
 }
 
 function isModuleExpanded(moduleId) {
@@ -492,6 +686,8 @@ onMounted(() => {
   clockTimer = window.setInterval(() => {
     clockText.value = formatClock()
   }, 1000)
+  syncRayTimePosition()
+  rayTimeTimer = window.setInterval(syncRayTimePosition, 100)
   refreshJobWorkspace()
 })
 
@@ -500,7 +696,10 @@ watch(() => props.activeModuleId, (moduleId) => {
   expandedModuleIds.value = new Set([...expandedModuleIds.value, moduleId])
 })
 
-onBeforeUnmount(() => window.clearInterval(clockTimer))
+onBeforeUnmount(() => {
+  window.clearInterval(clockTimer)
+  window.clearInterval(rayTimeTimer)
+})
 </script>
 
 <style scoped>
@@ -912,7 +1111,25 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
 .feature-actions button.active { color: #55e7cd; border-color: #218b84; background: #153b40; }
 .feature-actions .danger-action { color: #e7a8b0; border-color: #6a3e50; background: #402735; }
 .terrain-controls { padding-top: 5px; }
+.simulation-module-icon { color: #e0b36a; }
+.simulation-controls { padding-top: 5px; }
+.simulation-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 8px; margin: 2px 0 10px; }
+.simulation-grid label { display: grid; gap: 4px; min-width: 0; color: #7f9eaf; font-size: 9px; }
+.simulation-grid input { width: 100%; min-width: 0; height: 27px; padding: 0 7px; color: #d5ebf3; border: 1px solid #2b4960; border-radius: 4px; background: #172b40; outline: none; font: 10px ui-monospace, monospace; appearance: textfield; }
+.simulation-grid input::-webkit-inner-spin-button { appearance: none; }
+.simulation-grid input:focus { border-color: #3d7895; box-shadow: 0 0 0 1px rgba(61, 120, 149, 0.35); }
+.simulation-time-field { position: relative; width: 100%; height: 28px; }
+.simulation-time-trigger { width: 100%; height: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px; color: #c5e1ec; border: 1px solid #28465f; border-radius: 5px; background: #182e43; cursor: pointer; font: 10px ui-monospace, monospace; }
+.simulation-time-trigger:hover { border-color: #3d7895; background: #1c3a50; }
+.simulation-time-icon { width: 15px; height: 15px; flex: none; color: #7bd9f3; }
+.simulation-time-native { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; }
+.simulation-run-button { width: 100%; height: 30px; display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 2px; color: #65f0d2; border: 1px solid #218b84; border-radius: 5px; background: #153b40; cursor: pointer; font-size: 10px; letter-spacing: 1px; }
+.simulation-run-button:hover { color: #eaffff; border-color: #37b8aa; background: #1a4b50; }
 .vertical-slice-controls { padding-top: 5px; }
+.ray-playback-fold { margin-top: 7px; }
+.ray-playback-fold .compact-switch { margin: 0 0 5px; padding: 0 9px; }
+.ray-playback-fold .compact-slider { margin: 3px 9px 8px; }
+.ray-playback-fold .compact-slider:last-child { margin-bottom: 9px; }
 .app-sidebar.collapsed { width: 52px; }
 .collapsed .sidebar-scroll { padding: 4px 5px; overflow-x: hidden; }
 .collapsed .run-button span, .collapsed .brand-lockup, .collapsed .module-label, .collapsed .module-chevron,

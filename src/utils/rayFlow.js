@@ -22,7 +22,7 @@ export function buildRayFlow(paths = [], frameModel = null) {
   }
   if (!tracks.length && !frameModel?.frames?.length) return null
   const length = tracks.reduce((max, track) => Math.max(max, track.length), 0)
-  const flow = { tracks, length, trailLength: length * 0.018, durationMs: 8000, frameModel }
+  const flow = { tracks, length, trailLength: length * 0.14, durationMs: 8000, frameModel }
   if (frameModel?.frames?.length) {
     const frames = frameModel.frames
     const lastTime = Number(frames.at(-1).timeMs)
@@ -38,7 +38,7 @@ export function buildRayFlow(paths = [], frameModel = null) {
         const local = buildRayFlow([points])
         // 后端帧给出“声源 → 当前头部”的完整路径；只取头部附近的
         // 短尾迹绘制，避免动态模式在三维体上看起来像一组静态全长折线。
-        return local?.tracks.map(track => trailPoints(track, track.length, Math.max(track.length * .018, 1e-6))) ?? []
+        return local?.tracks.map(track => trailPoints(track, track.length, Math.max(track.length * .14, 1e-6))) ?? []
       }),
     })).sort((a, b) => a.timeMs - b.timeMs)
   }
@@ -96,6 +96,11 @@ export function sampleRayFlow(flow, elapsedMs) {
   if (!flow) return []
   const duration = flow.durationMs
   const progress = ((elapsedMs % duration) + duration) % duration / duration
+  if (flow.tracks.length) {
+    // Extra tail distance lets the last particles leave the chart before relaunching.
+    const head = progress * (flow.length + flow.trailLength)
+    return flow.tracks.map(track => trailPoints(track, head, flow.trailLength)).filter(points => points.length > 1)
+  }
   if (flow.serverFrames) {
     const time = progress * duration
     const frames = flow.serverFrames
@@ -109,10 +114,70 @@ export function sampleRayFlow(flow, elapsedMs) {
     }
     return frames[lo].trails
   }
+  return []
+}
+
+// 生成「已走完整路径」：从声源沿轨道到当前头部（含原始折点与头部插值点）。
+function pathToHead(track, headDist) {
+  const end = Math.min(track.length, headDist)
+  if (end <= 0) return []
+  const points = [[track.points[0][0], track.points[0][1]]]
+  for (let i = 1; i < track.points.length && track.cumulative[i] <= end; i++) {
+    points.push([track.points[i][0], track.points[i][1]])
+  }
+  if (end < track.length) {
+    const p = atDistance(track, end)
+    points.push([p[0], p[1]])
+  }
+  return points
+}
+
+/**
+ * 返回每条声线本帧的 { path(已走完整路径), tail(头部渐隐尾迹), head(头部位置) }。
+ * 渲染端据此画出「淡显完整路径 + 头部光晕拖尾 + 发光头点」，与参考项目的生长动画一致。
+ */
+export function sampleRayMotion(flow, elapsedMs) {
+  if (!flow) return []
+  const duration = flow.durationMs
+  const progress = ((elapsedMs % duration) + duration) % duration / duration
+  // 优先用弧长轨道（连续生长、平滑，与参考项目一致）；无静态轨道时才回退到离散服务端帧。
   if (flow.tracks.length) {
-    // Extra tail distance lets the last particles leave the chart before relaunching.
     const head = progress * (flow.length + flow.trailLength)
-    return flow.tracks.map(track => trailPoints(track, head, flow.trailLength)).filter(points => points.length > 1)
+    return flow.tracks.map(track => {
+      const tail = trailPoints(track, head, flow.trailLength)
+      if (tail.length < 2) return null
+      return { path: pathToHead(track, head), tail, head: tail.at(-1).point }
+    }).filter(Boolean)
+  }
+  if (flow.serverFrames) {
+    const time = progress * duration
+    const frames = flow.serverFrames
+    if (time < frames[0].timeMs) return []
+    let lo = 0
+    let hi = frames.length
+    while (lo + 1 < hi) {
+      const mid = (lo + hi) >> 1
+      if (frames[mid].timeMs <= time) lo = mid
+      else hi = mid
+    }
+    // 相邻帧间线性插值头部，避免两帧之间头部跳变。
+    let frac = 0
+    if (lo + 1 < frames.length) {
+      const span = frames[lo + 1].timeMs - frames[lo].timeMs
+      if (span > 0) frac = Math.min(1, Math.max(0, (time - frames[lo].timeMs) / span))
+    }
+    const current = frames[lo].trails || []
+    const next = lo + 1 < frames.length ? (frames[lo + 1].trails || []) : []
+    return current.map((trail, index) => {
+      const headCur = trail.at(-1)?.point ?? null
+      const headNext = next[index]?.at(-1)?.point ?? null
+      let head = headCur
+      if (headCur && headNext && frac > 0) {
+        head = [headCur[0] + (headNext[0] - headCur[0]) * frac, headCur[1] + (headNext[1] - headCur[1]) * frac]
+      }
+      if (!head) return null
+      return { path: trail.map(n => n.point), tail: trail, head }
+    }).filter(item => item.head && item.tail.length > 1)
   }
   return []
 }

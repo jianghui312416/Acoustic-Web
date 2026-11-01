@@ -2,7 +2,7 @@
 
 <script setup>
 import { ref, watch, onMounted, onActivated, onDeactivated, onBeforeUnmount } from 'vue'
-import { sampleRayFlow } from '@/utils/rayFlow.js'
+import { sampleRayMotion } from '@/utils/rayFlow.js'
 import { rayFlowClockElapsedMs } from '@/utils/rayFlowClock.js'
 import { clipRayPathsByProfile } from '@/sdk/ncFieldModel.js'
 
@@ -12,6 +12,8 @@ const props = defineProps({
   viewport: { type: Function, required: true },
   playing: { type: Boolean, default: true },
   visible: { type: Boolean, default: true },
+  /** 静态模式：只绘制完整声线路径，不播放行进动画 */
+  staticMode: { type: Boolean, default: false },
   /** 是否在画布右上角显示当前传播时间 t ~ x.xx s */
   showTime: { type: Boolean, default: false },
 })
@@ -43,23 +45,80 @@ function paint() {
   ctx.rect(...viewport.rect)
   ctx.clip()
   ctx.lineCap = 'round'
-  for (const trail of sampleRayFlow(props.flow, elapsed)) {
-    for (let i = 1; i < trail.length; i++) {
-      const a = trail[i - 1]
-      const b = trail[i]
-      const segments = props.geometry ? clipRayPathsByProfile([[a.point, b.point]], props.geometry) : [[a.point, b.point]]
-      for (const segment of segments) {
-        const from = viewport.project(segment[0])
-        const to = viewport.project(segment.at(-1))
-        const gradient = ctx.createLinearGradient(...from, ...to)
-        gradient.addColorStop(0, `rgba(255,150,165,${a.alpha * 0.85})`)
-        gradient.addColorStop(1, `rgba(255,60,85,${b.alpha * 0.95})`)
+  const layers = [
+    { width: 2, alpha: 0.12, frac: 1.0 },
+    { width: 1, alpha: 0.42, frac: 0.55 },
+    { width: 1.65, alpha: 0.96, frac: 0.23 },
+  ]
+  const drawClipped = (rawPath, painter) => {
+    const clipped = props.geometry ? clipRayPathsByProfile([rawPath], props.geometry) : [rawPath]
+    for (const segment of clipped) {
+      if (!Array.isArray(segment) || segment.length < 2) continue
+      const pts = segment.map(p => viewport.project(p)).filter(p => p && Number.isFinite(p[0]) && Number.isFinite(p[1]))
+      if (pts.length < 2) continue
+      painter(pts)
+    }
+  }
+  const stroke = (pts) => {
+    ctx.beginPath()
+    pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))
+    ctx.stroke()
+  }
+  if (props.staticMode) {
+    for (const track of props.flow.tracks ?? []) {
+      drawClipped(track.points, pts => {
+        ctx.strokeStyle = 'rgba(235,248,255,0.72)'
+        ctx.lineWidth = 1.3
+        stroke(pts)
+      })
+    }
+    ctx.restore()
+    return
+  }
+  for (const motion of sampleRayMotion(props.flow, elapsed)) {
+    const path = motion.path || []
+    const tail = motion.tail || []
+    const head = motion.head
+    // 1) 淡显完整已走路径（保留已走过的声线）。
+    drawClipped(path, pts => {
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)'
+      ctx.lineWidth = 1.2
+      stroke(pts)
+    })
+    // 2) 头部多层拖尾（无发光，仅分层，与「拖尾发光 0%」一致）。
+    const tailPoints = tail.map(n => n.point)
+    for (const layer of layers) {
+      const startIdx = Math.max(0, tailPoints.length - 1 - Math.round((tailPoints.length - 1) * layer.frac))
+      const sub = tailPoints.slice(startIdx)
+      if (sub.length < 2) continue
+      drawClipped(sub, pts => {
+        const tailP = pts[0]
+        const headP = pts[pts.length - 1]
+        const gradient = ctx.createLinearGradient(tailP[0], tailP[1], headP[0], headP[1])
+        gradient.addColorStop(0, 'rgba(255,255,255,0)')
+        gradient.addColorStop(1, `rgba(255,255,255,${layer.alpha.toFixed(3)})`)
         ctx.strokeStyle = gradient
-        ctx.lineWidth = 1.25
+        ctx.lineWidth = layer.width
+        stroke(pts)
+      })
+    }
+    // 3) 传播前沿头点。
+    if (head) {
+      const headPoint = viewport.project(head)
+      if (headPoint && Number.isFinite(headPoint[0]) && Number.isFinite(headPoint[1])) {
+        const radius = 3
+        const radial = ctx.createRadialGradient(headPoint[0], headPoint[1], 0, headPoint[0], headPoint[1], radius * 5)
+        radial.addColorStop(0, 'rgba(255,255,255,0.9)')
+        radial.addColorStop(0.28, 'rgba(200,240,255,0.5)')
+        radial.addColorStop(1, 'rgba(200,240,255,0)')
+        ctx.fillStyle = radial
         ctx.beginPath()
-        ctx.moveTo(...from)
-        ctx.lineTo(...to)
-        ctx.stroke()
+        ctx.arc(headPoint[0], headPoint[1], radius * 5, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.fillStyle = 'rgba(255,255,255,0.96)'
+        ctx.beginPath()
+        ctx.arc(headPoint[0], headPoint[1], Math.max(1.3, radius * 0.4), 0, Math.PI * 2)
+        ctx.fill()
       }
     }
   }
@@ -90,7 +149,7 @@ function start() {
   stop()
   if (!active) return
   paint()
-  if (!props.flow || !props.visible || !props.playing || document.hidden) return
+  if (!props.flow || !props.visible || !props.playing || props.staticMode || document.hidden) return
   const tick = () => {
     paint()
     raf = requestAnimationFrame(tick)
@@ -98,7 +157,7 @@ function start() {
   raf = requestAnimationFrame(tick)
 }
 watch(() => props.flow, start, { flush: 'post' })
-watch(() => [props.playing, props.visible, props.geometry], start, { flush: 'post' })
+watch(() => [props.playing, props.visible, props.geometry, props.staticMode], start, { flush: 'post' })
 onMounted(() => {
   observer = new ResizeObserver(paint)
   observer.observe(canvas.value)

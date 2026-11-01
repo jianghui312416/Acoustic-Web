@@ -15,6 +15,10 @@ import { reactive } from 'vue'
  *  - east90Indicator    当前方位方向线（Display[4]，海平面洋红线）
  *  - sspWindow          声速剖面窗口显隐                    → terrainProfileOpen
  *  - cursorReadout      光标读取（Display[6]，悬停显示 TL/距离/深度）
+ *  - dynamicRays        动态声线开关（关闭时隐藏所有动态声线）
+ *  - staticRays         静态声线开关（开启时在声场体与垂直切面显示完整声线）
+ *  - raySpeed           声线播放速度倍率（0.25× ~ 8.00×）
+ *  - rayTimelineMs      当前声线动画的循环时长（时间滑杆范围）
  */
 export const verticalSliceControls = reactive({
   showSlice: false,
@@ -25,10 +29,14 @@ export const verticalSliceControls = reactive({
   seafloorMask: true,
   east90Indicator: true,
   sspWindow: false,
-  cursorReadout: true,
+  cursorReadout: false,
+  dynamicRays: true,
+  staticRays: false,
+  raySpeed: 1,
+  rayTimelineMs: 8000,
 })
 
-/** 归一化方位角 / dB 范围等数值，避免越界 / NaN */
+/** 归一化方位角 / dB 范围 / 播放速度等数值，避免越界 / NaN */
 export function clampVerticalSliceControls(controls = verticalSliceControls) {
   const azimuth = Number(controls.sliceAzimuthDeg)
   controls.sliceAzimuthDeg = Number.isFinite(azimuth) ? ((Math.round(azimuth) % 360) + 360) % 360 : 0
@@ -39,5 +47,7 @@ export function clampVerticalSliceControls(controls = verticalSliceControls) {
   }
   controls.dbMin = clamp(controls.dbMin, 0, 199, 60)
   controls.dbMax = clamp(controls.dbMax, controls.dbMin + 1, 200, 120)
+  controls.raySpeed = clamp(controls.raySpeed, 0.25, 8, 1)
+  controls.rayTimelineMs = clamp(controls.rayTimelineMs, 100, 600000, 8000)
   return controls
 }
