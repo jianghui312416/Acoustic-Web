@@ -64,22 +64,9 @@ function buildPortalRequest(sn, plugin, requestPayload) {
 }
 
 /**
- * 门户后端（Bellhop + NetCDF）会在系统临时目录写 `bellhop_netcdf_*.nc`。
- * 多个计算并发时会争用同一临时文件，Windows 上表现为
- * `[WinError 32] 另一个程序正在使用此文件`。因此所有门户计算在这里**串行化**：
- * 同一时刻只允许一个请求在途，后续请求排队等待，避免后端并发争用临时文件。
+ * 门户请求按调用方直接并行发出，不再在前端串行排队。
+ * 若后端仍偶发临时文件占用错误，则在单次请求内部做有限次退避重试。
  */
-let portalQueue = Promise.resolve()
-
-function runSerialized(task) {
-  const result = portalQueue.then(task, task)
-  // 无论成败都让队列继续，避免一次失败阻塞后续请求
-  portalQueue = result.then(
-    () => {},
-    () => {}
-  )
-  return result
-}
 
 /** 可重试的后端临时文件占用错误（WinError 32 / 文件被占用） */
 const PORTAL_RETRYABLE = /WinError\s*32|另一个程序正在使用此文件|being used by another process/i
@@ -123,24 +110,22 @@ async function callPortalOnce(sn, plugin, requestPayload) {
 const RETRY_DELAYS_MS = [700, 1600]
 
 /**
- * 串行执行一次门户计算；若后端临时文件恰好被释放较慢（WinError 32），
+ * 并行执行一次门户计算；若后端临时文件恰好被释放较慢（WinError 32），
  * 自动退避重试，仍失败才把错误抛给界面。
  */
-function callPortal(sn, plugin, requestPayload) {
-  return runSerialized(async () => {
-    let lastError = null
-    for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
-      try {
-        return await callPortalOnce(sn, plugin, requestPayload)
-      } catch (err) {
-        lastError = err
-        const retryable = PORTAL_RETRYABLE.test(err?.message || '')
-        if (!retryable || attempt === RETRY_DELAYS_MS.length) throw err
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]))
-      }
+async function callPortal(sn, plugin, requestPayload) {
+  let lastError = null
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await callPortalOnce(sn, plugin, requestPayload)
+    } catch (err) {
+      lastError = err
+      const retryable = PORTAL_RETRYABLE.test(err?.message || '')
+      if (!retryable || attempt === RETRY_DELAYS_MS.length) throw err
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]))
     }
-    throw lastError ?? new Error('声场计算失败（未知错误）')
-  })
+  }
+  throw lastError ?? new Error('声场计算失败（未知错误）')
 }
 
 function withCommonParams(params) {
@@ -346,6 +331,19 @@ export function analyseIce2dDynamicRTRD(params) {
     'AnalyseIce2DRTRDDynamic',
     withoutFields(iceParams(params), ['row', 'col', 'sector', 'seaState', 'coherent'])
   )
+}
+
+/** 冰区三维动态声线轨迹 (SN=19 → AnalyseIce3DRTRDDynamic)。 */
+export function analyseIce3dDynamicRTRD(params) {
+  return callPortal(19, 'AnalyseIce3DRTRDDynamic', iceParams(params))
+}
+
+/**
+ * 区域环境切片 (SN=145 → GetEnvDataRegion)。
+ * 海冰厚度查询使用 `DT_ENV_ICE_THICKNESS`，返回 `row × col` 网格。
+ */
+export function getEnvDataRegion(params) {
+  return callPortal(145, 'GetEnvDataRegion', params)
 }
 
 /**

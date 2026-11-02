@@ -17,6 +17,8 @@
       :active="viewMode === 'terrain'"
       :dataset="calcParams.dataset" :time="calcParams.time" :running="loading"
       @station-run="runAtTerrainStation" @station-parameters="loadTerrainStationParameters"
+      @station-pick="syncSimulationLocationFromTerrain"
+      @load-terrain="syncSimulationSourceToBoundsCenter"
       :viewer="activeViewer"
       :initial-center="{ lon: calcParams.coordX, lat: calcParams.coordY }"
       :field="terrainRunVisible ? terrainRenderField : null"
@@ -25,11 +27,14 @@
       :source="terrainRunVisible ? terrainSource : null"
       :receiver="receiverArrayMarker"
       :radius-km="terrainRadiusKm"
-      :ray-data="(verticalSliceControls.dynamicRays || verticalSliceControls.staticRays) && !signalExcessState.enabled ? staticRayData : null"
-      :ray-azimuth-deg="sliceAzimuthDeg"
-      :rays-visible="earthRaysVisible && !signalExcessState.enabled && (verticalSliceControls.dynamicRays || verticalSliceControls.staticRays)"
-      :rays-static="verticalSliceControls.staticRays && !verticalSliceControls.dynamicRays"
+      :ray-data="profileTerrainRayData"
+      :ray-source="selectedProfileLayer ? selectedProfileLayer.source : null"
+      :ray-azimuth-deg="profileAzimuthDeg"
+      :rays-visible="profileTerrainRaysVisible"
+      :rays-static="profileTerrainRaysStatic"
+      :rays-animated="profileTerrainRaysAnimated"
       :direction-line-visible="verticalSliceControls.east90Indicator"
+      :direction-line-layer-id="profileDirectionLayerId"
       :initial-bounds="globeSelection"
       :initial-bounds-token="globeSelectionToken"
       :thumbnail-collapsed="thumbnailCollapsed"
@@ -47,12 +52,13 @@
       @noise="openNoiseFromStation"
     />
 
-    <AcousticRunPanel v-if="viewMode === 'terrain' && terrainRunVisible" :minimized="terrainRunMinimized"
+    <AcousticRunPanel v-if="viewMode === 'terrain' && terrainRunVisible && runSettingsHiddenPanelId !== CURRENT_RUN_PANEL_ID" :minimized="terrainRunMinimized"
       :busy="loading" :ray-busy="dynamicRayLoading" :ready="!!terrainField" :failed="!!errorText" :source="terrainSource" :anchor="terrainAnchor" :time="terrainRunTime"
       :dock-index="runPanelDockIndex(CURRENT_RUN_PANEL_ID)" :dock-count="minimizedRunPanelCount"
       :slice-open="terrainSliceOpen"
       :style="{ opacity: terrainLeaving ? 0 : 1, transition: 'opacity 0.32s ease', pointerEvents: terrainLeaving ? 'none' : 'auto' }"
-      @run="runTerrainField" @slice="toggleTerrainSlice" @settings="toggleTerrainSettings"
+      @run="runTerrainField" @slice="toggleTerrainSlice" @settings="openCurrentRunSettings"
+      @run-at="runCurrentRunAt"
       @minimize="minimizeTerrainRun" @restore="restoreTerrainRun" @close="closeTerrainRun" />
 
     <StationPositionCard
@@ -68,11 +74,12 @@
 
     <template v-if="viewMode === 'terrain'">
       <AcousticRunPanel v-for="layer in visibleRunHistoryPanels" :key="layer.id"
-        :minimized="layer.panelMinimized" ready historical :layer-visible="layer.visible" :source="layer.source"
+        :minimized="layer.panelMinimized" ready historical :ray-busy="layer.rayLoading" :layer-visible="layer.visible" :source="layer.source"
         :anchor="terrainJobAnchors[layer.id] || layer.anchor" :time="layer.time" :accent="layer.accent"
         :dock-index="runPanelDockIndex(layer.id)" :dock-count="minimizedRunPanelCount"
         :style="{ opacity: terrainLeaving ? 0 : 1, transition: 'opacity 0.32s ease', pointerEvents: terrainLeaving ? 'none' : 'auto' }"
-        @run="toggleRunHistoryLayer(layer.id)" @slice="focusRunHistoryLayer(layer.id)" @settings="toggleTerrainSettings"
+        @run="runRunHistoryLayer(layer.id)" @slice="showHistoryLayerProfile(layer.id)" @settings="openHistoryRunSettings(layer.id)"
+        @run-at="runHistoryAt(layer.id, $event)"
         @minimize="minimizeRunHistoryPanel(layer.id)" @restore="restoreRunHistoryPanel(layer.id)" @close="closeRunHistoryLayer(layer.id)" />
     </template>
 
@@ -90,28 +97,34 @@
 
     <section v-show="viewMode === 'terrain' && terrainSliceOpen && !terrainSliceMinimized" ref="terrainSliceRef" class="terrain-slice-window" :style="terrainSliceStyle" aria-label="垂直切面">
       <header class="terrain-window-title" @pointerdown="startTerrainSliceDrag">
-        <span>◩ 垂直切面 · {{ terrainSliceAngleLabel }}</span>
+        <span>📐 垂直切面 · {{ terrainSliceAngleLabel }}</span>
         <span class="terrain-window-actions" @pointerdown.stop>
           <button type="button" title="最小化垂直切面" aria-label="最小化垂直切面" @click="minimizeTerrainWindow('slice')">−</button>
           <button type="button" title="关闭垂直切面" aria-label="关闭垂直切面" @click="closeTerrainWindow('slice')">×</button>
         </span>
       </header>
-      <TransmissionLossProfileChart ref="terrainLossChartRef" :data="raySourceData" :ray-data="isRayModel ? staticRayData : null" :animated="useDynamicRays && verticalSliceControls.dynamicRays" :static-rays="verticalSliceControls.staticRays"
-        source-id="tlrd" :azimuth-deg="sliceAzimuthDeg" :max-radius-m="sourceRadiusKm * 1000" :source-depth-m="Number(sourcePoint?.depth_m)"
-        :bottom-type-segments="bottomTypeSegments" :bottom-type-state="bottomTypeState" :refresh-token="chartRefreshToken"
+      <TransmissionLossProfileChart ref="terrainLossChartRef" :data="profileData" :ray-data="profileRayData" :animated="profileAnimated" :static-rays="verticalSliceControls.staticRays"
+        source-id="tlrd" :azimuth-deg="profileAzimuthDeg" :max-radius-m="profileMaxRadiusM" :source-depth-m="profileSourceDepthM"
+        :bottom-type-segments="profileBottomTypeSegments" :bottom-type-state="profileBottomTypeState" :refresh-token="chartRefreshToken"
         :show-seabed="verticalSliceControls.seafloorLineAndMask" :show-seabed-mask="verticalSliceControls.seafloorMask"
         :readout-enabled="verticalSliceControls.cursorReadout" :db-min="verticalSliceControls.dbMin" :db-max="verticalSliceControls.dbMax"
         height="280px" @update:azimuth-deg="onProfileAzimuthChange" />
     </section>
     <section v-show="viewMode === 'terrain' && terrainProfileOpen && !terrainProfileMinimized" ref="terrainProfileRef" class="terrain-profile-window" :style="terrainProfileStyle" aria-label="声速剖面">
       <header class="terrain-window-title" @pointerdown="startTerrainProfileDrag">
-        <span>◖ 声速剖面</span>
+        <span>📈 声速剖面</span>
         <span class="terrain-window-actions" @pointerdown.stop>
           <button type="button" title="最小化声速剖面" aria-label="最小化声速剖面" @click="minimizeTerrainWindow('profile')">−</button>
           <button type="button" title="关闭声速剖面" aria-label="关闭声速剖面" @click="closeTerrainWindow('profile')">×</button>
         </span>
       </header>
-      <SoundSpeedProfile :profile="terrainField?.soundProfile" />
+      <SoundSpeedProfile
+        :profile="profileSoundProfile"
+        :readout-enabled="verticalSliceControls.cursorReadout"
+        :source-lon="profileSourceLon"
+        :source-lat="profileSourceLat"
+        :coordinate-format="simulationControls.coordFormat"
+      />
     </section>
     <AmbientNoiseProbe v-show="viewMode === 'terrain' && noiseProbeState.open && !terrainNoiseMinimized"
       @minimize="minimizeTerrainWindow('noise')" @close="closeTerrainWindow('noise')" />
@@ -119,7 +132,7 @@
     <nav v-if="viewMode === 'terrain' && minimizedTerrainWindows.length" class="terrain-window-dock" aria-label="已最小化窗口">
       <div v-for="windowId in minimizedTerrainWindows" :key="windowId" class="terrain-window-dock-item">
         <button type="button" class="terrain-window-dock-restore" :title="`恢复${terrainWindowTitle(windowId)}`" @click="restoreTerrainWindow(windowId)">
-          <span>{{ windowId === 'slice' ? '◩' : windowId === 'profile' ? '◖' : '♫' }}</span>
+          <span>{{ windowId === 'slice' ? '📐' : windowId === 'profile' ? '📈' : '♫' }}</span>
           <b>{{ terrainWindowTitle(windowId) }}</b>
           <i aria-hidden="true">▴</i>
         </button>
@@ -1237,7 +1250,7 @@ import {
 import TransmissionLossProfileChart from '@/components/TransmissionLossProfileChart.vue'
 import SoundRayChart from '@/components/SoundRayChart.vue'
 import { resolveRayFlow, sampleRayFlow } from '@/utils/rayFlow.js'
-import { rayFlowClockElapsedMs, seekRayFlowClock, setRayFlowSpeed } from '@/utils/rayFlowClock.js'
+import { rayFlowClockElapsedMs, seekRayFlowClock, setRayFlowPaused, setRayFlowSpeed } from '@/utils/rayFlowClock.js'
 import { createCurtainRayFlow } from '@/sdk/curtainRayFlow.js'
 import { profileAxisGeometry } from '@/sdk/ncFieldModel.js'
 import EnvironmentNoiseResult from '@/components/EnvironmentNoiseResult.vue'
@@ -1292,12 +1305,15 @@ import {
   analyseIce2dRTRD,
   analyse2dDynamicRTRD,
   analyseIce2dDynamicRTRD,
+  analyseIce3dDynamicRTRD,
   portalPluginForModel,
   getDatasetList,
   getDatasetTimeList,
   getEnvDataRoute,
+  getEnvDataRegion,
   analyseEnvironmentNoise,
 } from '@/api/soundFieldApi.js'
+import { adapt3dRayResponseToAzimuths } from '@/utils/threeDRayAdapter.js'
 
 const props = defineProps({
   activeSubmoduleId: { type: String, default: '3d' },
@@ -1337,6 +1353,8 @@ const stationPositionOpen = ref(false)
 const stationPositionPoint = ref(null)
 const stationPositionTime = ref('')
 const stationPositionHasRun = ref(false)
+/** 参数卡片打开期间被临时替换的声场运行面板 id。 */
+const runSettingsHiddenPanelId = ref('')
 const terrainAnchor = ref(null)
 const terrainSliceOpen = ref(false)
 const terrainLossChartRef = ref(null)
@@ -1352,6 +1370,11 @@ const DEFAULT_TERRAIN_SPAN_KM = 100
 const terrainRadiusKm = ref(DEFAULT_TERRAIN_SPAN_KM / 6)
 const jobLayers = shallowRef([])
 const runHistoryLayers = shallowRef([])
+/** 当前垂直切面 / 动态声线所展示的历史声场；空表示当前运行结果。 */
+const selectedProfileLayerId = ref('')
+const selectedProfileLayer = computed(() => (
+  runHistoryLayers.value.find(layer => layer.id === selectedProfileLayerId.value) || null
+))
 const CURRENT_RUN_PANEL_ID = 'current-run'
 /** 当前声场与历史声场共用一个按最小化先后排序的顶部任务条。 */
 const runPanelDockOrder = ref([])
@@ -1367,7 +1390,9 @@ const terrainJobFields = computed(() => [...runHistoryLayers.value, ...jobLayers
   visible: layer.visible,
   accent: layer.accent,
 })))
-const visibleRunHistoryPanels = computed(() => runHistoryLayers.value.filter(layer => layer.panelVisible !== false))
+const visibleRunHistoryPanels = computed(() => runHistoryLayers.value.filter(
+  layer => layer.panelVisible !== false && layer.id !== runSettingsHiddenPanelId.value
+))
 const minimizedRunPanelIds = computed(() => runPanelDockOrder.value.filter((id) => {
   if (id === CURRENT_RUN_PANEL_ID) return terrainRunVisible.value && terrainRunMinimized.value
   const layer = runHistoryLayers.value.find(item => item.id === id)
@@ -1467,6 +1492,9 @@ function enterCleanGlobeView() {
   applyVolumeVisible(false)
   omni2dVisible.value = false
   clearOmni2dLayer()
+  if (earthRaysVisibleBeforeGlobe === null) {
+    earthRaysVisibleBeforeGlobe = earthRaysVisible.value
+  }
   setEarthRaysVisible(false)
   pointerEnabled.value = false
   applyPointerVisibility()
@@ -1481,8 +1509,19 @@ function syncGlobeSelection(bounds) {
   if (!bounds) return
   globeSelection.value = normalizeTerrainBounds(bounds)
 }
+/** 框选区域进入地形时，把仿真配置的声源定位到框选中心。 */
+function syncSimulationSourceToBoundsCenter(bounds) {
+  if (!bounds) return
+  const target = normalizeTerrainBounds(bounds)
+  const lon = (Number(target.west) + Number(target.east)) / 2
+  const lat = (Number(target.south) + Number(target.north)) / 2
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return
+  calcParams.value.coordX = Number(lon.toFixed(6))
+  calcParams.value.coordY = Number(lat.toFixed(6))
+}
 function loadGlobeTerrain(bounds) {
   globeSelection.value = normalizeTerrainBounds(bounds)
+  syncSimulationSourceToBoundsCenter(bounds)
   globeSelectionToken.value += 1
   emitViewMode('terrain')
 }
@@ -1754,6 +1793,7 @@ function closeTerrainWindow(id) {
   if (id === 'slice') {
     terrainSliceOpen.value = false
     terrainSliceMinimized.value = false
+    selectedProfileLayerId.value = ''
   } else if (id === 'profile') {
     terrainProfileOpen.value = false
     terrainProfileMinimized.value = false
@@ -1818,10 +1858,102 @@ function focusRunHistoryLayer(id) {
   globeSelection.value = acousticTerrainBounds(layer.source, layer.radiusKm)
   globeSelectionToken.value += 1
 }
+/** 历史声场胶囊「模拟运行」：恢复该次参数并重新计算。 */
+function runRunHistoryLayer(id) {
+  const layer = runHistoryLayers.value.find(item => item.id === id)
+  if (!layer?.params || loading.value) return
+  if (analysisMode.value !== '3d') switchMode('3d')
+  Object.assign(calcParams.value, JSON.parse(JSON.stringify(layer.params)))
+  runTerrainField()
+}
+/** 历史声场的动态声线请求，按图层去重，避免重复点击时并发调用接口。 */
+const historyRayRequests = new Map()
+/**
+ * 历史声场按归档时的参数补算当前方位的动态声线。
+ * 归档时若尚未点过「二维传播损失」，rayData 为空；此时按该次声源 / 方位补算，
+ * 保证切面与三维体上都能显示动态声线。
+ */
+function azimuthDeltaDeg(a, b) {
+  return Math.abs((((Number(a) - Number(b)) % 360) + 540) % 360 - 180)
+}
+async function ensureHistoryLayerDynamicRays(layer) {
+  if (!layer?.params || layer.params.model !== 'bellhop') return null
+  const desiredAzimuth = normalizeAzimuth360(Number(layer.sliceAzimuthDeg) || 0)
+  const cachedAzimuth = Number(layer.rayAzimuthDeg ?? layer.sliceAzimuthDeg)
+  const matchesAzimuth = azimuthDeltaDeg(cachedAzimuth, desiredAzimuth) < 1e-6
+  if (layer.rayData && layer.rayInterface === 'dynamic' && matchesAzimuth) return layer.rayData
+
+  const requestKey = `${layer.id}:${desiredAzimuth.toFixed(4)}`
+  if (historyRayRequests.has(requestKey)) return historyRayRequests.get(requestKey)
+
+  const params = layer.params
+  const request = (async () => {
+    const payload = portalParamsFor(params, {
+      range: Number(params.range),
+      azimuth: internalAzimuthToCompassBearing(desiredAzimuth),
+      lineCount: Number(params.lineCount),
+      rtimeRes: 0,
+    })
+    const ice = params.regionType === 'ice'
+    const response = ice
+      ? await analyseIce2dDynamicRTRD(payload)
+      : await analyse2dDynamicRTRD(payload)
+    // 方位已变化时丢弃过期结果，避免把旧方位的声线画到新切面上。
+    if (azimuthDeltaDeg(layer.sliceAzimuthDeg, desiredAzimuth) > 1e-6) {
+      return response
+    }
+    layer.rayData = response
+    layer.rayInterface = 'dynamic'
+    layer.rayAzimuthDeg = desiredAzimuth
+    refreshRunHistoryLayers()
+    if (selectedProfileLayerId.value === layer.id) viewer?.scene?.requestRender?.()
+    return response
+  })()
+  historyRayRequests.set(requestKey, request)
+  layer.rayLoading = true
+  refreshRunHistoryLayers()
+  try {
+    return await request
+  } catch (error) {
+    console.warn('[历史声场动态声线]', error?.message ?? error)
+    if (selectedProfileLayerId.value === layer.id) {
+      errorText.value = `动态声线计算失败：${error?.message ?? error}`
+    }
+    return null
+  } finally {
+    historyRayRequests.delete(requestKey)
+    layer.rayLoading = false
+    refreshRunHistoryLayers()
+  }
+}
+/** 历史声场胶囊「二维传播损失」：打开该次声场的垂直切面。 */
+function showHistoryLayerProfile(id) {
+  const layer = runHistoryLayers.value.find(item => item.id === id)
+  if (!layer) return
+  if (!layer.field) {
+    focusRunHistoryLayer(id)
+    return
+  }
+  if (!layer.visible) {
+    layer.visible = true
+    try {
+      if (layer.renderer?.primitive) layer.renderer.primitive.show = volumeVisible.value
+    } catch {}
+    refreshRunHistoryLayers()
+  }
+  selectedProfileLayerId.value = id
+  terrainSliceOpen.value = true
+  terrainSliceMinimized.value = false
+  removeTerrainWindowFromDock('slice')
+  void ensureHistoryLayerDynamicRays(layer)
+  nextTick(() => terrainLossChartRef.value?.refreshLayout?.())
+  viewer?.scene?.requestRender?.()
+}
 function closeRunHistoryLayer(id) {
   const layer = runHistoryLayers.value.find(item => item.id === id)
   if (!layer) return
   try { layer.renderer?.destroy?.() } catch {}
+  if (selectedProfileLayerId.value === id) selectedProfileLayerId.value = ''
   runHistoryLayers.value = runHistoryLayers.value.filter(item => item.id !== id)
   removeRunPanelFromDock(id)
   viewer?.scene?.requestRender?.()
@@ -1851,10 +1983,11 @@ function closeTerrainRun() {
 }
 function toggleTerrainSettings() {
   if (analysisMode.value !== '3d') switchMode('3d')
-  parameterPanelOpen.value = !parameterPanelOpen.value
-  resetParameterPanelPosition()
+  parameterPanelOpen.value = false
+  simulationControls.sidebarOpen = !simulationControls.sidebarOpen
 }
 function toggleTerrainSlice() {
+  selectedProfileLayerId.value = ''
   const open = !terrainSliceOpen.value || !terrainProfileOpen.value
   terrainSliceOpen.value = open; terrainProfileOpen.value = open
   if (open) void activateDynamicRaysForCurrentAzimuth()
@@ -1864,35 +1997,142 @@ function runTerrainField() {
   pendingRun = true
   executeRunRequest()
 }
+/** 地形上单击取点后，同步侧边栏「仿真配置」的经纬度。 */
+function syncSimulationLocationFromTerrain(point) {
+  const lon = Number(point?.lon)
+  const lat = Number(point?.lat)
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return
+  calcParams.value.coordX = Number(lon.toFixed(6))
+  calcParams.value.coordY = Number(lat.toFixed(6))
+}
+
+function setSimulationCoordinates(coords) {
+  const lon = Number(coords?.lon)
+  const lat = Number(coords?.lat)
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return false
+  calcParams.value.coordX = Number(lon.toFixed(6))
+  calcParams.value.coordY = Number(lat.toFixed(6))
+  return true
+}
+/** 当前运行面板中修改经纬度后直接运行。 */
+function runCurrentRunAt(coords) {
+  if (loading.value || !setSimulationCoordinates(coords)) return
+  runTerrainField()
+}
+/** 历史声场面板中修改经纬度后按该次参数运行。 */
+function runHistoryAt(id, coords) {
+  if (loading.value) return
+  const layer = runHistoryLayers.value.find(item => item.id === id)
+  if (layer?.params) Object.assign(calcParams.value, JSON.parse(JSON.stringify(layer.params)))
+  if (!setSimulationCoordinates(coords)) return
+  runTerrainField()
+}
+
 function loadTerrainStationParameters(point) {
   if (loading.value) return
   if (analysisMode.value !== '3d') switchMode('3d')
   calcParams.value.coordX = Number(point.lon.toFixed(6))
   calcParams.value.coordY = Number(point.lat.toFixed(6))
   stationPositionPoint.value = { ...point }
-  stationPositionTime.value = ''
-  stationPositionHasRun.value = false
+  // 已有运行结果时沿用当前运行时间；没有运行时保持黄色点与空白时间。
+  const hasCurrentRun = Boolean(terrainRunVisible.value && terrainRunTime.value)
+  stationPositionHasRun.value = hasCurrentRun
+  stationPositionTime.value = hasCurrentRun ? terrainRunTime.value : ''
   stationPositionOpen.value = true
   // 站点参数使用紧凑的「声场」位置卡片展示；完整参数仍可从卡片进入。
+  // 不改变已有声场运行窗口的最小化状态。
   parameterPanelOpen.value = false
-  terrainRunMinimized.value = false
 }
 function closeStationPositionCard() {
   stationPositionOpen.value = false
   stationPositionPoint.value = null
   stationPositionTime.value = ''
   stationPositionHasRun.value = false
+  // 关闭后恢复被临时替换的声场运行面板。
+  runSettingsHiddenPanelId.value = ''
+}
+function bottomDepthAtSource(field, azimuthDeg) {
+  try {
+    if (!field || typeof field.seabedFor !== 'function') return NaN
+    const row = nearestAzimuthRow(field, azimuthDeg)
+    const depths = field.seabedFor(row)
+    const value = Number(depths?.[0])
+    return Number.isFinite(value) ? value : NaN
+  } catch {
+    return NaN
+  }
+}
+function runSettingsCardPoint(source, field, azimuthDeg, anchor, fallbackDepth) {
+  const lon = Number(source?.lon)
+  const lat = Number(source?.lat)
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null
+  const sourceDepth = Number(source?.depth ?? source?.depth_m ?? fallbackDepth)
+  const bottomDepth = bottomDepthAtSource(field, azimuthDeg)
+  const point = {
+    lon,
+    lat,
+    elevation: Number.isFinite(bottomDepth) ? -bottomDepth : -sourceDepth,
+  }
+  if (anchor && Number.isFinite(Number(anchor.x)) && Number.isFinite(Number(anchor.y))) {
+    point.x = Number(anchor.x)
+    point.y = Number(anchor.y)
+  }
+  return point
+}
+/** 当前运行面板「参数设置」：用参数卡片替换运行面板。 */
+function openCurrentRunSettings() {
+  if (!terrainRunVisible.value) return
+  const source = terrainSource.value || sourcePoint.value
+  const point = runSettingsCardPoint(
+    source, terrainField.value, sliceAzimuthDeg.value, terrainAnchor.value, calcParams.value.srcDepth
+  )
+  if (!point) return
+  stationPositionPoint.value = point
+  stationPositionTime.value = terrainRunTime.value
+  stationPositionHasRun.value = true
+  stationPositionOpen.value = true
+  runSettingsHiddenPanelId.value = CURRENT_RUN_PANEL_ID
+  parameterPanelOpen.value = false
+}
+/** 历史声场面板「参数设置」：载入该次参数并用参数卡片替换原面板。 */
+function openHistoryRunSettings(id) {
+  const layer = runHistoryLayers.value.find(item => item.id === id)
+  if (!layer) return
+  if (layer.params) Object.assign(calcParams.value, JSON.parse(JSON.stringify(layer.params)))
+  const anchor = terrainJobAnchors.value[layer.id] || layer.anchor
+  const point = runSettingsCardPoint(
+    layer.source, layer.field, Number(layer.sliceAzimuthDeg) || 0, anchor, layer.params?.srcDepth
+  )
+  if (!point) return
+  stationPositionPoint.value = point
+  stationPositionTime.value = layer.time || ''
+  stationPositionHasRun.value = true
+  stationPositionOpen.value = true
+  runSettingsHiddenPanelId.value = id
+  parameterPanelOpen.value = false
 }
 function runStationPositionCard() {
   if (loading.value) return
+  const hiddenId = runSettingsHiddenPanelId.value
+  const historicalLayer = hiddenId && hiddenId !== CURRENT_RUN_PANEL_ID
+    ? runHistoryLayers.value.find(item => item.id === hiddenId)
+    : null
+  if (hiddenId) closeStationPositionCard()
+  if (historicalLayer) {
+    // 参数卡片中的修改已同步到 calcParams，直接按当前值运行。
+    runTerrainField()
+    return
+  }
   stationPositionHasRun.value = true
   stationPositionTime.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   runTerrainField()
 }
 function runAtTerrainStation(point) {
   if (loading.value) return
-  loadTerrainStationParameters(point)
-  runStationPositionCard()
+  if (analysisMode.value !== '3d') switchMode('3d')
+  // 直接运行不打开/替换参数卡片；仅同步本次运行时使用的声源坐标。
+  syncSimulationLocationFromTerrain(point)
+  runTerrainField()
 }
 // 任何入口触发运行时，以实际运行时间为准刷新站点参数卡片状态。
 watch(terrainRunTime, (time) => {
@@ -2061,8 +2301,8 @@ const calcParams = ref({
   receiverX: -60,
   receiverY: 70,
   srcDepth: 150,
-  grazingAngleMin: -45,
-  grazingAngleMax: 45,
+  grazingAngleMin: -25,
+  grazingAngleMax: 25,
   range: 10,
   minFreq: 100,
   maxFreq: 100,
@@ -2194,6 +2434,12 @@ const BOTTOM_TYPE_ROUTE_SAMPLE_COUNT = 180
  */
 const staticRayData = shallowRef(null)
 const rayDataByAzimuth = new Map()
+/** 冰区三维动态声线：一次请求返回全部扇面，按方位拆分后缓存。 */
+const ice3dRayByAzimuth = { static: new Map(), dynamic: new Map() }
+let ice3dRayRequest = null
+let ice3dRayToken = 0
+/** 本次射线模型运行是否检测到海冰（自动决定是否走冰区接口）。 */
+const detectedSeaIce = ref(false)
 /**
  * 三维传播损失完成后不自动请求声线。只有用户点击「二维传播损失」后才激活
  * 动态声线工作流；激活后方位变化会继续按需请求对应扇面的动态声线。
@@ -2296,6 +2542,67 @@ const sliceModeLabel = computed(
  */
 const sliceAzimuthDeg = ref(compassBearingToInternalAzimuth(verticalSliceControls.sliceAzimuthDeg))
 
+/* ── 垂直切面 / 动态声线使用的数据（当前结果或选中的历史声场） ── */
+const profileData = computed(() => selectedProfileLayer.value?.field || raySourceData.value)
+const profileRayData = computed(() => (
+  selectedProfileLayer.value ? selectedProfileLayer.value.rayData : staticRayData.value
+))
+const profileAnimated = computed(() => {
+  const layer = selectedProfileLayer.value
+  const interfaceTag = layer ? layer.rayInterface : calcParams.value.rayInterface
+  return interfaceTag === 'dynamic' && verticalSliceControls.dynamicRays
+})
+const profileAzimuthDeg = computed(() => (
+  selectedProfileLayer.value
+    ? Number(selectedProfileLayer.value.sliceAzimuthDeg) || 0
+    : sliceAzimuthDeg.value
+))
+const profileMaxRadiusM = computed(() => {
+  const layer = selectedProfileLayer.value
+  if (layer) return (Number(layer.sourceRadiusKm || layer.radiusKm) || 0) * 1000
+  return sourceRadiusKm.value * 1000
+})
+const profileSourceDepthM = computed(() => (
+  selectedProfileLayer.value
+    ? Number(selectedProfileLayer.value.sourceDepthM)
+    : Number(sourcePoint.value?.depth_m)
+))
+const profileBottomTypeSegments = computed(() => (
+  selectedProfileLayer.value ? (selectedProfileLayer.value.bottomTypeSegments || []) : bottomTypeSegments.value
+))
+const profileBottomTypeState = computed(() => (
+  selectedProfileLayer.value ? (selectedProfileLayer.value.bottomTypeState || 'idle') : bottomTypeState.value
+))
+const profileTerrainRayData = computed(() => {
+  if (signalExcessState.enabled) return null
+  const layer = selectedProfileLayer.value
+  if (!(verticalSliceControls.dynamicRays || verticalSliceControls.staticRays)) return null
+  return layer ? layer.rayData : staticRayData.value
+})
+const profileTerrainRaysVisible = computed(() => (
+  earthRaysVisible.value &&
+  !signalExcessState.enabled &&
+  (verticalSliceControls.dynamicRays || verticalSliceControls.staticRays) &&
+  (selectedProfileLayer.value ? !!selectedProfileLayer.value.rayData : true)
+))
+const profileTerrainRaysStatic = computed(() => !!verticalSliceControls.staticRays)
+const profileTerrainRaysAnimated = computed(() => {
+  const layer = selectedProfileLayer.value
+  if (layer) return verticalSliceControls.dynamicRays && layer.rayInterface === 'dynamic'
+  return !!verticalSliceControls.dynamicRays
+})
+/** 方向方位线 / 声速剖面所属声场体（选中历史声场时跟随该体）。 */
+const profileDirectionLayerId = computed(() => selectedProfileLayer.value?.id || 'current')
+const profileSoundProfile = computed(() => (
+  selectedProfileLayer.value?.field?.soundProfile || terrainField.value?.soundProfile || null
+))
+const profileSourceLon = computed(() => Number(
+  selectedProfileLayer.value?.source?.lon ?? sourcePoint.value?.lon ?? terrainSource.value?.lon ?? calcParams.value.coordX
+))
+const profileSourceLat = computed(() => Number(
+  selectedProfileLayer.value?.source?.lat ?? sourcePoint.value?.lat ?? terrainSource.value?.lat ?? calcParams.value.coordY
+))
+
 /* ── 侧边栏「垂直切面」控件 ↔ 本地状态双向同步 ── */
 watch(() => verticalSliceControls.showSlice, (val) => {
   terrainSliceOpen.value = !!val
@@ -2360,8 +2667,7 @@ watch(
 /** 打开声线播放但尚无当前方位数据时，按当前接口补算一次。 */
 function requestRayDataForPlayback() {
   if (!isRayModel.value || analysisMode.value !== '3d' || !raySourceData.value || !availableAzimuths.value.length) return
-  const key = `${nearestAvailableAzimuth(sliceAzimuthDeg.value).toFixed(4)}:${calcParams.value.rayInterface}`
-  if (staticRayData.value && rayDataByAzimuth.has(key)) return
+  if (staticRayData.value && getCachedRayResponse(sliceAzimuthDeg.value)) return
   ensureRayDataForAzimuth(sliceAzimuthDeg.value).catch((error) => {
     console.warn('[声线播放] 当前方位声线不可用：', error?.message ?? error)
   })
@@ -2374,6 +2680,14 @@ function requestRayDataForPlayback() {
 function applyRayPlaybackVisibility() {
   const dynamic = !!verticalSliceControls.dynamicRays
   const staticRays = !!verticalSliceControls.staticRays
+  // 只有动态声线推进播放时间；仅静态（或全部关闭）时归零并暂停，
+  // 重新打开动态后从 0s 继续行进。
+  if (dynamic) {
+    setRayFlowPaused(false)
+  } else {
+    seekRayFlowClock(0)
+    setRayFlowPaused(true)
+  }
   twoDRayFlowRenderer?.setVisible(earthRaysVisible.value && dynamic)
   if (analysisMode.value === '3d') {
     refreshVolumeRayScatterPoints()
@@ -2410,14 +2724,17 @@ function applyEast90Indicator() {
   // Cesium 三维体，避免把线绘制到地形模式下被隐藏的画布上。
   const enabled = verticalSliceControls.east90Indicator && props.viewMode !== 'terrain'
   if (!enabled || !viewer?.entities || !viewer || viewer.isDestroyed?.()) return
-  // 优先用实际计算出的声源点（wedge.sourceLon/Lat），否则回退到计算参数坐标。
-  const source = sourcePoint.value ?? { lon: calcParams.value.coordX, lat: calcParams.value.coordY }
+  // 选中历史声场时方向线跟随该声场体，否则用当前实际声源点。
+  const layer = selectedProfileLayer.value
+  const source = layer?.source ?? sourcePoint.value ?? { lon: calcParams.value.coordX, lat: calcParams.value.coordY }
   const sourceLon = Number(source.lon)
   const sourceLat = Number(source.lat)
   if (!Number.isFinite(sourceLon) || !Number.isFinite(sourceLat)) return
-  const radiusM = Number(sourceRadiusKm.value) * 1000 || 10000
+  const radiusM = Number(layer ? (layer.sourceRadiusKm || layer.radiusKm) : sourceRadiusKm.value) * 1000 || 10000
   // 内部方位（正东 0°、逆时针）转罗盘方位（正北 0°、顺时针）
-  const bearing = internalAzimuthToCompassBearing(sliceAzimuthDeg.value)
+  const bearing = internalAzimuthToCompassBearing(
+    layer ? (Number(layer.sliceAzimuthDeg) || 0) : sliceAzimuthDeg.value
+  )
   const end = destinationLonLat(sourceLon, sourceLat, bearing, radiusM)
   const color = Cesium.Color.fromCssColorString('#ff2d95').withAlpha(0.95)
   const lineAltitude = 5
@@ -2464,7 +2781,15 @@ function applyEast90Indicator() {
   viewer.scene?.requestRender?.()
 }
 watch(
-  () => [verticalSliceControls.east90Indicator, props.viewMode, sourcePoint.value, sourceRadiusKm.value, sliceAzimuthDeg.value],
+  () => [
+    verticalSliceControls.east90Indicator,
+    props.viewMode,
+    profileDirectionLayerId.value,
+    profileSourceLon.value,
+    profileSourceLat.value,
+    profileMaxRadiusM.value,
+    profileAzimuthDeg.value,
+  ],
   () => applyEast90Indicator()
 )
 
@@ -2547,6 +2872,8 @@ let twoDMapLayer = null
 let curtainPrimitive = null
 /** 地球剖面帘 / 三维声场体上是否叠加声线（「声线隐藏 / 声线显示」按钮控制） */
 const earthRaysVisible = ref(true)
+/** 进入全球干净视图前用户设置的声线显隐，返回地形时恢复。 */
+let earthRaysVisibleBeforeGlobe = null
 
 /** 显示 / 隐藏地球剖面帘和三维体上的声线（不移除剖面帘本身） */
 function setEarthRaysVisible(visible) {
@@ -2665,6 +2992,8 @@ const routeBearingDeg = computed(() => routeGeometry.value.bearing)
 const isRayModel = computed(() => calcParams.value.model === 'bellhop')
 /** 是否使用后端动态声线接口（Analyse2DRTRDDynamic / AnalyseIce2DRTRDDynamic） */
 const useDynamicRays = computed(() => calcParams.value.rayInterface === 'dynamic')
+/** 射线模型运行在冰区时，声线统一走 AnalyseIce3DRTRDDynamic。 */
+const useIce3dRays = computed(() => isRayModel.value && calcParams.value.regionType === 'ice')
 const selectedModelLabel = computed(() => ({
   bellhop: '射线模型',
   ram: 'RAM 模型',
@@ -2710,24 +3039,36 @@ function launchAngleParams() {
   }
 }
 
-function commonPortalParams(extra = {}) {
+function portalParamsFor(sourceParams = calcParams.value, extra = {}) {
+  const p = sourceParams
+  const first = Number(p.grazingAngleMin)
+  const second = Number(p.grazingAngleMax)
+  const a = Number.isFinite(first) ? first : -45
+  const b = Number.isFinite(second) ? second : 45
+  const minAngle = Math.min(a, b)
+  const maxAngle = Math.max(a, b)
   return {
-    coordX: Number(calcParams.value.coordX),
-    coordY: Number(calcParams.value.coordY),
-    dataSource: calcParams.value.dataset,
+    coordX: Number(p.coordX),
+    coordY: Number(p.coordY),
+    dataSource: p.dataset,
     dataType: 'DT_ENV_SOUND',
-    time: normalizePortalTime(calcParams.value.time),
+    time: normalizePortalTime(p.time),
     timeRes: 0,
-    rdataSource: calcParams.value.dataset,
-    rtime: normalizePortalTime(calcParams.value.time),
-    srcDepth: Number(calcParams.value.srcDepth),
-    minFreq: Number(calcParams.value.minFreq),
-    maxFreq: Number(calcParams.value.maxFreq),
-    ...launchAngleParams(),
+    rdataSource: p.dataset,
+    rtime: normalizePortalTime(p.time),
+    srcDepth: Number(p.srcDepth),
+    minFreq: Number(p.minFreq),
+    maxFreq: Number(p.maxFreq),
+    grazingAngle: (minAngle + maxAngle) / 2,
+    beamWidth: maxAngle - minAngle,
     isWaterChanged: true,
-    coherent: Boolean(calcParams.value.coherent),
+    coherent: Boolean(p.coherent),
     ...extra,
   }
+}
+
+function commonPortalParams(extra = {}) {
+  return portalParamsFor(calcParams.value, extra)
 }
 
 const soundResultCache = {
@@ -2959,6 +3300,12 @@ watch(
         setTerrainWheelBlocker(false)
         terrainLeaving.value = false
       }
+      // 从全球干净视图返回时恢复声线显隐：离开时被强制隐藏，否则地形上的
+      // 声场体动态声线不会再出现（垂直切面由独立渲染器绘制，故仍可见）。
+      if (earthRaysVisibleBeforeGlobe !== null) {
+        earthRaysVisible.value = earthRaysVisibleBeforeGlobe
+        earthRaysVisibleBeforeGlobe = null
+      }
       soundField?.releaseRenderer()
       for (const layer of runHistoryLayers.value) layer.renderer?.releaseRenderer?.()
       stopVolumeRayAnimation()
@@ -2986,6 +3333,10 @@ watch(
   () => {
     if (restoringSoundResult) return
     rayDataByAzimuth.clear()
+    ice3dRayByAzimuth.static.clear()
+    ice3dRayByAzimuth.dynamic.clear()
+    ice3dRayRequest = null
+    ice3dRayToken++
     staticRayData.value = null
     stopVolumeRayAnimation()
     rayLoadToken++
@@ -3654,6 +4005,10 @@ function clearResultLayers({ preserveVolume = false } = {}) {
   raySourceData.value = null
   staticRayData.value = null
   rayDataByAzimuth.clear()
+  ice3dRayByAzimuth.static.clear()
+  ice3dRayByAzimuth.dynamic.clear()
+  ice3dRayRequest = null
+  ice3dRayToken++
   rayLoadToken++
   clearTimeout(rayLoadTimer)
   rayLoadTimer = 0
@@ -4101,9 +4456,8 @@ function startSliceRayAnimation() {
     // 剖面帘在最近的扇面行上构建；声线缓存也按吸附后的方位存取，避免自由滑块
     // 方位（未吸附）与缓存 key 对不上而无法命中。
     const azimuth = nearestAvailableAzimuth(Number(meta.azimuth))
-    const key = `${azimuth.toFixed(4)}:${calcParams.value.rayInterface}`
     const response =
-      rayDataByAzimuth.get(key) ??
+      getCachedRayResponse(azimuth) ??
       (Math.abs(azimuth - currentAzimuth) < 1e-6 ? staticRayData.value : null)
     if (!response) continue
     const parsedRays = parseAnalyse2DRtrd(response)
@@ -4140,7 +4494,7 @@ function startSliceRayAnimation() {
   }
 
   // 预先绘制全部声线：动态播放时作为淡显轨道，纯静态模式时作为唯一显示。
-  const staticAlpha = dynamic ? 0.24 : 0.78
+  const staticAlpha = dynamic ? 0.14 : 0.38
   for (const { meta, flow } of items) {
     for (const track of flow?.tracks ?? []) {
       const positions = toPositions(meta, track.points)
@@ -4334,6 +4688,13 @@ function stepPointerAzimuth(dir) {
 function onProfileAzimuthChange(deg) {
   const v = Number(deg)
   if (!Number.isFinite(v)) return
+  const layer = selectedProfileLayer.value
+  if (layer) {
+    layer.sliceAzimuthDeg = v
+    refreshRunHistoryLayers()
+    void ensureHistoryLayerDynamicRays(layer)
+    return
+  }
   sliceAzimuthDeg.value = v
   syncSoundField()
   // 分析结果窗内的方位下拉也要同步体上的方位剖面帘
@@ -4456,6 +4817,16 @@ function archiveCurrent3dRun() {
     panelMinimized: terrainRunMinimized.value,
     time: terrainRunTime.value,
     anchor: terrainAnchor.value ? { ...terrainAnchor.value } : null,
+    // 供历史声场胶囊重新运行与查看二维传播损失。
+    params: JSON.parse(JSON.stringify(calcParams.value)),
+    rayInterface: calcParams.value.rayInterface,
+    rayData: staticRayData.value,
+    rayAzimuthDeg: sliceAzimuthDeg.value,
+    sliceAzimuthDeg: sliceAzimuthDeg.value,
+    sourceRadiusKm: sourceRadiusKm.value,
+    sourceDepthM: Number(sourcePoint.value?.depth_m ?? calcParams.value.srcDepth),
+    bottomTypeSegments: [...bottomTypeSegments.value],
+    bottomTypeState: bottomTypeState.value,
   }
   if (terrainRunMinimized.value) {
     runPanelDockOrder.value = runPanelDockOrder.value.map(item => item === CURRENT_RUN_PANEL_ID ? id : item)
@@ -4464,6 +4835,11 @@ function archiveCurrent3dRun() {
   }
   // 用户未主动关闭前始终保留；不按数量自动淘汰状态窗口或对应声场。
   runHistoryLayers.value = [...runHistoryLayers.value, layer]
+  // 切面 / 动态声线已打开时，让它们继续停留在刚归档的声场上，
+  // 直到用户切换到其他声场胶囊的二维传播损失。
+  if (!selectedProfileLayerId.value && terrainSliceOpen.value) {
+    selectedProfileLayerId.value = id
+  }
   soundField = viewer ? new SoundField(viewer, { depthExaggeration: depthExaggeration.value }) : null
 }
 
@@ -4475,8 +4851,6 @@ function submitCalculation() {
     terrainRunMinimized.value = false
     removeRunPanelFromDock(CURRENT_RUN_PANEL_ID)
     terrainAnchor.value = null
-    terrainSliceOpen.value = false
-    terrainProfileOpen.value = false
     terrainRunTime.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     terrainSource.value = { lon: Number(calcParams.value.coordX), lat: Number(calcParams.value.coordY), depth: Number(calcParams.value.srcDepth) }
     terrainRadiusKm.value = Number(calcParams.value.range) * 1.852
@@ -4728,6 +5102,65 @@ async function load2dData() {
   }
 }
 
+/** 构造覆盖声源传播半径的区域查询边界。 */
+function seaIceQueryBounds(lonDeg, latDeg, rangeNm) {
+  const radiusM = Math.max(1, Number(rangeNm) || 0) * 1852
+  const latSpan = radiusM / 111320
+  const lonSpan = latSpan / Math.max(0.05, Math.cos(Number(latDeg) * Math.PI / 180))
+  const west = Math.max(-180, Number(lonDeg) - lonSpan)
+  const east = Math.min(180, Number(lonDeg) + lonSpan)
+  const south = Math.max(-89.9, Number(latDeg) - latSpan)
+  const north = Math.min(89.9, Number(latDeg) + latSpan)
+  if (!(east > west && north > south)) return null
+  return {
+    bottomLeftX: west,
+    bottomLeftY: south,
+    topRightX: east,
+    topRightY: north,
+  }
+}
+
+/**
+ * 射线模型运行前查询声源及半径覆盖范围内的海冰厚度。
+ * 非陆地值（9999 为陆地/缺测）中存在 >0 的冰厚即按冰区计算。
+ */
+async function detectRayModelSeaIce() {
+  if (!isRayModel.value) return
+  const lon = Number(calcParams.value.coordX)
+  const lat = Number(calcParams.value.coordY)
+  const rangeNm = Number(calcParams.value.range)
+  if (![lon, lat, rangeNm].every(Number.isFinite) || rangeNm <= 0) return
+  const bounds = seaIceQueryBounds(lon, lat, rangeNm)
+  if (!bounds) return
+  try {
+    const response = await getEnvDataRegion({
+      dataSource: calcParams.value.dataset,
+      dataType: 'DT_ENV_ICE_THICKNESS',
+      time: normalizePortalTime(calcParams.value.time),
+      timeRes: 0,
+      z: 0,
+      ...bounds,
+    })
+    const grid = response?.Data?.Units?.[0]?.Response?.data
+    let hasSeaIce = false
+    for (const row of Array.isArray(grid) ? grid : []) {
+      for (const value of Array.isArray(row) ? row : []) {
+        const thickness = Number(value)
+        if (Number.isFinite(thickness) && Math.abs(thickness - 9999) > 1e-9 && thickness > 0) {
+          hasSeaIce = true
+          break
+        }
+      }
+      if (hasSeaIce) break
+    }
+    detectedSeaIce.value = hasSeaIce
+    calcParams.value.regionType = hasSeaIce ? 'ice' : 'normal'
+  } catch (error) {
+    console.warn('[海冰检测] 区域冰厚查询失败，沿用当前海区设置：', error?.message ?? error)
+    detectedSeaIce.value = calcParams.value.regionType === 'ice'
+  }
+}
+
 async function loadData() {
   loading.value = true
   errorText.value = ''
@@ -4741,10 +5174,18 @@ async function loadData() {
   dynamicRayLoading.value = false
   stopVolumeRayAnimation()
   rayDataByAzimuth.clear()
+  ice3dRayByAzimuth.static.clear()
+  ice3dRayByAzimuth.dynamic.clear()
+  ice3dRayRequest = null
+  ice3dRayToken++
   rayRequestByKey.clear()
   rayLoadToken++
   clearTimeout(rayLoadTimer)
   rayLoadTimer = 0
+  if (isRayModel.value) {
+    loadingMessage.value = '检查声源区域海冰覆盖…'
+    await detectRayModelSeaIce()
+  }
   loadingMessage.value = '调用声场计算接口…'
 
   if (!soundField) {
@@ -4789,6 +5230,7 @@ async function loadData() {
     volumeVisible.value = true
     cleanGlobeView.value = false
     earthRaysVisible.value = true
+    earthRaysVisibleBeforeGlobe = null
     pointerEnabled.value = true
 
     syncSoundField()
@@ -4835,10 +5277,80 @@ function nearestAvailableAzimuth(value) {
  * 为当前传播损失扇面调用 Analyse2DRTRD。每个扇面独立计算并缓存，避免把
  * 一个固定方位的声线错误地复用到所有 TL 剖面上。
  */
+/** 按方位读取缓存的声线响应（冰区三维动态声线优先）。 */
+function getCachedRayResponse(azimuthDeg, interfaceTag = calcParams.value.rayInterface) {
+  const matched = nearestAvailableAzimuth(azimuthDeg)
+  const key = matched.toFixed(4)
+  if (useIce3dRays.value) {
+    const bucket = ice3dRayByAzimuth[interfaceTag === 'static' ? 'static' : 'dynamic']
+    return bucket?.get(key) ?? null
+  }
+  return rayDataByAzimuth.get(`${key}:${interfaceTag}`) ?? null
+}
+
+/** 冰区一次调用 AnalyseIce3DRTRDDynamic，返回全部扇面的静态与动态声线。 */
+async function ensureIce3dRayData() {
+  if (!useIce3dRays.value) return false
+  if (ice3dRayByAzimuth.static.size && ice3dRayByAzimuth.dynamic.size) return true
+  if (ice3dRayRequest) {
+    try {
+      await ice3dRayRequest
+    } catch {}
+    return ice3dRayByAzimuth.dynamic.size > 0
+  }
+  const requestToken = ++ice3dRayToken
+  const payload = commonPortalParams({
+    range: Number(calcParams.value.range),
+    minFreq: Number(calcParams.value.minFreq),
+    maxFreq: Number(calcParams.value.maxFreq),
+    sector: Number(calcParams.value.sector),
+    lineCount: Number(calcParams.value.lineCount),
+  })
+  ice3dRayRequest = analyseIce3dDynamicRTRD(payload)
+  try {
+    const response = await ice3dRayRequest
+    if (requestToken !== ice3dRayToken) return false
+    const adapted = adapt3dRayResponseToAzimuths(response)
+    if (!adapted?.byAzimuth?.size) return false
+    ice3dRayByAzimuth.static.clear()
+    ice3dRayByAzimuth.dynamic.clear()
+    for (const [portalAzimuth, entry] of adapted.byAzimuth) {
+      const internalAzimuth = nearestAvailableAzimuth(
+        compassBearingToInternalAzimuth(portalAzimuth)
+      )
+      const key = internalAzimuth.toFixed(4)
+      ice3dRayByAzimuth.static.set(key, entry.staticResponse)
+      ice3dRayByAzimuth.dynamic.set(key, entry.dynamicResponse)
+    }
+    return true
+  } finally {
+    ice3dRayRequest = null
+  }
+}
+
 async function ensureRayDataForAzimuth(azimuthDeg) {
   if (!isRayModel.value) {
     staticRayData.value = null
     return null
+  }
+  if (useIce3dRays.value) {
+    const loaded = await ensureIce3dRayData()
+    if (!loaded) {
+      staticRayData.value = null
+      return null
+    }
+    const matchedAzimuth = nearestAvailableAzimuth(azimuthDeg)
+    const result = getCachedRayResponse(matchedAzimuth)
+    staticRayData.value = result
+    if (analysisMode.value === '3d' && soundField?.volume) {
+      refreshVolumeRayScatterPoints()
+      soundField.syncRayLines()
+      startVolumeRayAnimation()
+    }
+    if (analysisMode.value === '3d' && sliceEnabled.value) {
+      startSliceRayAnimation()
+    }
+    return result
   }
   const matchedAzimuth = nearestAvailableAzimuth(azimuthDeg)
   const key = `${matchedAzimuth.toFixed(4)}:${calcParams.value.rayInterface}`
@@ -4896,7 +5408,7 @@ function scheduleRayDataForAzimuth(azimuthDeg, delay = 320) {
   if (!isRayModel.value || analysisMode.value !== '3d' || !raySourceData.value || !availableAzimuths.value.length) return
   clearTimeout(rayLoadTimer)
   const matched = nearestAvailableAzimuth(azimuthDeg)
-  const cached = rayDataByAzimuth.get(`${matched.toFixed(4)}:${calcParams.value.rayInterface}`)
+  const cached = getCachedRayResponse(matched)
   // 切换到未计算方位时先清空旧声线，避免等待接口期间把上一方位误标成当前方位。
   staticRayData.value = cached ?? null
   stopVolumeRayAnimation()
@@ -5188,10 +5700,21 @@ function buildVolumeRayScatterPoints() {
   if (![sourceLon, sourceLat].every(Number.isFinite)) return []
   const points = []
   const interfaceTag = calcParams.value.rayInterface
-  for (const [key, response] of rayDataByAzimuth.entries()) {
-    if (!key.endsWith(`:${interfaceTag}`)) continue
-    const azimuth = Number(key.split(':')[0])
-    if (!Number.isFinite(azimuth)) continue
+  const entries = []
+  if (useIce3dRays.value) {
+    const bucket = ice3dRayByAzimuth[interfaceTag === 'static' ? 'static' : 'dynamic']
+    for (const [key, response] of bucket.entries()) {
+      const azimuth = Number(key)
+      if (Number.isFinite(azimuth)) entries.push([azimuth, response])
+    }
+  } else {
+    for (const [key, response] of rayDataByAzimuth.entries()) {
+      if (!key.endsWith(`:${interfaceTag}`)) continue
+      const azimuth = Number(key.split(':')[0])
+      if (Number.isFinite(azimuth)) entries.push([azimuth, response])
+    }
+  }
+  for (const [azimuth, response] of entries) {
     const parsed = parseAnalyse2DRtrd(response)
     if (!parsed) continue
     const bearing = internalAzimuthToCompassBearing(azimuth)

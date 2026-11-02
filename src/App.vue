@@ -33,7 +33,7 @@
 </template>
 
 <script setup>
-import { computed, defineAsyncComponent, ref } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
 import ApplicationShell from '@/layouts/ApplicationShell.vue'
 import {
   DEFAULT_MODULE_ID,
@@ -107,6 +107,29 @@ function toggleThumbnail() {
   }
   thumbnailCollapsed.value = !thumbnailCollapsed.value
 }
+
+function isEditableTarget(target) {
+  if (!(target instanceof HTMLElement)) return false
+  const tag = target.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable
+}
+
+function onKeyDown(event) {
+  if (event.defaultPrevented || event.repeat) return
+  if (event.ctrlKey || event.metaKey || event.altKey) return
+  if (isEditableTarget(event.target)) return
+  const key = event.key.toLowerCase()
+  if (key === 'm') {
+    event.preventDefault()
+    selectViewMode('terrain')
+  } else if (key === 'g') {
+    event.preventDefault()
+    selectViewMode('globe')
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onKeyDown))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeyDown))
 </script>
 
 <style>

@@ -41,7 +41,7 @@
     <div v-show="open" class="rp-body">
       <div class="rp-chart-wrap" :class="{ 'is-placing-receiver': receiverPlacementEnabled }" :style="{ height }">
         <div ref="chartEl" class="rp-chart"></div>
-        <RayFlowOverlay ref="rayOverlay" :flow="rayFlow" :geometry="rayGeometry" :viewport="rayViewport" :playing="raysPlaying" :visible="raysVisible" :static-mode="staticRays && !animated" show-time />
+        <RayFlowOverlay ref="rayOverlay" :flow="rayFlow" :geometry="rayGeometry" :viewport="rayViewport" :playing="raysPlaying" :visible="raysVisible" :static-mode="staticRays && !animated" :show-static-tracks="staticRays" show-time />
         <button
           v-if="zoomedIn"
           type="button"
@@ -87,7 +87,13 @@ import {
   fmtDist,
   niceStep,
 } from '@/utils/soundProfileModel.js'
-import { bottomTypeAcousticProperties, bottomTypeColor, bottomTypeLabel } from '@/utils/bottomTypeModel.js'
+import {
+  DEFAULT_BOTTOM_ACOUSTICS,
+  DEFAULT_BOTTOM_LABEL,
+  bottomTypeAcousticProperties,
+  bottomTypeColor,
+  bottomTypeLabel,
+} from '@/utils/bottomTypeModel.js'
 import RayFlowOverlay from './RayFlowOverlay.vue'
 import { resolveRayFlow, rayChartViewport } from '@/utils/rayFlow.js'
 import { parseAnalyse2DRtrd } from '@/sdk/ncFieldModel.js'
@@ -400,7 +406,6 @@ const bottomMaskSegments = computed(() => {
         startM: axisMin,
         endM: axisMax,
         id: 0,
-        label: props.bottomTypeState === 'error' ? '底质查询失败' : '默认底质',
         fallback: true,
       }]
   const out = []
@@ -408,19 +413,32 @@ const bottomMaskSegments = computed(() => {
     const startM = Math.max(axisMin, Number(segment.startM))
     const endM = Math.min(axisMax, Number(segment.endM))
     if (!(endM > startM)) continue
-    const label = segment.label || bottomTypeLabel(segment.id)
+    const id = Number(segment.id) || 0
+    const isDefaultBottom = id <= 0 || segment.fallback
+    const label = isDefaultBottom
+      ? DEFAULT_BOTTOM_LABEL
+      : (segment.label || bottomTypeLabel(id))
+    const acoustics = isDefaultBottom
+      ? {
+          ...DEFAULT_BOTTOM_ACOUSTICS,
+          ...Object.fromEntries(
+            Object.entries(bottomTypeAcousticProperties(segment))
+              .filter(([, value]) => value != null)
+          ),
+        }
+      : bottomTypeAcousticProperties(segment)
     out.push({
       key: `${segment.startM}-${segment.endM}-${segment.id}`,
       startM,
       endM,
       startIndex: nearestIndex(dists, startM),
       endIndex: nearestIndex(dists, endM),
-      id: Number(segment.id) || 0,
+      id,
       label,
       color: bottomTypeColor(segment.id),
-      acoustics: bottomTypeAcousticProperties(segment),
+      acoustics,
       title: `${label} · ${fmtNm(startM)} ~ ${fmtNm(endM)}`,
-      fallback: !!segment.fallback,
+      fallback: !!segment.fallback || isDefaultBottom,
     })
   }
   return out

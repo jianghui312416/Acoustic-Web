@@ -10,6 +10,8 @@ export function bathymetryColor(height, min = -8000, max = 0) {
 export function createTerrainProjection(bounds, size, floor, camera = {}) {
   const yaw = camera.yaw || 0
   const pitch = camera.pitch ?? 0.68
+  const panX = Number(camera.panX) || 0
+  const panY = Number(camera.panY) || 0
   const scale = Math.min(size.width * .72, size.height * 1.2) * (camera.zoom || 1)
   const cosLat = Math.max(.1, Math.cos((bounds.north + bounds.south) / 2 * Math.PI / 180))
   const spanX = (bounds.east - bounds.west) * cosLat
@@ -26,8 +28,8 @@ export function createTerrainProjection(bounds, size, floor, camera = {}) {
     const ry = x * Math.sin(yaw) + y * Math.cos(yaw)
     const z = elevation / horizontalSpanM * verticalExaggeration
     const perspective = 1 / (1 - ry * .35)
-    return { x: size.width * .5 + rx * scale * perspective,
-      y: size.height * .40 + (ry * Math.sin(pitch) - z * Math.cos(pitch)) * scale * perspective,
+    return { x: size.width * .5 + panX + rx * scale * perspective,
+      y: size.height * .40 + panY + (ry * Math.sin(pitch) - z * Math.cos(pitch)) * scale * perspective,
       order: ry + z * .3, perspective }
   }
 }
@@ -92,6 +94,7 @@ export function drawTerrainScene(canvas, grid, {
   camera,
   controls = {},
   rayScene = null,
+  raySource = null,
   directionLine = null,
   receiver = null,
 } = {}) {
@@ -109,6 +112,17 @@ export function drawTerrainScene(canvas, grid, {
     ...camera,
     verticalExaggeration: controls.terrainExaggeration,
   })
+  const rayProjectorForSource = (src) => {
+    const lon = Number(src?.lon)
+    const lat = Number(src?.lat)
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null
+    const cosLat = Math.max(.01, Math.cos(lat * Math.PI / 180))
+    return (angle, radius, depth = 0) => project(
+      lon + (Math.cos(angle) * (Number(radius) || 0)) / (111320 * cosLat),
+      lat + (Math.sin(angle) * (Number(radius) || 0)) / 110574,
+      -(Number(depth) || 0),
+    )
+  }
   const lighting = { ...terrainLighting, zFactor: normalizeExaggeration(controls.terrainExaggeration) }
   const mesh = terrainMesh(grid, terrainSegments({ width, height }, camera?.zoom || 1))
   const points = mesh.vertices.map(v => ({ ...v, ...project(v.lon, v.lat, v.elevation) }))
@@ -469,7 +483,12 @@ export function drawTerrainScene(canvas, grid, {
       }
       ctx.restore()
     }
-    if (fieldLayer.primary && directionLine?.visible !== false) {
+    // 方向方位线跟随当前选中的声场体；未指定时仍落在首个（当前）声场体上。
+    const directionTargetId = directionLine?.layerId
+    const isDirectionLayer = directionTargetId
+      ? fieldLayer.id === directionTargetId
+      : fieldLayer.primary
+    if (isDirectionLayer && directionLine?.visible !== false) {
       const directionAzimuth = Number(directionLine?.azimuthDeg)
       const maxRadius = Math.max(...distance.map(Number).filter(Number.isFinite), 0)
       if (Number.isFinite(directionAzimuth) && maxRadius > 0) {
@@ -538,6 +557,8 @@ export function drawTerrainScene(canvas, grid, {
     ctx.fillStyle = '#49e68b'
     ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill()
   }
+  const selectedRayProjector = rayProjectorForSource(raySource)
+  if (selectedRayProjector) rayProjector = selectedRayProjector
   return { points, anchor, anchors, faces, project, mesh, lighting, projectPolar: rayProjector }
 }
 

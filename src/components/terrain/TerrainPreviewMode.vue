@@ -1,12 +1,26 @@
 <template>
   <section class="terrain-preview-mode" aria-label="区域海底地形">
     <canvas ref="canvasEl" class="terrain-canvas" style="position:absolute;inset:0 0 25px;width:100%;height:calc(100% - 25px);display:block"
-      aria-label="区域海底地形，拖动旋转，滚轮缩放，悬停查看深度"
+      aria-label="区域海底地形，左键拖动平移，右键拖动旋转，滚轮缩放，悬停查看深度"
       @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp"
-      @pointercancel="onPointerUp" @pointerleave="onPointerLeave" @wheel.prevent="onWheel"></canvas>
+      @pointercancel="onPointerUp" @pointerleave="onPointerLeave" @wheel.prevent="onWheel"
+      @contextmenu.prevent></canvas>
     <canvas ref="rayCanvasEl" class="ray-canvas" aria-hidden="true"></canvas>
+    <button
+      v-if="exaggerationHandle && !leavingForGlobe"
+      type="button"
+      class="exaggeration-handle"
+      :class="{ active: exaggerationDragging }"
+      :style="{ left: `${exaggerationHandle.x}px`, top: `${exaggerationHandle.y}px` }"
+      :title="`垂直夸张 ${Number(visualControls.terrainExaggeration).toFixed(1)}×（上下拖动调整）`"
+      aria-label="垂直夸张控制柄"
+      @pointerdown="startExaggerationDrag"
+      @pointermove="onExaggerationPointerMove"
+      @pointerup="onExaggerationPointerUp"
+      @pointercancel="onExaggerationPointerUp"
+    ><span aria-hidden="true">⋮</span></button>
     <div class="compass-stack">
-      <button class="compass" title="恢复正北视角" aria-label="恢复正北视角" @click="resetCamera">
+      <button class="compass" title="恢复正北视角（R）" aria-label="恢复正北视角（R）" @click="resetCamera">
         <svg class="compass-dial" viewBox="0 0 120 120" aria-hidden="true">
           <circle cx="60" cy="60" r="56" fill="#0b1d30" stroke="#2f5a78" stroke-width="2" />
           <circle cx="60" cy="60" r="47" fill="none" stroke="#1f4663" stroke-width="1" />
@@ -41,12 +55,12 @@
       @close="station = null" @run="runStation" @parameters="openStationParameters" @noise="$emit('noise', $event)" />
     <slot :anchor="anchor" />
     <TerrainPreviewDock v-model:bounds="bounds" :collapsed="thumbnailCollapsed" :loading="status === 'loading'"
-      @update:collapsed="$emit('update:thumbnailCollapsed', $event)" @load="loadTerrain" @locate="locateSource" />
+      @update:collapsed="$emit('update:thumbnailCollapsed', $event)" @load="loadTerrainFromDock" @locate="locateSource" />
     <footer class="terrain-status">
       <i></i>
       <span v-if="hover">经度 {{ hover.lon.toFixed(4) }}°　纬度 {{ hover.lat.toFixed(4) }}°　{{ hover.elevation < 0 ? '水深' : '高程' }} {{ Math.abs(hover.elevation).toFixed(0) }} m</span>
       <span v-else-if="error" class="terrain-warn">{{ error }}</span>
-      <span v-else>{{ status === 'loading' ? '正在加载地形' : grid ? '地形已就绪 · 本地区域格网' : '等待加载地形' }}</span>
+      <span v-else>{{ status === 'loading' ? '正在加载地形' : grid ? '地形已就绪' : '等待加载地形' }}</span>
       <a href="https://www.gebco.net/data-products-gridded-bathymetry-data/gebco2026-grid" target="_blank" rel="noreferrer">GEBCO 2026 海底高程</a>
     </footer>
   </section>
@@ -86,11 +100,17 @@ const props = defineProps({
   receiver: Object,
   radiusKm: { type: Number, default: 100 / 6 },
   rayData: { type: Object, default: null },
+  /** 动态声线对应的声源；为空时沿用主声场的声源。 */
+  raySource: { type: Object, default: null },
   rayAzimuthDeg: { type: Number, default: 0 },
   raysVisible: { type: Boolean, default: true },
-  /** 静态声线：绘制完整声线路径，不播放行进动画 */
+  /** 静态声线：绘制完整声线路径（可与动态动画同时显示） */
   raysStatic: { type: Boolean, default: false },
+  /** 动态声线：沿路径播放行进动画 */
+  raysAnimated: { type: Boolean, default: true },
   directionLineVisible: { type: Boolean, default: false },
+  /** 方向方位线所属声场体 id；为空时画在首个（当前）声场体上。 */
+  directionLineLayerId: { type: String, default: '' },
   /** 全球视图红框选中的区域；token 变化时才重新加载，避免覆盖运行后的声源取景。 */
   initialBounds: { type: Object, default: null },
   initialBoundsToken: { type: Number, default: 0 },
@@ -98,10 +118,10 @@ const props = defineProps({
   /** 参数卡片打开期间暂时隐藏站点卡片，关闭后恢复。 */
   stationParametersOpen: { type: Boolean, default: false },
 })
-const emit = defineEmits(['anchor', 'layer-anchors', 'bounds-change', 'request-globe', 'station-run', 'station-parameters', 'noise', 'update:thumbnailCollapsed'])
+const emit = defineEmits(['anchor', 'layer-anchors', 'bounds-change', 'load-terrain', 'request-globe', 'station-run', 'station-parameters', 'station-pick', 'noise', 'update:thumbnailCollapsed'])
 const station = ref(null)
 let suspendedStation = null
-function runStation(point) { emit('station-run', point); station.value = null }
+function runStation(point) { emit('station-run', point) }
 function openStationParameters(point) {
   suspendedStation = station.value ? { ...station.value } : { ...point }
   emit('station-parameters', point)
@@ -122,7 +142,10 @@ const status = ref('idle')
 const error = ref('')
 const hover = ref(null)
 const anchor = ref(null)
-const camera = ref({ yaw: 0, pitch: 0.68, zoom: 1 })
+const camera = ref({ yaw: 0, pitch: 0.68, zoom: 1, panX: 0, panY: 0 })
+const exaggerationHandle = ref(null)
+const exaggerationDragging = ref(false)
+let exaggerationDrag = null
 const visualControls = volumeRenderingControls
 
 const headingDeg = computed(() => ((camera.value.yaw * 180 / Math.PI) % 360 + 360) % 360)
@@ -193,7 +216,10 @@ let globeTransitionRaf = 0
 let savedTerrainCamera = null
 const MIN_CAMERA_ZOOM = 0.55
 // 允许贴近声场体与海底表面观察细节；仅改变投影视图比例，不重载地形或声场。
-const MAX_CAMERA_ZOOM = 14
+const MAX_CAMERA_ZOOM = 40
+const MIN_CAMERA_PITCH = 0.05
+const MAX_CAMERA_PITCH = 1.5
+const EXAGGERATION_HANDLE_OFFSET = 64
 const leavingForGlobe = ref(false)
 const terrainRayFlow = shallowRef(null)
 const overlayClockStart = performance.now()
@@ -226,6 +252,27 @@ function sceneControls() {
   return controls
 }
 
+function updateExaggerationHandle() {
+  if (exaggerationDragging.value) return
+  const b = grid.value?.bounds
+  const depthMin = Number(grid.value?.min)
+  if (!b || !lastScene?.project || !(depthMin < 0)) {
+    exaggerationHandle.value = null
+    return
+  }
+  // 锚点只跟随海面原点，不使用随垂直夸张变化的深度投影，
+  // 这样调整倍率时拉杆不会在 Z 轴上滑动，拖动过程中始终固定。
+  const origin = lastScene.project(b.west, b.south, 0)
+  if (![origin?.x, origin?.y].every(Number.isFinite)) {
+    exaggerationHandle.value = null
+    return
+  }
+  exaggerationHandle.value = {
+    x: origin.x,
+    y: origin.y + EXAGGERATION_HANDLE_OFFSET,
+  }
+}
+
 function draw() {
   drawRaf = 0
   if (!props.active || !canvasEl.value || !grid.value) return
@@ -237,11 +284,14 @@ function draw() {
     camera: camera.value,
     controls: sceneControls(),
     rayScene: null,
+    raySource: props.raySource,
     directionLine: {
       visible: props.directionLineVisible,
       azimuthDeg: props.rayAzimuthDeg,
+      layerId: props.directionLineLayerId,
     },
   })
+  updateExaggerationHandle()
   const nextAnchor = lastScene?.anchor ? { x: lastScene.anchor.x, y: lastScene.anchor.y } : null
   emit('layer-anchors', lastScene?.anchors || {})
   if (station.value && lastScene?.project) {
@@ -299,16 +349,20 @@ function drawRays() {
     ctx.stroke()
   }
 
+  // 先绘制完整静态声线（动态开启时作为底图一起显示）。
   if (props.raysStatic) {
+    const alpha = props.raysAnimated ? 0.42 : 0.72
     for (const track of terrainRayFlow.value.tracks ?? []) {
       const pts = projectList(track.points)
       if (pts.length < 2) continue
-      ctx.strokeStyle = 'rgba(235,248,255,0.72)'
-      ctx.lineWidth = 1.3
+      ctx.strokeStyle = `rgba(235,248,255,${alpha})`
+      ctx.lineWidth = props.raysAnimated ? 1.1 : 1.3
       stroke(pts)
     }
-    ctx.restore()
-    return
+    if (!props.raysAnimated) {
+      ctx.restore()
+      return
+    }
   }
 
   const motions = sampleRayMotion(terrainRayFlow.value, rayFlowClockElapsedMs())
@@ -388,7 +442,7 @@ function stopRayAnimation() {
 }
 
 function raysAnimating() {
-  return props.raysVisible && !!terrainRayFlow.value && !props.raysStatic
+  return props.raysVisible && !!terrainRayFlow.value && props.raysAnimated
 }
 function weatherDynamic() {
   return weatherOverlayOn.value && weatherNoiseState.overlayDynamic
@@ -433,8 +487,23 @@ function rebuildRayFlow() {
 }
 
 function resetCamera() {
-  camera.value = { yaw: 0, pitch: 0.68, zoom: 1 }
+  camera.value = { yaw: 0, pitch: 0.68, zoom: 1, panX: 0, panY: 0 }
   scheduleDraw()
+}
+
+function isEditableTarget(target) {
+  if (!(target instanceof HTMLElement)) return false
+  const tag = target.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable
+}
+
+function onKeyDown(event) {
+  if (!props.active || event.defaultPrevented || event.repeat) return
+  if (event.ctrlKey || event.metaKey || event.altKey) return
+  if (isEditableTarget(event.target)) return
+  if (event.key.toLowerCase() !== 'r') return
+  event.preventDefault()
+  resetCamera()
 }
 
 function locateSource() {
@@ -452,6 +521,12 @@ function applyInitialBounds() {
   bounds.value = target
   loadTerrain(target)
   return true
+}
+
+function loadTerrainFromDock(next) {
+  const target = normalizeTerrainBounds(next)
+  emit('load-terrain', target)
+  loadTerrain(target)
 }
 
 async function loadTerrain(next) {
@@ -479,11 +554,50 @@ async function loadTerrain(next) {
   }
 }
 
+function startExaggerationDrag(event) {
+  if (event.button !== 0) return
+  event.preventDefault()
+  event.stopPropagation()
+  exaggerationDrag = {
+    pointerId: event.pointerId,
+    startY: event.clientY,
+    value: Number(visualControls.terrainExaggeration) || 1,
+  }
+  exaggerationDragging.value = true
+  event.currentTarget?.setPointerCapture?.(event.pointerId)
+}
+
+function onExaggerationPointerMove(event) {
+  if (!exaggerationDrag || event.pointerId !== exaggerationDrag.pointerId) return
+  event.preventDefault()
+  const dy = event.clientY - exaggerationDrag.startY
+  const next = clamp(exaggerationDrag.value * Math.exp(-dy * 0.008), 1, 30)
+  visualControls.terrainExaggeration = Math.round(next * 10) / 10
+}
+
+function onExaggerationPointerUp(event) {
+  if (!exaggerationDrag || event.pointerId !== exaggerationDrag.pointerId) return
+  try { event.currentTarget?.releasePointerCapture?.(event.pointerId) } catch {}
+  exaggerationDrag = null
+  exaggerationDragging.value = false
+  scheduleDraw()
+}
+
 function onPointerDown(event) {
-  if (!grid.value || event.button !== 0) return
+  if (!grid.value || (event.button !== 0 && event.button !== 2)) return
+  const mode = event.button === 2 ? 'rotate' : 'pan'
   canvasEl.value?.setPointerCapture?.(event.pointerId)
-  dragState = { pointerId: event.pointerId, x: event.clientX, y: event.clientY,
-    yaw: camera.value.yaw, pitch: camera.value.pitch, moved: false }
+  dragState = {
+    pointerId: event.pointerId,
+    mode,
+    x: event.clientX,
+    y: event.clientY,
+    yaw: camera.value.yaw,
+    pitch: camera.value.pitch,
+    panX: camera.value.panX,
+    panY: camera.value.panY,
+    moved: false,
+  }
 }
 
 function pickHover(event) {
@@ -503,8 +617,19 @@ function onPointerMove(event) {
     const dx = event.clientX - dragState.x
     const dy = event.clientY - dragState.y
     if (Math.abs(dx) + Math.abs(dy) > 2) dragState.moved = true
-    camera.value = { ...camera.value, yaw: dragState.yaw + dx * 0.006,
-      pitch: clamp(dragState.pitch + dy * 0.004, 0.26, 1.18) }
+    if (dragState.mode === 'rotate') {
+      camera.value = {
+        ...camera.value,
+        yaw: dragState.yaw + dx * 0.009,
+        pitch: clamp(dragState.pitch + dy * 0.006, MIN_CAMERA_PITCH, MAX_CAMERA_PITCH),
+      }
+    } else {
+      camera.value = {
+        ...camera.value,
+        panX: dragState.panX + dx,
+        panY: dragState.panY + dy,
+      }
+    }
     hover.value = null
     scheduleDraw()
     return
@@ -516,9 +641,10 @@ function onPointerMove(event) {
 function onPointerUp(event) {
   if (!dragState || dragState.pointerId !== event.pointerId) return
   const moved = dragState.moved
+  const mode = dragState.mode
   dragState = null
   try { canvasEl.value?.releasePointerCapture?.(event.pointerId) } catch {}
-  if (!moved && event.type !== 'pointercancel') {
+  if (!moved && mode === 'pan' && event.type !== 'pointercancel') {
     const rect = canvasEl.value.getBoundingClientRect()
     const picked = pickTerrainPoint(lastScene, event.clientX - rect.left, event.clientY - rect.top)
     if (noiseProbeState.picking) {
@@ -530,6 +656,7 @@ function onPointerUp(event) {
       return
     }
     station.value = picked
+    if (picked) emit('station-pick', picked)
     hover.value = null
   }
 }
@@ -590,6 +717,7 @@ onMounted(() => {
   if (canvasEl.value) { updateCanvasSize(); resizeObserver.observe(canvasEl.value) }
   if (props.active && !applyInitialBounds()) locateSource()
   document.addEventListener('visibilitychange', syncRayAnimation)
+  window.addEventListener('keydown', onKeyDown)
   rebuildRayFlow()
 })
 
@@ -628,7 +756,7 @@ watch(() => props.field, () => scheduleDraw())
 watch(() => props.receiver, () => scheduleDraw(), { deep: true })
 watch(() => props.fields, () => scheduleDraw(), { deep: true })
 watch(() => props.rayData, rebuildRayFlow)
-watch(() => [props.rayAzimuthDeg, props.raysVisible, props.raysStatic, props.directionLineVisible], () => {
+watch(() => [props.rayAzimuthDeg, props.raysVisible, props.raysStatic, props.raysAnimated, props.directionLineVisible, props.directionLineLayerId], () => {
   scheduleDraw()
   syncRayAnimation()
 })
@@ -671,6 +799,7 @@ onBeforeUnmount(() => {
   globeTransitionRaf = 0
   resizeObserver?.disconnect()
   document.removeEventListener('visibilitychange', syncRayAnimation)
+  window.removeEventListener('keydown', onKeyDown)
   emit('anchor', null)
   emit('layer-anchors', {})
 })
@@ -681,6 +810,9 @@ onBeforeUnmount(() => {
 .terrain-canvas { position: absolute; inset: 0 0 25px; z-index: 0; width: 100%; height: calc(100% - 25px); display: block; cursor: grab; touch-action: none; }
 .terrain-canvas:active { cursor: grabbing; }
 .ray-canvas { position: absolute; inset: 0 0 25px; z-index: 1; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
+.exaggeration-handle { position: absolute; z-index: 3; width: 18px; height: 96px; display: grid; place-items: center; padding: 0; color: #8fb8cc; border: 1px solid #345b72; border-radius: 9px; background: linear-gradient(#17364a, #0d2434); box-shadow: 0 2px 8px #00101d88; transform: translate(-50%, -50%); cursor: ns-resize; touch-action: none; }
+.exaggeration-handle span { font-size: 15px; line-height: 1; text-shadow: 0 1px 2px #00101d; }
+.exaggeration-handle:hover, .exaggeration-handle.active { color: #eaffff; border-color: #38c8f0; background: linear-gradient(#1d4c63, #123244); box-shadow: 0 0 10px #38c8f088, 0 2px 8px #00101d88; }
 .compass-stack { position: absolute; right: 22px; top: 14px; z-index: 6; display: flex; flex-direction: column; align-items: center; pointer-events: none; }
 .compass { width: 84px; height: 84px; padding: 0; border: 0; background: none; cursor: pointer; pointer-events: auto; }
 .compass-dial { display: block; width: 100%; height: 100%; filter: drop-shadow(0 3px 7px #00101d99); }

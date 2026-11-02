@@ -25,6 +25,17 @@ export const BOTTOM_ACOUSTIC_DATA_TYPES = Object.freeze({
   porosity: 'DT_ENV_GEOACOUSTIC_POROSITY',
 })
 
+/** 后端固定海底半空间默认参数（BELLHOP_ENV.BOTTOM）。 */
+export const DEFAULT_BOTTOM_ACOUSTICS = Object.freeze({
+  cp: 1600,
+  alphaP: 0.8,
+  density: 1.8,
+  porosity: null,
+})
+
+/** 前端默认底质兜底展示名称。 */
+export const DEFAULT_BOTTOM_LABEL = '默认底质'
+
 /** 类型编号配色（按编号循环）；「默认」固定为灰色。 */
 const TYPE_COLORS = [
   '#8a6f52',

@@ -17,27 +17,21 @@
             type="button"
             class="view-chip"
             :class="{ active: viewMode === 'globe' }"
-            title="全球视图"
+            title="全球视图（G）"
             aria-label="全球视图"
             @click="$emit('select-view-mode', 'globe')"
           >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <circle cx="12" cy="12" r="8.4" fill="none" stroke="currentColor" stroke-width="1.5" />
-              <path d="M3.6 12h16.8M12 3.6c2.4 2.3 3.8 5.2 3.8 8.4S14.4 18.1 12 20.4C9.6 18.1 8.2 15.2 8.2 12S9.6 5.9 12 3.6Z" fill="none" stroke="currentColor" stroke-width="1.35" />
-            </svg>
+            <span class="view-chip-emoji" aria-hidden="true">🌏</span>
           </button>
           <button
             type="button"
             class="view-chip"
             :class="{ active: viewMode === 'terrain' }"
-            title="地形预览"
+            title="地形预览（M）"
             aria-label="地形预览"
             @click="$emit('select-view-mode', 'terrain')"
           >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m3.4 18.4 5.2-8.5 3.1 4.4 2.6-3.6 6.3 7.7H3.4Z" fill="currentColor" opacity=".9" />
-              <path d="m8.4 10.3 1.8 2.6" fill="none" stroke="#062033" stroke-width="1.1" stroke-linecap="round" />
-            </svg>
+            <span class="view-chip-emoji" aria-hidden="true">⛰️</span>
           </button>
           <button
             type="button"
@@ -48,10 +42,7 @@
             :aria-pressed="!thumbnailCollapsed"
             @click="$emit('toggle-thumbnail')"
           >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.5" />
-              <path d="m5.5 16 4-4 2.7 2.5 2.4-2.3 3.9 3.8M6 7.5h5" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
+            <span class="view-chip-emoji" aria-hidden="true">🗺️</span>
           </button>
         </div>
       </div>
@@ -59,7 +50,7 @@
       <nav class="module-list" aria-label="业务模块">
         <section class="module-group work-module" :class="{ active: workOpen }">
           <button type="button" class="module-entry" :class="{ active: workOpen }" title="运行记录恢复" aria-label="工作" @click="workOpen = !workOpen">
-            <span class="module-icon work-module-icon" aria-hidden="true">▤</span>
+            <span class="module-icon work-module-icon" aria-hidden="true"><span class="module-icon-emoji">📁</span></span>
             <span class="module-label">工作区</span>
             <span class="work-refresh" :class="{ spinning: jobWorkspace.loading }" role="button" tabindex="0" title="刷新工作" aria-label="刷新工作" @click.stop="refreshJobWorkspace" @keydown.enter.stop="refreshJobWorkspace">↻</span>
             <span class="module-chevron" :class="{ open: workOpen }" aria-hidden="true">›</span>
@@ -94,10 +85,7 @@
             @click="toggleTerrainControls"
           >
             <span class="module-icon terrain-module-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24">
-                <path d="m2.8 18.5 5.7-9.1 3.3 4.3 2.8-3.8 6.6 8.6H2.8Z" fill="currentColor" opacity=".9" />
-                <path d="m8.3 9.8 1.9 2.5" fill="none" stroke="#092235" stroke-width="1.1" />
-              </svg>
+              <span class="module-icon-emoji">⛰️</span>
             </span>
             <span class="module-label">地形</span>
             <span class="module-chevron" :class="{ open: terrainControlsOpen }" aria-hidden="true">›</span>
@@ -112,31 +100,27 @@
           </div>
         </section>
 
-        <section class="module-group" :class="{ active: simulationControlsOpen }">
+        <section class="module-group" :class="{ active: simulation.sidebarOpen }">
           <button
             type="button"
             class="module-entry"
-            :class="{ active: simulationControlsOpen }"
+            :class="{ active: simulation.sidebarOpen }"
             title="仿真配置"
             aria-label="仿真配置"
             @click="toggleSimulationControls"
           >
             <span class="module-icon simulation-module-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24">
-                <path d="M4 17.5 8.6 10l3 4.6 2.4-3.4 5.5 7.3H4Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
-                <circle cx="17.2" cy="6.6" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3" />
-                <path d="M17.2 3.4v1.1M17.2 8.7v1.1M14 6.6h1.1M19.3 6.6h1.1" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" />
-              </svg>
+              <span class="module-icon-emoji">⚙️</span>
             </span>
             <span class="module-label">仿真配置</span>
-            <span class="module-chevron" :class="{ open: simulationControlsOpen }" aria-hidden="true">›</span>
+            <span class="module-chevron" :class="{ open: simulation.sidebarOpen }" aria-hidden="true">›</span>
           </button>
 
-          <div v-if="simulationControlsOpen" class="feature-controls simulation-controls" @click.stop>
+          <div v-if="simulation.sidebarOpen" class="feature-controls simulation-controls" @click.stop>
             <label class="feature-select">
               <span>仿真模型</span>
               <select v-model="simulation.model" @change="normalizeSimulationControls">
-                <option v-for="item in simulationModels" :key="item.id" :value="item.id">{{ item.label }}</option>
+                <option v-for="item in simulationModels" :key="item.id" :value="item.id">🧠 {{ item.label }}</option>
               </select>
             </label>
 
@@ -212,7 +196,7 @@
 
             <button type="button" class="simulation-run-button" @click="$emit('run')">
               <span aria-hidden="true">▶</span>
-              运行仿真
+              {{ runSimulationLabel }}
             </button>
           </div>
         </section>
@@ -232,10 +216,7 @@
             @click="toggleModule(moduleItem)"
           >
             <span class="module-icon" aria-hidden="true">
-              <svg v-if="moduleItem.viewKey === 'acoustic-field'" viewBox="0 0 24 24">
-                <path d="m12 3.2 7.6 4.2v9.2L12 20.8l-7.6-4.2V7.4L12 3.2Z" fill="none" stroke="currentColor" stroke-width="1.35" />
-                <path d="m4.7 7.5 7.3 4.1 7.3-4.1M12 11.6v8.7" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".8" />
-              </svg>
+              <span v-if="moduleItem.viewKey === 'acoustic-field'" class="module-icon-emoji">🧊</span>
               <svg v-else viewBox="0 0 24 24">
                 <path d="M12 3.6v4.1M12 16.3v4.1M3.6 12h4.1M16.3 12h4.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
                 <circle cx="12" cy="12" r="3.1" fill="none" stroke="currentColor" stroke-width="1.5" />
@@ -335,11 +316,7 @@
             @click="toggleSliceControls"
           >
             <span class="module-icon slice-module-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24">
-                <rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.3" />
-                <path d="m6 17 12-10" fill="none" stroke="currentColor" stroke-width="1.4" />
-                <path d="M12 11h3.2M12 11l-2.1 2.1" fill="none" stroke="currentColor" stroke-width="1.1" />
-              </svg>
+              <span class="module-icon-emoji">📐</span>
             </span>
             <span class="module-label">垂直切面</span>
             <span class="module-chevron" :class="{ open: sliceControlsOpen }" aria-hidden="true">›</span>
@@ -431,12 +408,7 @@
             @click="signalExcessOpen = !signalExcessOpen"
           >
             <span class="module-icon signal-excess-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24">
-                <path d="M3 16a9 9 0 0 1 18 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
-                <path d="M7 16a5 5 0 0 1 10 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
-                <circle cx="12" cy="16" r="1.3" fill="currentColor" />
-                <path d="M4 20h16" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
-              </svg>
+              <span class="module-icon-emoji">📡</span>
             </span>
             <span class="module-label">信号余量</span>
             <span class="module-chevron" :class="{ open: signalExcessOpen }" aria-hidden="true">›</span>
@@ -447,12 +419,12 @@
 
         <section class="module-group weather-noise-module" :class="{ active: weatherNoiseOpen }">
           <button type="button" class="module-entry" :class="{ active: weatherNoiseOpen }" title="预报天气（海面10米风速、降雨、海况）与环境噪声" aria-label="天气与环境噪声" @click="weatherNoiseOpen = !weatherNoiseOpen">
-            <span class="module-icon weather-module-icon" aria-hidden="true">◒</span>
+            <span class="module-icon weather-module-icon" aria-hidden="true">🌊</span>
             <span class="module-label">天气与环境噪声</span>
             <span class="module-chevron" :class="{ open: weatherNoiseOpen }" aria-hidden="true">›</span>
           </button>
           <WeatherNoiseSidebar v-if="weatherNoiseOpen && viewMode === 'terrain'" @pick-on-map="$emit('select-view-mode', 'terrain')" />
-          <p v-else-if="weatherNoiseOpen" class="module-mode-hint">进入地形模式加载场景预报。</p>
+          <p v-else-if="weatherNoiseOpen" class="module-mode-hint">进入地形模式（M）加载场景的预报。</p>
         </section>
       </nav>
     </div>
@@ -510,7 +482,6 @@ const workOpen = ref(false)
 const openingJobId = ref('')
 const deletingJobId = ref('')
 const terrainControlsOpen = ref(false)
-const simulationControlsOpen = ref(false)
 const weatherNoiseOpen = ref(false)
 const sliceControlsOpen = ref(false)
 const signalExcessOpen = ref(false)
@@ -527,6 +498,12 @@ const simulationTimeText = computed(() => {
   return match ? `${match[1]} ${match[2]}` : '2025-01-02 12:00'
 })
 const simulationTimeInputValue = computed(() => simulationTimeText.value.replace(' ', 'T'))
+/** 运行按钮按当前仿真模型显示算法名：射线模型=Bellhop，RAM=Ram，KRAKEN=Kraken。 */
+const runSimulationLabel = computed(() => {
+  const model = String(simulation.model || 'bellhop').toLowerCase()
+  const name = model === 'ram' ? 'Ram' : model === 'kraken' ? 'Kraken' : 'Bellhop'
+  return `运行仿真（${name}）`
+})
 const volumeControlsAvailable = computed(() => props.viewMode === 'terrain' && acousticSceneState.hasTerrainVolume)
 function stopsToGradient(stops) {
   return `linear-gradient(90deg, ${(stops || []).map(([t, rgb]) => `rgb(${rgb.join(',')}) ${(Number(t) * 100).toFixed(1)}%`).join(', ')})`
@@ -604,7 +581,7 @@ function toggleTerrainControls() {
 }
 
 function toggleSimulationControls() {
-  simulationControlsOpen.value = !simulationControlsOpen.value
+  simulation.sidebarOpen = !simulation.sidebarOpen
 }
 
 function toggleSliceControls() {
@@ -820,6 +797,11 @@ onBeforeUnmount(() => {
   height: 18px;
 }
 
+.view-chip-emoji {
+  font-size: 16px;
+  line-height: 1;
+}
+
 .view-chip:hover {
   color: #bdefff;
   background: rgba(21, 116, 150, 0.24);
@@ -905,6 +887,11 @@ onBeforeUnmount(() => {
 .module-icon svg {
   width: 21px;
   height: 21px;
+}
+
+.module-icon-emoji {
+  font-size: 18px;
+  line-height: 1;
 }
 
 .module-label {

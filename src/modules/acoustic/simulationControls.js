@@ -1,4 +1,5 @@
 import { reactive } from 'vue'
+import { normalizeCoordFormat } from '@/utils/coordinateFormat.js'
 
 /** 仿真模型下拉选项（与声场计算参数使用同一组模型标识）。 */
 export const SIMULATION_MODELS = Object.freeze([
@@ -25,6 +26,10 @@ export const SIMULATION_MODELS = Object.freeze([
  *  - coherent         相干性
  */
 export const simulationControls = reactive({
+  /** 侧边栏「仿真配置」是否展开；运行面板参数按钮也通过它打开。 */
+  sidebarOpen: false,
+  /** 经纬度显示格式：DD / DM / DMS。 */
+  coordFormat: 'DD',
   model: 'bellhop',
   time: '2025-01-02T12:00:00',
   coordX: -60,
@@ -47,6 +52,7 @@ export function clampSimulationControls(controls = simulationControls) {
   }
   const model = SIMULATION_MODELS.some((item) => item.id === controls.model) ? controls.model : 'bellhop'
   controls.model = model
+  controls.coordFormat = normalizeCoordFormat(controls.coordFormat)
   controls.coordX = clamp(controls.coordX, -180, 180, 0)
   controls.coordY = clamp(controls.coordY, -90, 90, 0)
   controls.srcDepth = clamp(controls.srcDepth, 0, 20000, 0)

@@ -196,7 +196,8 @@ const graticuleTicks = computed(() => {
   for (let i = 0; i < 4; i += 1) {
     const f = i / 3
     const lat = inverseMercatorY(view.y0 + (view.y1 - view.y0) * f)
-    const transform = i === 0 ? 'translateY(4px)' : i === 3 ? 'translateY(calc(-100% - 4px))' : 'translateY(-50%)'
+    // 左下角的经度标签占据底边，南端纬度标签上移避开，避免两者重合。
+    const transform = i === 0 ? 'translateY(4px)' : i === 3 ? 'translateY(calc(-100% - 16px))' : 'translateY(-50%)'
     latTicks.push({ style: { top: `${f * 100}%`, transform }, label: tickLabel(lat, latDecimals, false) })
   }
 

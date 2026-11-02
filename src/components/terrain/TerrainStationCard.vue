@@ -8,7 +8,7 @@
       <button aria-label="关闭站点信息" title="关闭" @click="$emit('close')">×</button>
     </header>
     <p class="coordinates">{{ coord(point.lat, 'N', 'S') }}，{{ coord(point.lon, 'E', 'W') }}</p>
-    <strong class="weather-summary" v-if="frame">≋ {{ num(weather.wind10_mps, 1) }} 米/秒 {{ directionLabel(weather.wind_direction_deg) }}　☂ {{ num(weather.precipitation_mmh, 2) }}　≈ {{ num(weather.wave_hs_m, 2) }} 米</strong>
+    <strong class="weather-summary" v-if="frame">≋ {{ num(weather.wind10_mps, 1) }} 米/秒 {{ directionLabel(weather.wind_direction_deg) }}　☂ {{ num(weather.precipitation_mmh, 2) }}mm/h　🌊 {{ num(weather.wave_hs_m, 2) }} 米</strong>
     <strong class="weather-summary" v-else>{{ state.loading ? '正在读取 48 小时天气与噪声…' : '天气暂不可用' }}</strong>
     <nav>
       <button :disabled="running" title="点击即在光标位置运行" @click="$emit('run', point)"><svg viewBox="0 0 24 24"><path d="m8 4 12 8-12 8Z" fill="currentColor"/></svg><span>在这里运行</span></button>
@@ -17,10 +17,10 @@
     </nav>
 
     <div v-if="expanded && frame" class="details" aria-live="polite">
-      <p class="source">WeatherNext 2（Open-Meteo）· {{ formatForecastTime(frame.time) }}</p>
+      <p class="source">{{ formatForecastTime(frame.time) }}</p>
       <div class="weather-row"><span>≋ 风速 10 米</span><b>{{ num(weather.wind10_mps, 1) }} 米/秒　{{ directionLabel(weather.wind_direction_deg) }}</b></div>
       <div class="weather-row"><span>☂ 雨</span><b>{{ num(weather.precipitation_mmh, 2) }} 毫米/小时</b></div>
-      <div class="weather-row"><span>≈ 海况</span><b>{{ num(weather.wave_hs_m, 2) }} 米 Hs　· Tp {{ num(weather.wave_period_s, 1) }} 秒</b></div>
+      <div class="weather-row"><span>🌊 海况</span><b>{{ num(weather.wave_hs_m, 2) }} 米 Hs　· Tp {{ num(weather.wave_period_s, 1) }} 秒</b></div>
 
       <article class="noise-box">
         <div><span>环境噪声（WENZ）{{ summary?.band?.label }}</span><strong>{{ num(summary?.bandLevelDb, 1) }}<em>dB re 1 μPa²</em></strong></div>
@@ -28,7 +28,7 @@
       </article>
       <article class="score-box">
         <div><span>🚢 距离 ≤100 公里的船舶 · {{ nearbyShips }}（快速，AIS 固定）</span><b>{{ result?.fixed_ais?.modeled_vessel_count || 0 }} 艘</b></div>
-        <div><span>船舶 + 环境</span><strong>{{ score }} 分贝</strong></div>
+        <div><span>船舶 + 环境</span><strong>{{ score }} dB</strong></div>
       </article>
       <p class="hint">拖动左侧“天气与环境噪声”时间滑杆，可同步查看未来 48 小时逐小时天气及各噪声分量变化。</p>
     </div>

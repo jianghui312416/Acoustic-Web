@@ -14,6 +14,8 @@ const props = defineProps({
   visible: { type: Boolean, default: true },
   /** 静态模式：只绘制完整声线路径，不播放行进动画 */
   staticMode: { type: Boolean, default: false },
+  /** 动态播放时同时绘制完整的静态声线路径（静态 + 动态同时开启） */
+  showStaticTracks: { type: Boolean, default: false },
   /** 是否在画布右上角显示当前传播时间 t ~ x.xx s */
   showTime: { type: Boolean, default: false },
 })
@@ -64,16 +66,19 @@ function paint() {
     pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))
     ctx.stroke()
   }
-  if (props.staticMode) {
+  if (props.staticMode || props.showStaticTracks) {
+    const alpha = props.staticMode ? 0.3 : 0.32
     for (const track of props.flow.tracks ?? []) {
       drawClipped(track.points, pts => {
-        ctx.strokeStyle = 'rgba(235,248,255,0.72)'
-        ctx.lineWidth = 1.3
+        ctx.strokeStyle = `rgba(235,248,255,${alpha})`
+        ctx.lineWidth = props.staticMode ? 1.3 : 1.1
         stroke(pts)
       })
     }
-    ctx.restore()
-    return
+    if (props.staticMode) {
+      ctx.restore()
+      return
+    }
   }
   for (const motion of sampleRayMotion(props.flow, elapsed)) {
     const path = motion.path || []
@@ -157,7 +162,7 @@ function start() {
   raf = requestAnimationFrame(tick)
 }
 watch(() => props.flow, start, { flush: 'post' })
-watch(() => [props.playing, props.visible, props.geometry, props.staticMode], start, { flush: 'post' })
+watch(() => [props.playing, props.visible, props.geometry, props.staticMode, props.showStaticTracks], start, { flush: 'post' })
 onMounted(() => {
   observer = new ResizeObserver(paint)
   observer.observe(canvas.value)
