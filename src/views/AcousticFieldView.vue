@@ -13,6 +13,7 @@
     />
 
     <TerrainPreviewMode
+      ref="terrainPreviewRef"
       v-show="viewMode === 'terrain'"
       :active="viewMode === 'terrain'"
       :dataset="calcParams.dataset" :time="calcParams.time" :running="loading"
@@ -92,7 +93,7 @@
         </span>
       </header>
       <TransmissionLossProfileChart ref="terrainLossChartRef" :data="profileData" :ray-data="profileRayData" :animated="profileAnimated" :static-rays="verticalSliceControls.staticRays"
-        source-id="tlrd" :azimuth-deg="profileAzimuthDeg" :max-radius-m="profileMaxRadiusM" :source-depth-m="profileSourceDepthM"
+        source-id="tlrd" :azimuth-deg="profileAzimuthDeg" :max-radius-m="profileMaxRadiusM"
         :bottom-type-segments="profileBottomTypeSegments" :bottom-type-state="profileBottomTypeState" :refresh-token="chartRefreshToken"
         :show-seabed="verticalSliceControls.seafloorLineAndMask" :show-seabed-mask="verticalSliceControls.seafloorMask"
         :readout-enabled="verticalSliceControls.cursorReadout" :click-markers="verticalSliceControls.cursorReadout"
@@ -621,7 +622,6 @@
           source-id="tlrd"
           :azimuth-deg="sliceAzimuthDeg"
           :max-radius-m="sourceRadiusKm * 1000"
-          :source-depth-m="Number(sourcePoint?.depth_m)"
           :bottom-type-segments="bottomTypeSegments"
           :bottom-type-state="bottomTypeState"
           :receiver-marker="receiverArrayMarker"
@@ -1177,7 +1177,6 @@
         :source-id="dataSource"
         :azimuth-deg="sliceAzimuthDeg"
         :max-radius-m="sourceRadiusKm * 1000"
-        :source-depth-m="Number(sourcePoint?.depth_m)"
         height="230px"
         @update:azimuth-deg="onProfileAzimuthChange"
       />
@@ -1356,6 +1355,7 @@ const stationPositionHasRun = ref(false)
 /** 参数卡片打开期间被临时替换的声场运行面板 id。 */
 const runSettingsHiddenPanelId = ref('')
 const terrainAnchor = ref(null)
+const terrainPreviewRef = ref(null)
 const terrainSliceOpen = ref(false)
 const terrainLossChartRef = ref(null)
 const terrainProfileOpen = ref(false)
@@ -1708,7 +1708,7 @@ async function openWorkspaceJob(jobId) {
     refreshRunHistoryLayers()
     markJobOpened(id)
     emitViewMode('terrain')
-    focusRunHistoryLayer(existing.id)
+    focusRunHistoryLayer(existing.id, DEFAULT_TERRAIN_SPAN_KM)
     return
   }
   if (openingJobIds.value.includes(id)) return
@@ -1757,7 +1757,7 @@ async function openWorkspaceJob(jobId) {
     runHistoryLayers.value = [...runHistoryLayers.value, layer]
     markJobOpened(id)
     emitViewMode('terrain')
-    focusRunHistoryLayer(id)
+    focusRunHistoryLayer(id, DEFAULT_TERRAIN_SPAN_KM)
   } catch (error) {
     console.error('[工作声场] 打开失败：', error)
     runtimeError.value = `工作 ${id} 打开失败：${error?.message || error}`
@@ -1823,10 +1823,12 @@ function closeTerrainWindow(id) {
   if (id === 'slice') {
     terrainSliceOpen.value = false
     terrainSliceMinimized.value = false
-    selectedProfileLayerId.value = ''
+    // 声速剖面窗口仍打开时保留所选声场，避免关闭切面后剖面数据丢失。
+    if (!terrainProfileOpen.value) selectedProfileLayerId.value = ''
   } else if (id === 'profile') {
     terrainProfileOpen.value = false
     terrainProfileMinimized.value = false
+    if (!terrainSliceOpen.value) selectedProfileLayerId.value = ''
   } else {
     closeNoiseProbe()
     terrainNoiseMinimized.value = false
@@ -1878,14 +1880,19 @@ function toggleRunHistoryLayer(id) {
   refreshRunHistoryLayers()
   viewer?.scene?.requestRender?.()
 }
-function focusRunHistoryLayer(id) {
+function focusRunHistoryLayer(id, spanKm = 0) {
   const layer = runHistoryLayers.value.find(item => item.id === id)
   if (!layer) return
   if (!layer.visible) {
     layer.visible = true
     refreshRunHistoryLayers()
   }
-  globeSelection.value = acousticTerrainBounds(layer.source, layer.radiusKm)
+  // 工作区记录默认使用固定 100 km 区域，并把声源放在地形中心；
+  // 不传 span 时沿用该声场自身的传播半径。
+  const span = Number(spanKm) > 0 ? Number(spanKm) : Number(layer.radiusKm) * 6
+  globeSelection.value = acousticTerrainBounds(layer.source, Math.max(0.1, span / 6))
+  // 两条路径都触发：直接调用避免视图切换时序竞争，token 作为组件尚未就绪时的兜底。
+  if (Number(spanKm) > 0) terrainPreviewRef.value?.focusBounds?.(globeSelection.value)
   globeSelectionToken.value += 1
 }
 /** 历史声场胶囊「模拟运行」：恢复该次参数并重新计算。 */
@@ -2007,6 +2014,9 @@ function showHistoryLayerProfile(id) {
   removeTerrainWindowFromDock('profile')
   // 「二维传播损失」胶囊入口本身就代表要查看动态声线。
   verticalSliceControls.dynamicRays = true
+  // 三维体上的声线受「声线显示/隐藏」开关控制，垂直切面不受该开关约束。
+  // 关闭当前运行面板会把该开关置为 false，这里显式恢复，保证切面与三维体声线一致。
+  earthRaysVisible.value = true
   void ensureHistoryLayerDynamicRays(layer).then((data) => {
     if (!data || selectedProfileLayerId.value !== layer.id) return
     chartRefreshToken.value += 1
@@ -2656,11 +2666,6 @@ const profileMaxRadiusM = computed(() => {
   if (layer) return (Number(layer.sourceRadiusKm || layer.radiusKm) || 0) * 1000
   return sourceRadiusKm.value * 1000
 })
-const profileSourceDepthM = computed(() => (
-  selectedProfileLayer.value
-    ? Number(selectedProfileLayer.value.sourceDepthM)
-    : Number(sourcePoint.value?.depth_m)
-))
 const profileBottomTypeSegments = computed(() => (
   selectedProfileLayer.value ? (selectedProfileLayer.value.bottomTypeSegments || []) : bottomTypeSegments.value
 ))
@@ -5603,7 +5608,7 @@ async function activateDynamicRaysForCurrentAzimuth() {
   if (calcParams.value.rayInterface !== 'dynamic') calcParams.value.rayInterface = 'dynamic'
   dynamicRayLoading.value = true
   errorText.value = ''
-  statusText.value = '正在计算当前方位的三维动态声线…'
+  statusText.value = ''
   try {
     const result = await ensureRayDataForAzimuth(sliceAzimuthDeg.value)
     staticRayData.value = result

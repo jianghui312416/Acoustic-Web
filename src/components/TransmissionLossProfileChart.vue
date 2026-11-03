@@ -137,8 +137,6 @@ const props = defineProps({
   azimuthDeg: { type: Number, default: 0 },
   /** 最大传播距离（米，0 = 使用数据全部距离） */
   maxRadiusM: { type: Number, default: 0 },
-  /** 声源深度（米）：用于绘制声源深度参考线 */
-  sourceDepthM: { type: Number, default: NaN },
   /** 沿航线的底质分段：{ startM, endM, id, label }[] */
   bottomTypeSegments: { type: Array, default: () => [] },
   /** 底质查询状态：idle | loading | ready | error */
@@ -301,8 +299,6 @@ const profile = computed(() => {
       colCount: 0,
       depthMax: 0,
       maxDistanceM: 0,
-      sourceDepthIdx: -1,
-      sourceDepthM: NaN,
       seabedDerived: false,
     }
 
@@ -332,11 +328,6 @@ const profile = computed(() => {
 
   // 深度轴（类目）：用于声线深度定位（深度值 → 类目下标）
   const depthVals = m.depths.map((d) => (Number.isFinite(d) ? d : 0))
-  const depthOrder = depthVals.map((_, i) => i).sort((a, b) => depthVals[a] - depthVals[b])
-  const depthSorted = depthOrder.map((i) => depthVals[i])
-  // 声源深度（用于绘制声源深度参考线）
-  const srcDepth = Number(props.sourceDepthM)
-  const sourceDepthIdx = Number.isFinite(srcDepth) && depthSorted.length ? depthOrder[nearestIndex(depthSorted, srcDepth)] : -1
 
   // 海底地形（海深，米，向下为正）：标准格式 tlrd 由 altitudeList.pairedDataVS 提供，
   // 其余数据源 seabedFor 返回空数组。这里直接使用物理距离/深度，确保与声线图坐标完全一致。
@@ -410,8 +401,6 @@ const profile = computed(() => {
     colCount: colEntries.length,
     depthMax: geometry.maxDepthM,
     maxDistanceM: geometry.maxDistanceM,
-    sourceDepthM: Number.isFinite(srcDepth) ? srcDepth : NaN,
-    sourceDepthIdx,
     seabedDerived,
   }
 })
@@ -1178,22 +1167,10 @@ async function renderChart() {
       data: p.heat,
       progressive: 0,
       animation: false,
-      // 原始网格仅保留命中测试、数值读取和 markLine；可视颜色由下方连续纹理承担。
+      // 原始网格仅保留命中测试和数值读取；可视颜色由下方连续纹理承担。
       itemStyle: { opacity: 0, borderWidth: 0, borderColor: 'transparent' },
       emphasis: { disabled: true },
       z: 2,
-      // 声源深度参考线
-      ...(p.sourceDepthIdx >= 0
-        ? {
-            markLine: {
-              silent: true,
-              symbol: 'none',
-              label: { formatter: '声源', color: '#fbbf24', fontSize: 9 },
-              lineStyle: { color: 'rgba(251,191,36,0.8)', type: 'dashed', width: 1.2 },
-              data: [{ yAxis: p.sourceDepthIdx }],
-            },
-          }
-        : {}),
     },
   ]
 
@@ -1418,7 +1395,6 @@ watch(
     props.azimuthDeg,
     props.toleranceDeg,
     props.maxRadiusM,
-    props.sourceDepthM,
     props.bottomTypeSegments,
     props.bottomTypeState,
     props.showSeabed,

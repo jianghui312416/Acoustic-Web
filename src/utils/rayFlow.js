@@ -1,6 +1,6 @@
 // Visual propagation clock, not a travel-time solver: no sound-speed field is available here.
 // All tracks advance by the same physical arc length to form a coherent wavefront.
-export function buildRayFlow(paths = [], frameModel = null) {
+function buildTracks(paths) {
   const tracks = []
   for (const path of paths) {
     let points = []
@@ -19,6 +19,31 @@ export function buildRayFlow(paths = [], frameModel = null) {
       if (!points.length || point[0] !== points.at(-1)[0] || point[1] !== points.at(-1)[1]) points.push(point)
     }
     flush()
+  }
+  return tracks
+}
+
+export function buildRayFlow(paths = [], frameModel = null) {
+  let tracks = buildTracks(paths)
+  // 动态接口只返回 frames（无 trackData）时，取传播最远的一帧（「声源 → 头部」完整
+  // 路径）重建弧长轨道，使冰区/非冰区都走同一套连续生长动画，尾迹与淡出保持一致。
+  if (!tracks.length && frameModel?.frames?.length) {
+    let fullFrame = null
+    let maxExtent = -Infinity
+    for (const frame of frameModel.frames) {
+      let extent = 0
+      for (const ray of frame?.rays ?? []) {
+        for (const x of ray?.x ?? []) {
+          const value = Number(x)
+          if (Number.isFinite(value) && value > extent) extent = value
+        }
+      }
+      if (extent > maxExtent) { maxExtent = extent; fullFrame = frame }
+    }
+    const fullPaths = (fullFrame?.rays ?? [])
+      .map(ray => (ray?.x ?? []).map((x, i) => [Number(x), Number(ray?.z?.[i])]))
+      .filter(points => points.length > 1)
+    tracks = buildTracks(fullPaths)
   }
   if (!tracks.length && !frameModel?.frames?.length) return null
   const length = tracks.reduce((max, track) => Math.max(max, track.length), 0)

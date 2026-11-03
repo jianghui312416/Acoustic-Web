@@ -64,6 +64,17 @@ test('shallow and deep seabed remain ocean blue instead of mapping the shallowes
   }
 })
 
+test('workspace terrain uses a 100 km square centered on the sound field source', () => {
+  const source = { lon: 153.85975, lat: 34.2657 }
+  const bounds = acousticTerrainBounds(source, 100 / 6)
+  const widthKm = (bounds.east - bounds.west) * 110.574 * Math.cos(source.lat * Math.PI / 180)
+  const heightKm = (bounds.north - bounds.south) * 110.574
+  assert.ok(Math.abs(widthKm - 100) < 0.2)
+  assert.ok(Math.abs(heightKm - 100) < 0.2)
+  assert.ok(Math.abs((bounds.west + bounds.east) / 2 - source.lon) < 1e-9)
+  assert.ok(Math.abs((bounds.south + bounds.north) / 2 - source.lat) < 1e-9)
+})
+
 test('default terrain leaves room around the full acoustic radius at Arctic latitudes', () => {
   const radius = 39.6 * 1.852
   const bounds = acousticTerrainBounds({ lon: -60, lat: 70.8 }, radius)

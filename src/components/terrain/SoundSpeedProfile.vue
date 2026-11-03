@@ -26,7 +26,7 @@
       <circle v-if="hoverPoint" :cx="hoverPoint.x" :cy="hoverPoint.y" r="4"
         fill="#f8fafc" stroke="#00e2cf" stroke-width="2" />
       <text v-if="hasCoords" x="280" y="333" text-anchor="end">位置 {{ coordText }}</text>
-      <text x="280" y="345" text-anchor="end">当前计算环境 · {{ points.length }} 个采样点</text>
+      <!-- <text x="280" y="345" text-anchor="end">当前计算环境 · {{ points.length }} 个采样点</text> -->
     </svg>
     <div v-else class="ssp-empty">当前结果未包含声速剖面数据</div>
     <button v-if="zoomed" type="button" class="ssp-zoom-reset" title="复位缩放" aria-label="复位缩放"
@@ -39,7 +39,6 @@
       <div v-if="hasCoords">纬度 {{ latText }}</div>
       <div v-if="hasCoords">经度 {{ lonText }}</div>
     </div>
-    <div v-else-if="points.length" class="ssp-hint">滚轮缩放 · 拖拽平移 · 双击复位</div>
   </div>
 </template>
 <script setup>

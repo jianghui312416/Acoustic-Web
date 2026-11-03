@@ -512,6 +512,14 @@ function locateSource() {
   loadTerrain(bounds.value)
 }
 
+function sameTerrainBounds(a, b) {
+  if (!a || !b) return false
+  return Math.abs(Number(a.west) - Number(b.west)) < 1e-7
+    && Math.abs(Number(a.east) - Number(b.east)) < 1e-7
+    && Math.abs(Number(a.south) - Number(b.south)) < 1e-7
+    && Math.abs(Number(a.north) - Number(b.north)) < 1e-7
+}
+
 /** 全球视图点“加载”后带入的选区；每次 token 变化只应用一次。 */
 let appliedInitialBoundsToken = 0
 function applyInitialBounds() {
@@ -519,10 +527,26 @@ function applyInitialBounds() {
   if (!props.initialBounds || requestToken <= appliedInitialBoundsToken) return false
   appliedInitialBoundsToken = requestToken
   const target = normalizeTerrainBounds(props.initialBounds)
+  if (sameTerrainBounds(target, bounds.value) && status.value !== 'idle') return false
   bounds.value = target
+  // 每次切换到新的目标区域都从默认视角开始，保证声源位于地形视图中心。
+  camera.value = { yaw: 0, pitch: 0.68, zoom: 1, panX: 0, panY: 0 }
   loadTerrain(target)
   return true
 }
+
+/** 直接加载指定区域；供工作区记录定位使用，绕开视图切换时的 token 时序。 */
+function focusBounds(next) {
+  appliedInitialBoundsToken = Math.max(
+    appliedInitialBoundsToken,
+    Number(props.initialBoundsToken) || 0
+  )
+  const target = normalizeTerrainBounds(next)
+  bounds.value = target
+  camera.value = { yaw: 0, pitch: 0.68, zoom: 1, panX: 0, panY: 0 }
+  loadTerrain(target)
+}
+defineExpose({ focusBounds })
 
 function loadTerrainFromDock(next) {
   const target = normalizeTerrainBounds(next)
@@ -750,6 +774,14 @@ watch(() => props.active, (active) => {
 watch(() => props.initialBoundsToken, () => {
   if (!props.active) return
   applyInitialBounds()
+})
+// token 之外再监听选区值：任何入口（包括工作区定位）只要写入新的 initialBounds
+// 都会立即加载，避免视图切换时 token 监听被跳过。
+watch(() => props.initialBounds, (next) => {
+  if (!next) return
+  const target = normalizeTerrainBounds(next)
+  if (sameTerrainBounds(target, bounds.value) && status.value !== 'idle') return
+  focusBounds(target)
 })
 watch(bounds, (value) => {
   const next = { ...value }

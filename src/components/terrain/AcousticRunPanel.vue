@@ -25,9 +25,9 @@
     </div>
     <small>{{ failed ? '请查看错误信息后重试' : busy ? '正在计算传播损失' : ready ? (layerVisible ? '● 声场体' : '○ 三维声场已隐藏') : '等待计算结果' }}</small>
     <nav aria-label="声场操作">
-      <button class="run-action" :disabled="busy" data-tip="模拟运行" title="模拟运行" aria-label="模拟运行" @click="$emit('run')"><svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z" fill="currentColor"/></svg></button>
-      <button :disabled="!ready || rayBusy" :class="{ selected: sliceOpen, busy: rayBusy }" :data-tip="rayBusy ? '声线计算中' : '二维传播损失'" :title="rayBusy ? '正在计算三维动态声线' : '二维传播损失'" :aria-label="rayBusy ? '正在计算三维动态声线' : '二维传播损失'" :aria-pressed="sliceOpen" @click="$emit('slice')"><svg viewBox="0 0 24 24"><path d="M4 4v16h17M7 15l4-7 4 5 5-7" fill="none" stroke="currentColor" stroke-width="1.7"/></svg></button>
-      <button data-tip="参数设置" title="参数设置" aria-label="参数设置" @click="$emit('settings')"><svg viewBox="0 0 24 24"><path d="m9 3-1 3-3 1-2 5 2 5 3 1 1 3h6l1-3 3-1 2-5-2-5-3-1-1-3Z" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></button>
+      <button class="run-action" :disabled="busy" data-tip="模拟运行" aria-label="模拟运行" @click="$emit('run')"><svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z" fill="currentColor"/></svg></button>
+      <button :disabled="!ready || rayBusy" :class="{ selected: sliceOpen, busy: rayBusy }" :data-tip="rayBusy ? '声线计算中' : '二维切面'" :aria-label="rayBusy ? '正在计算三维动态声线' : '二维传播损失'" :aria-pressed="sliceOpen" @click="$emit('slice')"><svg viewBox="0 0 24 24"><path d="M4 4v16h17M7 15l4-7 4 5 5-7" fill="none" stroke="currentColor" stroke-width="1.7"/></svg></button>
+      <button data-tip="参数设置" aria-label="参数设置" @click="$emit('settings')"><svg viewBox="0 0 24 24"><path d="m9 3-1 3-3 1-2 5 2 5 3 1 1 3h6l1-3 3-1 2-5-2-5-3-1-1-3Z" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></button>
     </nav>
   </section>
 </template>
