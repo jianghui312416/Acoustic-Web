@@ -333,6 +333,11 @@ export function analyseIce2dDynamicRTRD(params) {
   )
 }
 
+/** 三维动态声线轨迹 (SN=19 → Analyse3DRTRDDynamic)，一次返回全部扇面的静态与动态声线。 */
+export function analyse3dDynamicRTRD(params) {
+  return callPortal(19, 'Analyse3DRTRDDynamic', withCommonParams(params))
+}
+
 /** 冰区三维动态声线轨迹 (SN=19 → AnalyseIce3DRTRDDynamic)。 */
 export function analyseIce3dDynamicRTRD(params) {
   return callPortal(19, 'AnalyseIce3DRTRDDynamic', iceParams(params))

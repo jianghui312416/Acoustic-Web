@@ -9,6 +9,8 @@ const {
   analyseIce2dRTRD,
   analyse2dDynamicRTRD,
   analyseIce2dDynamicRTRD,
+  analyse3dDynamicRTRD,
+  analyseIce3dDynamicRTRD,
   analyseEnvironmentNoise,
   getDatasetList,
   getDatasetTimeList,
@@ -110,6 +112,8 @@ test('uses the current registry SNs for ray and dataset requests', async () => {
     await analyseIce2dRTRD({ azimuth: 30 })
     await analyse2dDynamicRTRD({ azimuth: 30, lineCount: 0 })
     await analyseIce2dDynamicRTRD({ azimuth: 30 })
+    await analyse3dDynamicRTRD({ sector: 4, lineCount: 10 })
+    await analyseIce3dDynamicRTRD({ sector: 4, lineCount: 10 })
     await getDatasetList()
     await getDatasetTimeList('EnvReanalysis')
   } finally {
@@ -123,6 +127,8 @@ test('uses the current registry SNs for ray and dataset requests', async () => {
       [19, 'AnalyseIce2DRTRD'],
       [19, 'Analyse2DRTRDDynamic'],
       [19, 'AnalyseIce2DRTRDDynamic'],
+      [19, 'Analyse3DRTRDDynamic'],
+      [19, 'AnalyseIce3DRTRDDynamic'],
       [1, 'GetEnvDataSourceList'],
       [2, 'FetchTimeToList'],
     ]

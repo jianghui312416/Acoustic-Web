@@ -1304,6 +1304,7 @@ import {
   analyseIce2dRTRD,
   analyse2dDynamicRTRD,
   analyseIce2dDynamicRTRD,
+  analyse3dDynamicRTRD,
   analyseIce3dDynamicRTRD,
   portalPluginForModel,
   getDatasetList,
@@ -1938,24 +1939,37 @@ async function ensureHistoryLayerDynamicRays(layer) {
   const request = (async () => {
     const payload = portalParamsFor(params, {
       range: Number(params.range),
-      azimuth: internalAzimuthToCompassBearing(desiredAzimuth),
+      sector: Number(params.sector),
       lineCount: Number(params.lineCount),
-      rtimeRes: 0,
     })
     const ice = params.regionType === 'ice'
     const response = ice
-      ? await analyseIce2dDynamicRTRD(payload)
-      : await analyse2dDynamicRTRD(payload)
+      ? await analyseIce3dDynamicRTRD(payload)
+      : await analyse3dDynamicRTRD(payload)
+    // 三维动态声线一次返回全部扇面：取与当前切面最接近的方位。
+    const adapted = adapt3dRayResponseToAzimuths(response)
+    const portalBearing = internalAzimuthToCompassBearing(desiredAzimuth)
+    let selected = null
+    let selectedDelta = Infinity
+    for (const [azimuth, entry] of adapted?.byAzimuth ?? []) {
+      const delta = azimuthDeltaDeg(azimuth, portalBearing)
+      if (delta < selectedDelta) {
+        selectedDelta = delta
+        selected = entry
+      }
+    }
+    const rayData = selected?.dynamicResponse ?? null
+    if (!rayData) return null
     // 方位已变化时丢弃过期结果，避免把旧方位的声线画到新切面上。
     if (azimuthDeltaDeg(layer.sliceAzimuthDeg, desiredAzimuth) > 1e-6) {
-      return response
+      return rayData
     }
-    layer.rayData = response
+    layer.rayData = rayData
     layer.rayInterface = 'dynamic'
     layer.rayAzimuthDeg = desiredAzimuth
     refreshRunHistoryLayers()
     if (selectedProfileLayerId.value === layer.id) viewer?.scene?.requestRender?.()
-    return response
+    return rayData
   })()
   historyRayRequests.set(requestKey, request)
   layer.rayLoading = true
@@ -2526,10 +2540,10 @@ const BOTTOM_TYPE_ROUTE_SAMPLE_COUNT = 180
  */
 const staticRayData = shallowRef(null)
 const rayDataByAzimuth = new Map()
-/** 冰区三维动态声线：一次请求返回全部扇面，按方位拆分后缓存。 */
-const ice3dRayByAzimuth = { static: new Map(), dynamic: new Map() }
-let ice3dRayRequest = null
-let ice3dRayToken = 0
+/** 三维动态声线：一次请求返回全部扇面，按方位拆分后缓存。 */
+const ray3dByAzimuth = { static: new Map(), dynamic: new Map() }
+let ray3dRequest = null
+let ray3dToken = 0
 /** 本次射线模型运行是否检测到海冰（自动决定是否走冰区接口）。 */
 const detectedSeaIce = ref(false)
 /**
@@ -3143,10 +3157,18 @@ const routeGeometry = computed(() =>
 const routeDistanceNm = computed(() => routeGeometry.value.distanceNm)
 const routeBearingDeg = computed(() => routeGeometry.value.bearing)
 const isRayModel = computed(() => calcParams.value.model === 'bellhop')
-/** 是否使用后端动态声线接口（Analyse2DRTRDDynamic / AnalyseIce2DRTRDDynamic） */
+/** 是否使用后端动态声线接口 */
 const useDynamicRays = computed(() => calcParams.value.rayInterface === 'dynamic')
-/** 射线模型运行在冰区时，声线统一走 AnalyseIce3DRTRDDynamic。 */
-const useIce3dRays = computed(() => isRayModel.value && calcParams.value.regionType === 'ice')
+/**
+ * 动态声线统一走三维接口：冰区使用 AnalyseIce3DRTRDDynamic，
+ * 非冰区使用 Analyse3DRTRDDynamic。二维分析模式仍保留二维声线接口。
+ */
+const use3dRays = computed(
+  () => isRayModel.value && (
+    calcParams.value.regionType === 'ice' ||
+    (useDynamicRays.value && analysisMode.value === '3d')
+  )
+)
 const selectedModelLabel = computed(() => ({
   bellhop: '射线模型',
   ram: 'RAM 模型',
@@ -3486,15 +3508,34 @@ watch(
   () => {
     if (restoringSoundResult) return
     rayDataByAzimuth.clear()
-    ice3dRayByAzimuth.static.clear()
-    ice3dRayByAzimuth.dynamic.clear()
-    ice3dRayRequest = null
-    ice3dRayToken++
+    ray3dByAzimuth.static.clear()
+    ray3dByAzimuth.dynamic.clear()
+    ray3dRequest = null
+    ray3dToken++
     staticRayData.value = null
     stopVolumeRayAnimation()
     rayLoadToken++
     clearTimeout(rayLoadTimer)
     rayLoadTimer = 0
+    if (dynamicRaysActivated.value && analysisMode.value === '3d' && raySourceData.value) {
+      scheduleRayDataForAzimuth(sliceAzimuthDeg.value, 0)
+    } else if (verticalSliceControls.dynamicRays || verticalSliceControls.staticRays) {
+      requestRayDataForPlayback()
+    }
+  }
+)
+
+// 冰区 / 非冰区切换后，三维动态声线需要按对应门户重新获取。
+watch(
+  () => calcParams.value.regionType,
+  () => {
+    if (loading.value || restoringSoundResult) return
+    ray3dByAzimuth.static.clear()
+    ray3dByAzimuth.dynamic.clear()
+    ray3dRequest = null
+    ray3dToken++
+    staticRayData.value = null
+    stopVolumeRayAnimation()
     if (dynamicRaysActivated.value && analysisMode.value === '3d' && raySourceData.value) {
       scheduleRayDataForAzimuth(sliceAzimuthDeg.value, 0)
     } else if (verticalSliceControls.dynamicRays || verticalSliceControls.staticRays) {
@@ -4158,10 +4199,10 @@ function clearResultLayers({ preserveVolume = false } = {}) {
   raySourceData.value = null
   staticRayData.value = null
   rayDataByAzimuth.clear()
-  ice3dRayByAzimuth.static.clear()
-  ice3dRayByAzimuth.dynamic.clear()
-  ice3dRayRequest = null
-  ice3dRayToken++
+  ray3dByAzimuth.static.clear()
+  ray3dByAzimuth.dynamic.clear()
+  ray3dRequest = null
+  ray3dToken++
   rayLoadToken++
   clearTimeout(rayLoadTimer)
   rayLoadTimer = 0
@@ -5348,10 +5389,10 @@ async function loadData() {
   dynamicRayLoading.value = false
   stopVolumeRayAnimation()
   rayDataByAzimuth.clear()
-  ice3dRayByAzimuth.static.clear()
-  ice3dRayByAzimuth.dynamic.clear()
-  ice3dRayRequest = null
-  ice3dRayToken++
+  ray3dByAzimuth.static.clear()
+  ray3dByAzimuth.dynamic.clear()
+  ray3dRequest = null
+  ray3dToken++
   rayRequestByKey.clear()
   rayLoadToken++
   clearTimeout(rayLoadTimer)
@@ -5448,31 +5489,31 @@ function nearestAvailableAzimuth(value) {
 }
 
 /**
- * 为当前传播损失扇面调用 Analyse2DRTRD。每个扇面独立计算并缓存，避免把
- * 一个固定方位的声线错误地复用到所有 TL 剖面上。
+ * 读取当前传播损失扇面的声线响应。非三维声线路径按扇面独立请求并缓存，
+ * 避免把一个固定方位的声线错误地复用到所有 TL 剖面上。
  */
-/** 按方位读取缓存的声线响应（冰区三维动态声线优先）。 */
+/** 按方位读取缓存的声线响应（三维动态声线优先）。 */
 function getCachedRayResponse(azimuthDeg, interfaceTag = calcParams.value.rayInterface) {
   const matched = nearestAvailableAzimuth(azimuthDeg)
   const key = matched.toFixed(4)
-  if (useIce3dRays.value) {
-    const bucket = ice3dRayByAzimuth[interfaceTag === 'static' ? 'static' : 'dynamic']
+  if (use3dRays.value) {
+    const bucket = ray3dByAzimuth[interfaceTag === 'static' ? 'static' : 'dynamic']
     return bucket?.get(key) ?? null
   }
   return rayDataByAzimuth.get(`${key}:${interfaceTag}`) ?? null
 }
 
-/** 冰区一次调用 AnalyseIce3DRTRDDynamic，返回全部扇面的静态与动态声线。 */
-async function ensureIce3dRayData() {
-  if (!useIce3dRays.value) return false
-  if (ice3dRayByAzimuth.static.size && ice3dRayByAzimuth.dynamic.size) return true
-  if (ice3dRayRequest) {
+/** 一次调用三维动态声线接口（冰区 / 非冰区），返回全部扇面的静态与动态声线。 */
+async function ensure3dRayData() {
+  if (!use3dRays.value) return false
+  if (ray3dByAzimuth.static.size && ray3dByAzimuth.dynamic.size) return true
+  if (ray3dRequest) {
     try {
-      await ice3dRayRequest
+      await ray3dRequest
     } catch {}
-    return ice3dRayByAzimuth.dynamic.size > 0
+    return ray3dByAzimuth.dynamic.size > 0
   }
-  const requestToken = ++ice3dRayToken
+  const requestToken = ++ray3dToken
   const payload = commonPortalParams({
     range: Number(calcParams.value.range),
     minFreq: Number(calcParams.value.minFreq),
@@ -5480,25 +5521,26 @@ async function ensureIce3dRayData() {
     sector: Number(calcParams.value.sector),
     lineCount: Number(calcParams.value.lineCount),
   })
-  ice3dRayRequest = analyseIce3dDynamicRTRD(payload)
+  const ice = calcParams.value.regionType === 'ice'
+  ray3dRequest = ice ? analyseIce3dDynamicRTRD(payload) : analyse3dDynamicRTRD(payload)
   try {
-    const response = await ice3dRayRequest
-    if (requestToken !== ice3dRayToken) return false
+    const response = await ray3dRequest
+    if (requestToken !== ray3dToken) return false
     const adapted = adapt3dRayResponseToAzimuths(response)
     if (!adapted?.byAzimuth?.size) return false
-    ice3dRayByAzimuth.static.clear()
-    ice3dRayByAzimuth.dynamic.clear()
+    ray3dByAzimuth.static.clear()
+    ray3dByAzimuth.dynamic.clear()
     for (const [portalAzimuth, entry] of adapted.byAzimuth) {
       const internalAzimuth = nearestAvailableAzimuth(
         compassBearingToInternalAzimuth(portalAzimuth)
       )
       const key = internalAzimuth.toFixed(4)
-      ice3dRayByAzimuth.static.set(key, entry.staticResponse)
-      ice3dRayByAzimuth.dynamic.set(key, entry.dynamicResponse)
+      ray3dByAzimuth.static.set(key, entry.staticResponse)
+      ray3dByAzimuth.dynamic.set(key, entry.dynamicResponse)
     }
     return true
   } finally {
-    ice3dRayRequest = null
+    ray3dRequest = null
   }
 }
 
@@ -5507,8 +5549,8 @@ async function ensureRayDataForAzimuth(azimuthDeg) {
     staticRayData.value = null
     return null
   }
-  if (useIce3dRays.value) {
-    const loaded = await ensureIce3dRayData()
+  if (use3dRays.value) {
+    const loaded = await ensure3dRayData()
     if (!loaded) {
       staticRayData.value = null
       return null
@@ -5875,8 +5917,8 @@ function buildVolumeRayScatterPoints() {
   const points = []
   const interfaceTag = calcParams.value.rayInterface
   const entries = []
-  if (useIce3dRays.value) {
-    const bucket = ice3dRayByAzimuth[interfaceTag === 'static' ? 'static' : 'dynamic']
+  if (use3dRays.value) {
+    const bucket = ray3dByAzimuth[interfaceTag === 'static' ? 'static' : 'dynamic']
     for (const [key, response] of bucket.entries()) {
       const azimuth = Number(key)
       if (Number.isFinite(azimuth)) entries.push([azimuth, response])

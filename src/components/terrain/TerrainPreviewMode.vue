@@ -214,7 +214,7 @@ let dragState = null
 let lastScene = null
 let globeTransitionRaf = 0
 let savedTerrainCamera = null
-const MIN_CAMERA_ZOOM = 0.55
+const MIN_CAMERA_ZOOM = 0.1
 // 允许贴近声场体与海底表面观察细节；仅改变投影视图比例，不重载地形或声场。
 const MAX_CAMERA_ZOOM = 40
 const MIN_CAMERA_PITCH = 0.05
