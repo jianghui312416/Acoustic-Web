@@ -241,8 +241,9 @@ function sceneControls() {
   const seActive = Boolean(props.field?.signalExcess)
     || (props.fields || []).some(layer => layer?.field?.signalExcess)
   if (seActive) {
-    const dbMin = Number(signalExcessState.dbMin)
-    const dbMax = Number(signalExcessState.dbMax)
+    const pdMode = signalExcessState.displayMode === 'pd'
+    const dbMin = pdMode ? 0 : Number(signalExcessState.dbMin)
+    const dbMax = pdMode ? 100 : Number(signalExcessState.dbMax)
     if (Number.isFinite(dbMin) && Number.isFinite(dbMax) && dbMax > dbMin) {
       controls.dbMin = dbMin
       controls.dbMax = dbMax
@@ -652,6 +653,11 @@ function onPointerUp(event) {
         setWeatherNoisePoint(picked)
         setNoiseProbePicking(false)
       }
+      hover.value = null
+      return
+    }
+    // 「点选位置采样」关闭时，普通点击不弹出站点信息窗，也不会触发天气/噪声请求。
+    if (!weatherNoiseState.hoverSampling) {
       hover.value = null
       return
     }

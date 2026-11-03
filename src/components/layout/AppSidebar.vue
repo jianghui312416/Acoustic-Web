@@ -331,7 +331,25 @@
               </label>
             <label class="feature-slider">
               <span>方位角（正北 0°）<b>{{ Math.round(sliceControls.sliceAzimuthDeg) }}°</b></span>
-              <input v-model.number="sliceControls.sliceAzimuthDeg" type="range" min="0" max="359" step="1" @input="normalizeSliceControls" />
+              <input
+                v-if="sliceAzimuthOptions.length"
+                :value="sliceAzimuthIndex"
+                type="range"
+                min="0"
+                :max="Math.max(0, sliceAzimuthOptions.length - 1)"
+                step="1"
+                :disabled="sliceAzimuthOptions.length <= 1"
+                @input="onSliceAzimuthInput"
+              />
+              <input
+                v-else
+                v-model.number="sliceControls.sliceAzimuthDeg"
+                type="range"
+                min="0"
+                max="359"
+                step="1"
+                @input="normalizeSliceControls"
+              />
             </label>
             <p class="feature-section-title">dB 范围</p>
             <div class="db-control-grid">
@@ -344,27 +362,27 @@
             <label class="feature-switch">
               <input v-model="sliceControls.seafloorLineAndMask" type="checkbox" />
               <span class="switch-track"><i></i></span>
-              <span>海底掩膜线 + 海底掩膜</span>
+              <span class="feature-switch-label"><span aria-hidden="true">〰️</span><span>海底掩膜线 + 海底掩膜</span></span>
             </label>
             <label class="feature-switch">
               <input v-model="sliceControls.seafloorMask" type="checkbox" />
               <span class="switch-track"><i></i></span>
-              <span>海底掩膜</span>
+              <span class="feature-switch-label"><span aria-hidden="true">◼️</span><span>海底掩膜</span></span>
             </label>
             <label class="feature-switch">
               <input v-model="sliceControls.east90Indicator" type="checkbox" />
               <span class="switch-track"><i></i></span>
-              <span>方位方向线</span>
+              <span class="feature-switch-label"><span aria-hidden="true">➤</span><span>方位方向线</span></span>
             </label>
             <label class="feature-switch">
               <input v-model="sliceControls.sspWindow" type="checkbox" />
               <span class="switch-track"><i></i></span>
-              <span>声速剖面窗口</span>
+              <span class="feature-switch-label"><span aria-hidden="true">📈</span><span>声速剖面窗口</span></span>
             </label>
             <label class="feature-switch">
               <input v-model="sliceControls.cursorReadout" type="checkbox" />
               <span class="switch-track"><i></i></span>
-              <span>光标读取</span>
+              <span class="feature-switch-label"><span aria-hidden="true">🔎</span><span>光标读取</span></span>
             </label>
             <details class="feature-fold ray-playback-fold">
               <summary>
@@ -531,6 +549,38 @@ function normalizeControls() {
 
 function normalizeSliceControls() {
   clampVerticalSliceControls(sliceControls)
+}
+
+/** 方位方向线所在声场体的实际计算方位（罗盘方位，升序）。 */
+const sliceAzimuthOptions = computed(() => (
+  Array.isArray(acousticSceneState.sliceAzimuths)
+    ? acousticSceneState.sliceAzimuths.map(Number).filter(Number.isFinite)
+    : []
+))
+const sliceAzimuthIndex = computed(() => {
+  const options = sliceAzimuthOptions.value
+  if (!options.length) return 0
+  const current = ((Number(sliceControls.sliceAzimuthDeg) || 0) % 360 + 360) % 360
+  let best = 0
+  let bestDiff = Infinity
+  options.forEach((value, index) => {
+    const raw = Math.abs(value - current) % 360
+    const diff = Math.min(raw, 360 - raw)
+    if (diff < bestDiff) {
+      bestDiff = diff
+      best = index
+    }
+  })
+  return best
+})
+
+/** 侧边栏方位滑杆：只在实际计算的方位之间按索引滑动。 */
+function onSliceAzimuthInput(event) {
+  const index = Math.round(Number(event?.target?.value))
+  const value = sliceAzimuthOptions.value[index]
+  if (!Number.isFinite(value)) return
+  sliceControls.sliceAzimuthDeg = value
+  normalizeSliceControls()
 }
 
 function normalizeSimulationControls() {
@@ -1071,7 +1121,9 @@ onBeforeUnmount(() => {
 .feature-switch { position: relative; width: 100%; min-height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 6px; color: #a9c1cf; font-size: 10px; cursor: pointer; }
 /* 让可聚焦的原生控件始终与当前可见行重合，避免浏览器为 1px 绝对定位焦点自动滚动页面。 */
 .feature-switch input { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
-.feature-switch > span:last-child { min-width: 0; order: 1; }
+.feature-switch > .feature-switch-label { min-width: 0; flex: 1; order: 1; display: flex; align-items: center; gap: 5px; }
+.feature-switch-label > span:first-child { flex: 0 0 1.5em; width: 1.5em; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1; }
+.feature-switch-label > span:last-child { min-width: 0; }
 .feature-switch .switch-track { position: relative; order: 2; flex: 0 0 auto; width: 38px; height: 20px; border-radius: 999px; border: 1px solid #365875; background: #223a55; transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease; box-sizing: border-box; }
 .feature-switch .switch-track i { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #819fbe; box-shadow: 0 1px 3px rgba(0, 7, 17, 0.48); transition: transform 0.18s ease, background 0.18s ease; }
 .feature-switch input:focus-visible + .switch-track { outline: 2px solid rgba(83, 207, 242, 0.72); outline-offset: 2px; }

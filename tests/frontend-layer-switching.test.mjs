@@ -136,7 +136,8 @@ test('a new 3d calculation archives the previous sound field as an independent l
   assert.match(source, /renderer: soundField/)
   assert.match(source, /soundField = viewer \? new SoundField/)
   assert.match(source, /if \(analysisMode\.value === '3d'\) archiveCurrent3dRun\(\)/)
-  assert.match(source, /\[\.\.\.runHistoryLayers\.value, \.\.\.jobLayers\.value\]/)
+  assert.match(source, /const terrainJobFields = computed\(\(\) => runHistoryLayers\.value\.map/)
+  assert.match(source, /runHistoryLayers\.value = \[\.\.\.runHistoryLayers\.value, layer\]/)
   assert.match(source, /function syncHistoricalSoundFields\(\)/)
 })
 

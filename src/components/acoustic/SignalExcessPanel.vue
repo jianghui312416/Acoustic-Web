@@ -7,10 +7,10 @@
         <i></i>
       </label>
 
-      <p class="se-label">接球手（跑动标记）</p>
+      <!-- <p class="se-label">接球手（跑动标记）</p>
       <select v-model="state.receiver" class="se-select">
         <option v-for="option in receiverOptions" :key="option" :value="option">{{ option }}</option>
-      </select>
+      </select> -->
 
       <p class="se-label">目标</p>
       <div class="se-targets">
@@ -21,24 +21,30 @@
       <div class="se-row"><span>目标源级别</span><b>{{ state.sourceLevel }} 分贝</b></div>
       <input v-model.number="state.sourceLevel" class="se-range" type="range" min="60" max="200" step="1" />
 
-      <div class="se-row"><span>目标最小深度</span><b>{{ state.minDepth }} 米</b></div>
-      <input v-model.number="state.minDepth" class="se-range" type="range" min="0" :max="state.maxDepth" step="1" />
+      <div class="se-depth">
+        <div class="se-depth-controls">
+          <div class="se-row"><span>目标最小深度</span><b>{{ state.fullDepth ? '全深度' : `${state.minDepth} 米` }}</b></div>
+          <input v-model.number="state.minDepth" class="se-range" type="range" min="0" :max="state.maxDepth" step="1" :disabled="state.fullDepth" />
 
-      <div class="se-row"><span>目标最大深度</span><b>{{ state.maxDepth }} 米</b></div>
-      <input v-model.number="state.maxDepth" class="se-range" type="range" :min="state.minDepth" max="500" step="1" />
+          <div class="se-row"><span>目标最大深度</span><b>{{ state.fullDepth ? '全深度' : `${state.maxDepth} 米` }}</b></div>
+          <input v-model.number="state.maxDepth" class="se-range" type="range" :min="state.minDepth" max="500" step="1" :disabled="state.fullDepth" />
+        </div>
+        <button type="button" class="se-full-depth" :class="{ active: state.fullDepth }"
+          :aria-pressed="state.fullDepth" @click="state.fullDepth = !state.fullDepth">全深度模拟</button>
+      </div>
 
-      <div class="se-band">
+      <!-- <div class="se-band">
         <span>乐队 <em>→</em></span>
         <div class="se-band-buttons">
           <button v-for="band in bandOptions" :key="band" type="button"
             :class="{ active: state.band === band }" @click="state.band = band">{{ band }}</button>
         </div>
-      </div>
+      </div> -->
 
-      <p class="se-label">dB 范围</p>
+      <p class="se-label">{{ rangeLabel }}</p>
       <div class="se-db-grid">
-        <div class="se-db-cell"><span>Min</span><input v-model.number="state.dbMin" type="number" step="1" @blur="restoreDbRangeValue('dbMin')" /><em>dB</em></div>
-        <div class="se-db-cell"><span>Max</span><input v-model.number="state.dbMax" type="number" step="1" @blur="restoreDbRangeValue('dbMax')" /><em>dB</em></div>
+        <div class="se-db-cell"><span>Min</span><input v-if="!isPdMode" v-model.number="state.dbMin" type="number" step="1" @blur="restoreDbRangeValue('dbMin')" /><b v-else class="se-fixed">0</b><em>{{ unitLabel }}</em></div>
+        <div class="se-db-cell"><span>Max</span><input v-if="!isPdMode" v-model.number="state.dbMax" type="number" step="1" @blur="restoreDbRangeValue('dbMax')" /><b v-else class="se-fixed">100</b><em>{{ unitLabel }}</em></div>
       </div>
       <div class="se-colorbar" :style="{ background: seGradient }"></div>
 
@@ -50,7 +56,22 @@
       <div class="se-row"><span>阵列增益</span><b>{{ state.arrayGain }} 分贝</b></div>
       <input v-model.number="state.arrayGain" class="se-range" type="range" min="0" max="30" step="1" />
 
+
+      <div v-if="hasForecast" class="se-forecast">
+        <div class="se-row"><span>预报时间（NL）</span><b>{{ forecastTimeText }} · +{{ frameIndex }} 小时</b></div>
+        <input class="se-range" type="range" min="0" :max="maxFrameIndex" step="1" :value="frameIndex" aria-label="环境噪声预报小时" @input="onForecastInput" />
+      </div>
+
+      <div class="se-band">
+        <span>展示 <em>→</em></span>
+        <div class="se-band-buttons">
+          <button type="button" :class="{ active: state.displayMode === 'margin' }" @click="state.displayMode = 'margin'">Margin（dB）</button>
+          <button type="button" :class="{ active: state.displayMode === 'pd' }" @click="state.displayMode = 'pd'">Pd（%）</button>
+        </div>
+      </div>
+
       <p class="se-note">SE = SL − TL − NL − DT + AG · NL {{ noiseLevelText }} dB</p>
+      <p class="se-formula">Pd = Φ(SE / σ)，σ = {{ state.sigma }} dB</p>
       <p v-if="!hasNoiseLevel" class="se-hint">需先在「天气与环境噪声」加载预报以获取 NL。</p>
     </div>
   </div>
@@ -59,7 +80,10 @@
 <script setup>
 import { computed, onMounted } from 'vue'
 import { signalExcessState as state } from '@/modules/acoustic/signalExcessState.js'
-import { forecastNoiseSummary } from '@/modules/weather/weatherNoiseStore.js'
+import {
+  currentWeatherNoiseFrame, forecastNoiseSummary, setWeatherNoiseFrame, weatherNoiseState,
+} from '@/modules/weather/weatherNoiseStore.js'
+import { formatForecastTime } from '@/utils/weatherNoiseForecast.js'
 import { SIGNAL_EXCESS_COLOR_STOPS } from '@/utils/signalExcess.js'
 
 const receiverOptions = [
@@ -87,6 +111,21 @@ const noiseLevelText = computed(() => {
   return Number.isFinite(level) ? level.toFixed(1) : '—'
 })
 const hasNoiseLevel = computed(() => Number.isFinite(Number(forecastNoiseSummary.value?.bandLevelDb)))
+
+const isPdMode = computed(() => state.displayMode === 'pd')
+const rangeLabel = computed(() => (isPdMode.value ? 'Pd 范围' : 'dB 范围'))
+const unitLabel = computed(() => (isPdMode.value ? '%' : 'dB'))
+
+// 预报时间滑杆：与「天气与环境噪声」共享同一 frameIndex，同步改变 NL。
+const frameCount = computed(() => weatherNoiseState.result?.frames?.length || 0)
+const hasForecast = computed(() => frameCount.value > 0)
+const maxFrameIndex = computed(() => Math.max(0, frameCount.value - 1))
+const frameIndex = computed(() => weatherNoiseState.frameIndex)
+const forecastTimeText = computed(() => formatForecastTime(currentWeatherNoiseFrame.value?.time))
+
+function onForecastInput(event) {
+  setWeatherNoiseFrame(Number(event.target.value))
+}
 
 function restoreDbRangeValue(key) {
   const value = state[key]
@@ -128,6 +167,11 @@ function selectTarget(target) {
 .se-row { display:flex; align-items:baseline; justify-content:space-between; margin:9px 1px 2px; color:#9db8c7; }
 .se-row b { color:#59dff5; font-family:ui-monospace,monospace; font-size:10px; }
 .se-range { width:100%; height:3px; margin:2px 0 4px; accent-color:#35d5e7; cursor:pointer; }
+.se-range:disabled { opacity:.4; cursor:not-allowed; }
+.se-depth { display:flex; align-items:stretch; gap:8px; }
+.se-depth-controls { flex:1; min-width:0; }
+.se-full-depth { flex:0 0 54px; align-self:center; padding:6px 4px; color:#a9cad9; background:#132c40; border:1px solid #2e6078; border-radius:5px; font:10px/1.35 'Microsoft YaHei',sans-serif; cursor:pointer; }
+.se-full-depth.active { color:#eafaff; background:#1b587a; border-color:#5fb6dd; }
 .se-band { display:flex; align-items:center; gap:8px; margin:10px 1px 2px; color:#9db8c7; }
 .se-band em { color:#59dff5; font-style:normal; }
 .se-band-buttons { display:flex; flex:1; gap:4px; }
@@ -140,5 +184,8 @@ function selectTarget(target) {
 .se-db-cell em { color:#5e8499; font-size:8px; font-style:normal; }
 .se-colorbar { height:7px; margin:6px 1px 2px; border-radius:3px; border:1px solid #274257; }
 .se-note { margin:10px 1px 0; padding-top:7px; border-top:1px solid #1c3448; color:#6b8ba0; font:9px ui-monospace,monospace; }
+.se-formula { margin:4px 1px 0; color:#6b8ba0; font:9px ui-monospace,monospace; }
 .se-hint { margin:5px 1px 0; color:#eabf61; font-size:9px; line-height:1.4; }
+.se-forecast { margin:9px 1px 2px; padding-top:7px; border-top:1px solid #1c3448; }
+.se-db-cell b.se-fixed { color:#59dff5; font-family:ui-monospace,monospace; font-size:10px; font-weight:400; }
 </style>

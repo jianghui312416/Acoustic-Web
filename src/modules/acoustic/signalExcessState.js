@@ -14,9 +14,15 @@ export const signalExcessState = reactive({
   sourceLevel: 140,
   minDepth: 20,
   maxDepth: 100,
+  // 全深度模拟：开启后忽略上面的目标深度区间，使用整个水体深度范围的传播损失。
+  fullDepth: false,
   band: '最大限度',
   detectionThreshold: 10,
   arrayGain: 0,
-  dbMin: -60,
-  dbMax: 10,
+  dbMin: -40,
+  dbMax: 20,
+  // 信号余量波动标准差 σ；探测概率 Pd = Φ(SE / σ)。
+  sigma: 6,
+  // 体渲染展示口径：'margin' → Margin（dB），'pd' → Pd（%）。
+  displayMode: 'margin',
 })

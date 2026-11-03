@@ -1,5 +1,6 @@
 import { reactive } from 'vue'
-import { listAcousticJobs } from '@/api/jobWorkspaceApi.js'
+import { listAcousticJobs, loadAcousticJobParams } from '@/api/jobWorkspaceApi.js'
+import { isWorkspaceFieldParams } from './workspaceJobFilter.js'
 
 export const jobWorkspace = reactive({
   jobs: [],
@@ -12,11 +13,39 @@ export const jobWorkspace = reactive({
   closeRequestToken: 0,
 })
 
+const WORKSPACE_JOB_CACHE_LIMIT = 200
+/** 任务参数判定缓存：updated_at_ms 变化后会重新读取。 */
+const workspaceJobCache = new Map()
+
+async function isWorkspaceJob(job) {
+  const id = String(job?.job_id || '')
+  if (!id) return false
+  const updatedAt = Number(job?.updated_at_ms) || 0
+  const cached = workspaceJobCache.get(id)
+  if (cached && cached.updatedAt === updatedAt) return cached.eligible
+  try {
+    const params = await loadAcousticJobParams(id)
+    const eligible = isWorkspaceFieldParams(params)
+    workspaceJobCache.set(id, { updatedAt, eligible })
+    if (workspaceJobCache.size > WORKSPACE_JOB_CACHE_LIMIT) {
+      workspaceJobCache.delete(workspaceJobCache.keys().next().value)
+    }
+    return eligible
+  } catch {
+    workspaceJobCache.set(id, { updatedAt, eligible: false })
+    return false
+  }
+}
+
 export async function refreshJobWorkspace() {
   jobWorkspace.loading = true
   jobWorkspace.error = ''
   try {
-    jobWorkspace.jobs = await listAcousticJobs()
+    const jobs = await listAcousticJobs()
+    const checked = await Promise.all(
+      jobs.map(async job => ({ job, eligible: job.openable !== false && await isWorkspaceJob(job) }))
+    )
+    jobWorkspace.jobs = checked.filter(item => item.eligible).map(item => item.job)
   } catch (error) {
     jobWorkspace.error = error?.message || String(error)
   } finally {

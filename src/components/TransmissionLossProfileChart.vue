@@ -20,7 +20,7 @@
 <template>
   <div class="ray-profile">
     <header class="rp-head">
-      <span class="rp-title">距离 - 深度 TL 伪彩图</span>
+      <span class="rp-title">{{ chartTitle }}</span>
       <span class="rp-tag">{{ Math.round(displayAzimuth(selectedAzimuth)) }}°</span>
       <span
         v-if="showSeabedMask"
@@ -42,6 +42,25 @@
       <div class="rp-chart-wrap" :class="{ 'is-placing-receiver': receiverPlacementEnabled }" :style="{ height }">
         <div ref="chartEl" class="rp-chart"></div>
         <RayFlowOverlay ref="rayOverlay" :flow="rayFlow" :geometry="rayGeometry" :viewport="rayViewport" :playing="raysPlaying" :visible="raysVisible" :static-mode="staticRays && !animated" :show-static-tracks="staticRays" show-time />
+        <div
+          v-for="marker in markerReadouts"
+          :key="marker.id"
+          class="rp-readout-marker"
+          :class="{ 'flip-left': markerPositions[marker.id]?.flip }"
+          :style="markerPositions[marker.id] || { display: 'none' }"
+        >
+          <span class="rp-readout-cross" aria-hidden="true"></span>
+          <span class="rp-readout-card">
+            <span class="rp-readout-line">
+              <svg class="rp-readout-pin" viewBox="0 0 24 32" aria-hidden="true">
+                <path d="M12 1C6.5 1 2 5.5 2 11c0 7.5 10 20 10 20s10-12.5 10-20C22 5.5 17.5 1 12 1Zm0 13.5A4.5 4.5 0 1 1 12 5.5a4.5 4.5 0 0 1 0 9Z" fill="currentColor" />
+              </svg>
+              <b>{{ marker.label }}</b>
+              <strong>{{ marker.metricLabel }} {{ marker.valueText }} {{ marker.unit }}</strong>
+            </span>
+            <span class="rp-readout-location">{{ marker.positionText }}</span>
+          </span>
+        </div>
         <button
           v-if="zoomedIn"
           type="button"
@@ -97,6 +116,12 @@ import {
 import RayFlowOverlay from './RayFlowOverlay.vue'
 import { resolveRayFlow, rayChartViewport } from '@/utils/rayFlow.js'
 import { parseAnalyse2DRtrd } from '@/sdk/ncFieldModel.js'
+import {
+  SIGNAL_EXCESS_COLOR_STOPS,
+  resolveSignalExcessDepthRange,
+  resolveSignalExcessOffset,
+  signalExcessValueForTl,
+} from '@/utils/signalExcess.js'
 
 const props = defineProps({
   /** 声场原始数据（tlrd JSON） */
@@ -128,10 +153,14 @@ const props = defineProps({
   showSeabedMask: { type: Boolean, default: true },
   /** 光标读取开关：开启后悬停显示 TL / 距离 / 深度，否则不显示 */
   readoutEnabled: { type: Boolean, default: true },
+  /** 开启后点击剖面会在该位置保留 R1/R2… 读数标记（垂直切面使用）。 */
+  clickMarkers: { type: Boolean, default: false },
   /** 颜色范围下限（dB），用于二维传播损失的独立色带 */
   dbMin: { type: Number, default: 60 },
   /** 颜色范围上限（dB），用于二维传播损失的独立色带 */
   dbMax: { type: Number, default: 120 },
+  /** 信号余量参数；非空时剖面绘制该方位的 SE/Pd，而不是 TL。 */
+  signalExcess: { type: Object, default: null },
   /** 开启后，单击剖面会回传接收阵中心 */
   receiverPlacementEnabled: { type: Boolean, default: false },
   /** 父视图从 KeepAlive 恢复时递增，用于强制重绘 */
@@ -139,6 +168,40 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['update:azimuthDeg', 'select-receiver'])
+
+/** 信号余量参数：仅当 NL 有效时启用 SE/Pd 剖面。 */
+const seParams = computed(() => {
+  const params = props.signalExcess
+  return params && Number.isFinite(Number(params.noiseLevel)) ? params : null
+})
+const seActive = computed(() => Boolean(seParams.value))
+const sePdMode = computed(() => seParams.value?.displayMode === 'pd')
+const valueLabel = computed(() => (seActive.value ? (sePdMode.value ? 'Pd' : 'SE') : 'TL'))
+const valueUnit = computed(() => (seActive.value && sePdMode.value ? '%' : 'dB'))
+const chartTitle = computed(() => `距离 - 深度 ${valueLabel.value} 伪彩图`)
+
+/** 点击光标读取后保留的 R1/R2… 读数标记。 */
+const readoutMarkers = ref([])
+const markerPositions = ref({})
+let nextMarkerId = 1
+const markerReadouts = computed(() => {
+  const se = seParams.value
+  return readoutMarkers.value.map((marker, index) => {
+    const value = se
+      ? signalExcessValueForTl(marker.rawTl, se)
+      : marker.rawTl
+    const numeric = Number(value)
+    const decimals = se && !sePdMode.value ? 1 : se ? 1 : 0
+    return {
+      ...marker,
+      label: `R${index + 1}`,
+      metricLabel: se ? valueLabel.value : 'TL',
+      valueText: Number.isFinite(numeric) ? numeric.toFixed(decimals) : '—',
+      unit: se ? valueUnit.value : 'dB',
+      positionText: `${formatMarkerRange(marker.rangeM)}, ${Math.round(marker.depthM)}m`,
+    }
+  })
+})
 
 const chartEl = ref(null)
 const open = ref(true)
@@ -224,6 +287,7 @@ const profile = computed(() => {
   if (!m)
     return {
       dists: [],
+      cols: [],
       depths: [],
       axisDepths: [],
       heat: [],
@@ -249,11 +313,18 @@ const profile = computed(() => {
   const dists = colEntries.map((c) => Math.round(c.dist * 10) / 10)
   const geometry = profileAxisGeometry(m, row, props.maxRadiusM)
 
-  // TL 伪彩：heatmap 数据（无效值不加入 ⇒ 留空）
+  // 伪彩：普通模式为 TL；信号余量模式按该方位 TL 换算 SE/Pd，并裁剪到目标深度区间。
+  const se = seParams.value
+  const seOffset = se ? resolveSignalExcessOffset(se) : NaN
+  const seRange = se ? resolveSignalExcessDepthRange(se, m.depths) : null
   const heat = []
   for (let d = 0; d < m.depths.length; d++) {
+    const depthValue = Number(m.depths[d])
+    if (seRange && !(depthValue >= seRange.low && depthValue <= seRange.high)) continue
     for (const { col } of colEntries) {
-      const v = m.tlAt(row, d, col)
+      const tl = m.tlAt(row, d, col)
+      if (!Number.isFinite(tl)) continue
+      const v = se ? signalExcessValueForTl(tl, se, seOffset) : tl
       if (!Number.isFinite(v)) continue
       heat.push([maps.get(col), d, Math.round(v * 10) / 10])
     }
@@ -325,6 +396,7 @@ const profile = computed(() => {
 
   return {
     dists,
+    cols: colEntries.map((entry) => entry.col),
     depths: depthVals,
     axisDepths,
     heat,
@@ -533,18 +605,24 @@ function nmTickPlan(valuesMeters, targetTicks) {
 
 /* ────────────────────────────── 图表渲染 ────────────────────────────── */
 
-/** TL 色带（与体渲染 / 色标一致的 60→120 dB 六段色） */
-function tlColorStops() {
-  return VOLUME_TL_COLOR_STOPS.map(([, rgb]) => `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`)
+/** 当前色带：TL 使用体渲染色标；信号余量模式使用发散 SE/Pd 色标。 */
+function valueColorStopsSource() {
+  return seActive.value ? SIGNAL_EXCESS_COLOR_STOPS : VOLUME_TL_COLOR_STOPS
+}
+
+/** 色带 CSS 颜色列表（供 ECharts visualMap 使用）。 */
+function valueColorStops() {
+  return valueColorStopsSource().map(([, rgb]) => `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`)
 }
 
 /** 连续色标采样；直接读取已规范化的常量色标，避免在大网格热循环中反复分配。 */
 function sampleDisplayTlColor(value) {
+  const stops = valueColorStopsSource()
   const x = Math.max(0, Math.min(1, Number(value) || 0))
-  for (let index = 0; index < VOLUME_TL_COLOR_STOPS.length - 1; index++) {
-    const [start, startColor] = VOLUME_TL_COLOR_STOPS[index]
-    const [end, endColor] = VOLUME_TL_COLOR_STOPS[index + 1]
-    if (x > end && index < VOLUME_TL_COLOR_STOPS.length - 2) continue
+  for (let index = 0; index < stops.length - 1; index++) {
+    const [start, startColor] = stops[index]
+    const [end, endColor] = stops[index + 1]
+    if (x > end && index < stops.length - 2) continue
     const ratio = Math.max(0, Math.min(1, (x - start) / Math.max(1e-6, end - start)))
     return [
       startColor[0] + (endColor[0] - startColor[0]) * ratio,
@@ -552,7 +630,7 @@ function sampleDisplayTlColor(value) {
       startColor[2] + (endColor[2] - startColor[2]) * ratio,
     ]
   }
-  return VOLUME_TL_COLOR_STOPS[VOLUME_TL_COLOR_STOPS.length - 1][1]
+  return stops[stops.length - 1][1]
 }
 
 /**
@@ -560,7 +638,8 @@ function sampleDisplayTlColor(value) {
  * 这里只改变显示采样；原始 TL 数组、色标范围和光标读数均保持不变。
  */
 function createSmoothTlTexture(profileData) {
-  const rangeKey = `${props.dbMin}:${props.dbMax}`
+  const modeKey = seActive.value ? (sePdMode.value ? 'pd' : 'se') : 'tl'
+  const rangeKey = `${modeKey}:${props.dbMin}:${props.dbMax}`
   if (smoothTextureCanvas && smoothTextureProfile === profileData && smoothTextureRange === rangeKey) {
     return smoothTextureCanvas
   }
@@ -653,7 +732,7 @@ function createUncoveredWaterSeries(profileData) {
   const start = 0
   const end = profileData.dists.length - 1
   const top = Math.max(0, Number(profileData.tlDepthMaxIndex) || 0)
-  const stops = tlColorStops()
+  const stops = valueColorStops()
   const fillColor = stops[stops.length - 1]
   return {
     name: 'TL 未覆盖水层',
@@ -779,7 +858,7 @@ function createSeabedFillSeries(profileData) {
   const dists = profileData.dists
   if (!dists || dists.length < 2) return null
   const axisLast = Math.max(1, profileData.axisDepths.length - 1)
-  const fillColor = tlColorStops()[tlColorStops().length - 1]
+  const fillColor = valueColorStops()[valueColorStops().length - 1]
   return {
     name: '海底掩膜填充',
     type: 'custom',
@@ -866,6 +945,7 @@ function onDataZoom() {
     }
   }
   updateReceiverHandlePos()
+  updateMarkerPositions()
   rayOverlay.value?.repaint()
 }
 
@@ -900,6 +980,87 @@ function updateReceiverHandlePos() {
     return
   }
   receiverHandlePos.value = { left: `${pixel[0]}px`, top: `${pixel[1]}px` }
+}
+
+/** 距离读数统一显示海里（nm）。 */
+function formatMarkerRange(rangeM) {
+  const value = Number(rangeM)
+  if (!Number.isFinite(value)) return '—'
+  const nm = value * NM_PER_M
+  return `${nm.toFixed(nm >= 10 ? 0 : 1)}nm`
+}
+
+function clearReadoutMarkers() {
+  if (!readoutMarkers.value.length && !Object.keys(markerPositions.value).length) return
+  readoutMarkers.value = []
+  markerPositions.value = {}
+}
+
+/** 缩放 / 平移 / 尺寸变化后，重新把标记换算成容器像素。 */
+function updateMarkerPositions() {
+  if (!chart || !chartEl.value || !readoutMarkers.value.length) {
+    if (Object.keys(markerPositions.value).length) markerPositions.value = {}
+    return
+  }
+  const width = chartEl.value.clientWidth
+  const height = chartEl.value.clientHeight
+  const next = {}
+  for (const marker of readoutMarkers.value) {
+    const pixel = chart.convertToPixel(
+      { xAxisIndex: 0, yAxisIndex: 0 },
+      [marker.distanceIndex, marker.depthIndex],
+    )
+    if (!Array.isArray(pixel) || !Number.isFinite(pixel[0]) || !Number.isFinite(pixel[1])) continue
+    if (pixel[0] < 0 || pixel[0] > width || pixel[1] < 0 || pixel[1] > height) continue
+    next[marker.id] = {
+      left: `${pixel[0]}px`,
+      top: `${pixel[1]}px`,
+      flip: pixel[0] > width - 170,
+    }
+  }
+  markerPositions.value = next
+}
+
+/** 点击剖面内部（海底掩膜线上方）时，在该位置保留一条读数标记。 */
+function addReadoutMarkerFromEvent(event) {
+  if (!props.readoutEnabled || !props.clickMarkers || props.receiverPlacementEnabled) return
+  if (!chart || !chartEl.value) return
+  const p = profile.value
+  if (!p.colCount || !p.depths.length) return
+  const x = Number(event?.offsetX ?? event?.zrX)
+  const y = Number(event?.offsetY ?? event?.zrY)
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return
+  if (!chart.containPixel({ gridIndex: 0 }, [x, y])) return
+  const pixel = chart.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [x, y])
+  if (!Array.isArray(pixel)) return
+  const distanceIndex = axisIndexFromPixel(pixel[0], p.dists)
+  const depthIndex = axisIndexFromPixel(pixel[1], p.depths)
+  if (distanceIndex < 0 || distanceIndex >= p.dists.length) return
+  if (depthIndex < 0 || depthIndex >= p.depths.length) return
+  const depthM = Number(p.depths[depthIndex])
+  const rangeM = Number(p.dists[distanceIndex])
+  if (!Number.isFinite(depthM) || !Number.isFinite(rangeM)) return
+  const seabedDepth = seabedDepthAtIndex(distanceIndex)
+  if (Number.isFinite(seabedDepth) && depthM >= seabedDepth) return
+  const col = p.cols?.[distanceIndex]
+  const rawTl = model.value?.tlAt(rowIndex.value, depthIndex, col)
+  if (!Number.isFinite(rawTl)) return
+  if (readoutMarkers.value.some(marker => (
+    marker.distanceIndex === distanceIndex && marker.depthIndex === depthIndex
+  ))) return
+  readoutMarkers.value = [...readoutMarkers.value, {
+    id: nextMarkerId++,
+    distanceIndex,
+    depthIndex,
+    rangeM,
+    depthM,
+    rawTl,
+  }]
+  updateMarkerPositions()
+}
+
+function onChartZrClick(event) {
+  addReadoutMarkerFromEvent(event)
 }
 
 function receiverPointFromEvent(event) {
@@ -1001,6 +1162,7 @@ async function renderChart() {
     chart = echarts.init(chartEl.value)
     chart.on('datazoom', onDataZoom)
     chart.on('click', onChartClick)
+    chart.getZr().on('click', onChartZrClick)
   }
 
   // 整齐刻度方案（抽稀间隔 + 取整步长）；距离轴按整海里取步长
@@ -1128,8 +1290,8 @@ async function renderChart() {
           const val = params?.value
           const az = displayAzimuth(selectedAzimuth.value)
           if (params?.seriesType === 'heatmap') {
-            const [ci, di, tl] = val
-            return `方位 ${az.toFixed(1)}°<br/>距离 ${fmtNm(p.dists[ci] ?? 0)}<br/>深度 ${(p.depths[di] ?? 0).toFixed(2)} m<br/>TL ${Number(tl).toFixed(1)} dB`
+            const [ci, di, value] = val
+            return `方位 ${az.toFixed(1)}°<br/>距离 ${fmtNm(p.dists[ci] ?? 0)}<br/>深度 ${(p.depths[di] ?? 0).toFixed(2)} m<br/>${valueLabel.value} ${Number(value).toFixed(1)} ${valueUnit.value}`
           }
           if (params?.seriesName === '海底地形') {
             const [ci, , depthM] = val
@@ -1151,7 +1313,7 @@ async function renderChart() {
       // 整齐刻度，位置仍是真实数据位置；声线图使用同一数值范围即可逐点对应。
       xAxis: {
         type: 'category',
-        name: '距离',
+        name: '距离（nm）',
         nameLocation: 'middle',
         nameGap: 26,
         data: p.dists,
@@ -1169,7 +1331,7 @@ async function renderChart() {
       },
       yAxis: {
         type: 'category',
-        name: '深度',
+        name: '深度（m）',
         nameLocation: 'middle',
         nameGap: 44,
         data: p.axisDepths.map(fmtDepth),
@@ -1200,10 +1362,10 @@ async function renderChart() {
         top: 'middle',
         itemWidth: 12,
         itemHeight: 130,
-        text: [`${props.dbMax} dB`, `${props.dbMin} dB`],
+        text: [`${props.dbMax} ${valueUnit.value}`, `${props.dbMin} ${valueUnit.value}`],
         textGap: 6,
         textStyle: { color: '#cbd5e1', fontSize: 9 },
-        inRange: { color: tlColorStops() },
+        inRange: { color: valueColorStops() },
       },
       // 距离轴缩放 / 平移：inside（滚轮缩放 + 按住拖拽平移），无底部滑块
       dataZoom: [
@@ -1225,6 +1387,7 @@ async function renderChart() {
   chart.resize()
   renderPending = false
   updateReceiverHandlePos()
+  updateMarkerPositions()
   rayOverlay.value?.repaint()
 }
 
@@ -1236,6 +1399,7 @@ async function refreshLayout() {
   else {
     chart.resize()
     updateReceiverHandlePos()
+    updateMarkerPositions()
     rayOverlay.value?.repaint()
   }
 }
@@ -1262,12 +1426,25 @@ watch(
     props.readoutEnabled,
     props.dbMin,
     props.dbMax,
+    props.signalExcess,
     props.receiverMarker,
     props.receiverPlacementEnabled,
     props.refreshToken,
     tickUnitM.value,
   ],
   () => renderChart()
+)
+
+// 切换方位 / 声场数据时旧的读数标记已失去意义；关闭读数开关时也一并清除。
+watch(
+  () => [props.data, props.sourceId, props.azimuthDeg],
+  () => clearReadoutMarkers()
+)
+watch(
+  () => [props.readoutEnabled, props.clickMarkers],
+  () => {
+    if (!props.readoutEnabled || !props.clickMarkers) clearReadoutMarkers()
+  }
 )
 
 onMounted(() => {
@@ -1277,6 +1454,7 @@ onMounted(() => {
       if (!open.value) return
       chart?.resize()
       updateReceiverHandlePos()
+      updateMarkerPositions()
       rayOverlay.value?.repaint()
     })
     resizeObserver.observe(chartEl.value)
@@ -1516,6 +1694,95 @@ onBeforeUnmount(() => {
 .rp-zoom-reset:hover {
   background: #d3f0ff;
   border-color: #7dd3fc;
+}
+
+/* 点击读数标记：十字准星固定在被点击位置，右侧保留 R1/R2… 信息卡 */
+.rp-readout-marker {
+  position: absolute;
+  z-index: 7;
+  width: 20px;
+  height: 20px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.rp-readout-cross {
+  position: absolute;
+  inset: 0;
+  border: 2px solid rgba(235, 250, 255, 0.95);
+  border-radius: 50%;
+  background: rgba(3, 20, 35, 0.28);
+  box-shadow: 0 0 8px rgba(32, 224, 255, 0.6);
+}
+
+.rp-readout-cross::before,
+.rp-readout-cross::after {
+  content: '';
+  position: absolute;
+  background: #3be6ff;
+  box-shadow: 0 0 4px rgba(59, 230, 255, 0.8);
+}
+
+.rp-readout-cross::before {
+  left: -5px;
+  right: -5px;
+  top: 50%;
+  height: 2px;
+  transform: translateY(-50%);
+}
+
+.rp-readout-cross::after {
+  top: -5px;
+  bottom: -5px;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+}
+
+.rp-readout-card {
+  position: absolute;
+  left: 20px;
+  top: 50%;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 3px 7px;
+  white-space: nowrap;
+  color: #7fa5b8;
+  border: 1px solid rgba(74, 190, 220, 0.95);
+  border-radius: 3px;
+  background: rgba(4, 18, 32, 0.94);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4);
+  font: 9px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace;
+  transform: translateY(-50%);
+}
+
+.rp-readout-marker.flip-left .rp-readout-card {
+  left: auto;
+  right: 20px;
+}
+
+.rp-readout-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.rp-readout-pin {
+  flex: none;
+  width: 9px;
+  height: 12px;
+  color: #ff7ea8;
+}
+
+.rp-readout-line b,
+.rp-readout-line strong {
+  color: #5ce6ff;
+  font-weight: 700;
+}
+
+.rp-readout-location {
+  color: #7f9fb1;
 }
 
 /* 接收阵拖动热区：与图表内的 pin 标记重合，拖动后实时回传新的距离/深度 */

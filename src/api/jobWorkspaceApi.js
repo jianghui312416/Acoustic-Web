@@ -22,6 +22,14 @@ export async function loadAcousticJob(jobId) {
   return readJson(await fetch(url, { cache: 'no-store' }))
 }
 
+/** 读取任务参数（小文件），用于前端判断该任务是否应保留在工作区。 */
+export async function loadAcousticJobParams(jobId) {
+  const safeId = String(jobId || '').trim()
+  if (!/^[a-f0-9]{1,32}$/i.test(safeId)) throw new Error('工作 ID 无效')
+  const url = new URL(`file/${encodeURIComponent(safeId)}/params.json`, portalApiUrl())
+  return readJson(await fetch(url, { cache: 'no-store' }))
+}
+
 export async function deleteAcousticJob(jobId) {
   const safeId = String(jobId || '').trim()
   if (!/^[a-f0-9]{1,32}$/i.test(safeId)) throw new Error('工作 ID 无效')

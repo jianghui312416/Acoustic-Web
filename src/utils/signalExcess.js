@@ -20,6 +20,69 @@ export const SIGNAL_EXCESS_COLOR_STOPS = Object.freeze([
   [1, [200, 44, 44]],
 ])
 
+/**
+ * 标准正态累积分布 Φ(z)，用于由信号余量 SE 计算探测概率 Pd = Φ(SE / σ)。
+ * 采用 Abramowitz & Stegun 7.1.26 近似，精度约 1e-7。
+ */
+export function standardNormalCdf(z) {
+  const value = Number(z)
+  if (!Number.isFinite(value)) return NaN
+  const t = 1 / (1 + 0.2316419 * Math.abs(value))
+  const d = 0.3989422804014327 * Math.exp(-value * value / 2)
+  const cdf = 1 - d * t * (0.319381530
+    + t * (-0.356563782
+      + t * (1.781477937
+        + t * (-1.821255978
+          + t * 1.330274429))))
+  return value >= 0 ? cdf : 1 - cdf
+}
+
+/**
+ * 解析信号余量生效的深度区间。
+ * - 全深度模拟：直接取整个深度轴范围；
+ * - 否则取侧边栏目标深度区间 [minDepth, maxDepth]（自动纠正上下限顺序）。
+ *
+ * @param {object} params 信号余量参数
+ * @param {number[]} [depths] 深度轴（升序）
+ * @returns {{low:number, high:number, fullDepth:boolean}}
+ */
+export function resolveSignalExcessDepthRange(params, depths = []) {
+  const list = Array.isArray(depths) ? depths : []
+  const fullDepth = Boolean(params?.fullDepth) && list.length > 0
+  return {
+    low: fullDepth
+      ? Number(list[0])
+      : Math.min(Number(params?.minDepth), Number(params?.maxDepth)),
+    high: fullDepth
+      ? Number(list[list.length - 1])
+      : Math.max(Number(params?.minDepth), Number(params?.maxDepth)),
+    fullDepth,
+  }
+}
+
+/** SE = SL − NL − DT + AG 中与 TL 无关的常数项。无效参数返回 NaN。 */
+export function resolveSignalExcessOffset(params) {
+  return Number(params?.sourceLevel) - Number(params?.noiseLevel)
+    - Number(params?.detectionThreshold) + Number(params?.arrayGain)
+}
+
+/**
+ * 把单个 TL 值换算为信号余量 SE（dB）或探测概率 Pd（%）。
+ * @param {number} tl 传播损失（dB）
+ * @param {object} params 信号余量参数
+ * @param {number} [offset] 预先解析的常数项，避免逐点重复计算
+ */
+export function signalExcessValueForTl(tl, params, offset = resolveSignalExcessOffset(params)) {
+  const value = Number(tl)
+  if (!Number.isFinite(value)) return NaN
+  const se = Number(offset) - value
+  if (params?.displayMode === 'pd') {
+    const sigma = Math.max(1e-6, Number(params?.sigma) || 6)
+    return standardNormalCdf(se / sigma) * 100
+  }
+  return se
+}
+
 export function createSignalExcessField(tlField, params) {
   if (!tlField?.grid) return null
   const noiseLevel = Number(params?.noiseLevel)
@@ -27,11 +90,13 @@ export function createSignalExcessField(tlField, params) {
 
   const grid = tlField.grid
   const depths = Array.isArray(grid.depth) ? grid.depth : []
-  const low = Math.min(Number(params.minDepth), Number(params.maxDepth))
-  const high = Math.max(Number(params.minDepth), Number(params.maxDepth))
-  const offset = Number(params.sourceLevel) - noiseLevel
-    - Number(params.detectionThreshold) + Number(params.arrayGain)
+  // 全深度模拟：深度区间直接取整个 grid 深度范围（含海面到最大深度），忽略侧边栏区间。
+  const { low, high } = resolveSignalExcessDepthRange(params, depths)
+  const offset = resolveSignalExcessOffset(params)
   if (!Number.isFinite(offset)) return null
+  // σ：信号余量波动标准差；σ = 0 退化为稳态阶跃，故钳制到极小正值避免除零。
+  const sigma = Math.max(1e-6, Number(params.sigma) || 6)
+  const pdMode = params.displayMode === 'pd'
 
   const inBand = (depth) => Number.isFinite(depth) && depth >= low && depth <= high
 
@@ -53,10 +118,13 @@ export function createSignalExcessField(tlField, params) {
 
   const field = Object.create(tlField)
   field.signalExcess = true
+  field.signalExcessPd = pdMode
   field.at = (sectorIndex, depthIndex, distanceIndex) => {
     if (!inBand(Number(depths[depthIndex]))) return NaN
     const tl = tlField.at(sectorIndex, depthIndex, distanceIndex)
-    return Number.isFinite(tl) ? offset - tl : NaN
+    if (!Number.isFinite(tl)) return NaN
+    const se = offset - tl
+    return pdMode ? standardNormalCdf(se / sigma) * 100 : se
   }
   field.isBelowSeabed = (sectorIndex, depthIndex, distanceIndex) => {
     if (!inBand(Number(depths[depthIndex]))) return true
@@ -72,6 +140,11 @@ export function createSignalExcessField(tlField, params) {
   let seMin = offset - tlMax
   let seMax = offset - tlMin
   if (!(seMax > seMin)) seMax = seMin + 1
+  // Pd 模式把 SE 值域映射到探测概率百分比 [0, 100]。
+  if (pdMode) {
+    seMin = standardNormalCdf(seMin / sigma) * 100
+    seMax = standardNormalCdf(seMax / sigma) * 100
+  }
   // 基类 valueMin/valueMax 是只有 getter 的访问器属性，直接赋值在严格模式下会抛错；
   // 用 defineProperty 在派生对象上建立自有数据属性来覆盖。
   Object.defineProperty(field, 'valueMin', { value: seMin, writable: true, enumerable: true, configurable: true })

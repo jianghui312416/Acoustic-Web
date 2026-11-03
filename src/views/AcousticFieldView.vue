@@ -83,18 +83,6 @@
         @minimize="minimizeRunHistoryPanel(layer.id)" @restore="restoreRunHistoryPanel(layer.id)" @close="closeRunHistoryLayer(layer.id)" />
     </template>
 
-    <div v-if="viewMode === 'terrain' && activeJobLayer" class="job-field-stack" :style="{ opacity: terrainLeaving ? 0 : 1 }">
-      <JobFieldPanel :job-id="activeJobLayer.id" :source="activeJobLayer.source" :accent="activeJobLayer.accent"
-        :visible="activeJobLayer.visible" :loading="openingJobIds.includes(activeJobLayer.id)" expanded
-        @collapse="minimizeJobLayer(activeJobLayer.id)" @close="closeJobLayer(activeJobLayer.id)"
-        @toggle-visible="toggleJobLayer(activeJobLayer.id)" @focus="focusJobLayer(activeJobLayer.id)" />
-    </div>
-    <nav v-if="viewMode === 'terrain' && minimizedJobLayers.length" class="job-field-dock" aria-label="已最小化工作声场">
-      <JobFieldPanel v-for="layer in minimizedJobLayers" :key="layer.id" :job-id="layer.id"
-        :source="layer.source" :accent="layer.accent" :visible="layer.visible"
-        @activate="activateJobLayer(layer.id)" @close="closeJobLayer(layer.id)" />
-    </nav>
-
     <section v-show="viewMode === 'terrain' && terrainSliceOpen && !terrainSliceMinimized" ref="terrainSliceRef" class="terrain-slice-window" :style="terrainSliceStyle" aria-label="垂直切面">
       <header class="terrain-window-title" @pointerdown="startTerrainSliceDrag">
         <span>📐 垂直切面 · {{ terrainSliceAngleLabel }}</span>
@@ -107,7 +95,9 @@
         source-id="tlrd" :azimuth-deg="profileAzimuthDeg" :max-radius-m="profileMaxRadiusM" :source-depth-m="profileSourceDepthM"
         :bottom-type-segments="profileBottomTypeSegments" :bottom-type-state="profileBottomTypeState" :refresh-token="chartRefreshToken"
         :show-seabed="verticalSliceControls.seafloorLineAndMask" :show-seabed-mask="verticalSliceControls.seafloorMask"
-        :readout-enabled="verticalSliceControls.cursorReadout" :db-min="verticalSliceControls.dbMin" :db-max="verticalSliceControls.dbMax"
+        :readout-enabled="verticalSliceControls.cursorReadout" :click-markers="verticalSliceControls.cursorReadout"
+        :db-min="profileDbRange.min" :db-max="profileDbRange.max"
+        :signal-excess="signalExcessParams"
         height="280px" @update:azimuth-deg="onProfileAzimuthChange" />
     </section>
     <section v-show="viewMode === 'terrain' && terrainProfileOpen && !terrainProfileMinimized" ref="terrainProfileRef" class="terrain-profile-window" :style="terrainProfileStyle" aria-label="声速剖面">
@@ -1063,6 +1053,17 @@
               <span class="slider-value">{{ sliceAzimuthDeg }}°</span>
             </div>
             <input
+              v-if="sliceAzimuthOptions.length"
+              :value="sliceAzimuthSliderIndex"
+              type="range"
+              min="0"
+              :max="Math.max(0, sliceAzimuthOptions.length - 1)"
+              step="1"
+              :disabled="sliceAzimuthOptions.length <= 1"
+              @input="onSliceAzimuthSliderInput"
+            />
+            <input
+              v-else
               v-model.number="sliceAzimuthDeg"
               type="range"
               min="0"
@@ -1219,7 +1220,7 @@
 </template>
 
 <script setup>
-import { ref, shallowRef, computed, watch, onMounted, onActivated, onDeactivated, onBeforeUnmount, nextTick } from 'vue'
+import { ref, shallowRef, shallowReactive, computed, watch, onMounted, onActivated, onDeactivated, onBeforeUnmount, nextTick } from 'vue'
 import { Cesium, createCesiumViewer } from '@/utils/cesium.js'
 import {
   SoundField,
@@ -1258,7 +1259,6 @@ import TerrainPreviewMode from '@/components/terrain/TerrainPreviewMode.vue'
 import TerrainGlobeSelector from '@/components/terrain/TerrainGlobeSelector.vue'
 import AcousticRunPanel from '@/components/terrain/AcousticRunPanel.vue'
 import StationPositionCard from '@/components/terrain/StationPositionCard.vue'
-import JobFieldPanel from '@/components/terrain/JobFieldPanel.vue'
 import SoundSpeedProfile from '@/components/terrain/SoundSpeedProfile.vue'
 import AmbientNoiseProbe from '@/components/terrain/AmbientNoiseProbe.vue'
 import { closeNoiseProbe, forecastNoiseSummary, noiseProbeState, openNoiseProbe, setWeatherNoisePoint } from '@/modules/weather/weatherNoiseStore.js'
@@ -1286,7 +1286,7 @@ import { buildOmniField } from '@/utils/omniFieldModel.js'
 import { buildOmniFieldImage } from '@/utils/omniFieldImage.js'
 import { maskVolumeByTerrain } from '@/sdk/terrainVolumeMask.js'
 import { acousticTerrainBounds } from '@/utils/bathymetry.js'
-import { loadAcousticJob } from '@/api/jobWorkspaceApi.js'
+import { loadAcousticJob, loadAcousticJobParams } from '@/api/jobWorkspaceApi.js'
 import { jobWorkspace, markJobClosed, markJobOpened } from '@/modules/acoustic/jobWorkspace.js'
 import { createDefaultNoiseScenario, validateNoiseScenario } from '@/utils/noiseTimeFrequency.js'
 import { useDraggablePanel } from '@/composables/useDraggablePanel.js'
@@ -1368,7 +1368,7 @@ const terrainSource = ref({ lon: 116, lat: 16, depth: 150 })
 /** 默认地形框边长 100 km×100 km；acousticTerrainBounds 按 6× 半径展开。 */
 const DEFAULT_TERRAIN_SPAN_KM = 100
 const terrainRadiusKm = ref(DEFAULT_TERRAIN_SPAN_KM / 6)
-const jobLayers = shallowRef([])
+/** 历史声场与工作区声场共用同一套胶囊 / 垂直切面 / 动态声线数据。 */
 const runHistoryLayers = shallowRef([])
 /** 当前垂直切面 / 动态声线所展示的历史声场；空表示当前运行结果。 */
 const selectedProfileLayerId = ref('')
@@ -1378,12 +1378,10 @@ const selectedProfileLayer = computed(() => (
 const CURRENT_RUN_PANEL_ID = 'current-run'
 /** 当前声场与历史声场共用一个按最小化先后排序的顶部任务条。 */
 const runPanelDockOrder = ref([])
-const activeJobLayerId = ref('')
-const jobPanelMinimizedOrder = ref([])
 const openingJobIds = ref([])
 const terrainJobAnchors = ref({})
 const JOB_LAYER_ACCENTS = Object.freeze(['#bb62ff', '#39e6d1', '#ff9d5c', '#65a8ff', '#f06fa9'])
-const terrainJobFields = computed(() => [...runHistoryLayers.value, ...jobLayers.value].map(layer => ({
+const terrainJobFields = computed(() => runHistoryLayers.value.map(layer => ({
   id: layer.id,
   field: layer.field,
   source: layer.source,
@@ -1403,10 +1401,6 @@ function runPanelDockIndex(id) {
   const index = minimizedRunPanelIds.value.indexOf(id)
   return index < 0 ? 0 : index
 }
-const activeJobLayer = computed(() => jobLayers.value.find(layer => layer.id === activeJobLayerId.value) || null)
-const minimizedJobLayers = computed(() => jobPanelMinimizedOrder.value
-  .map(id => jobLayers.value.find(layer => layer.id === id))
-  .filter(Boolean))
 /** 全球视图红框选择的区域：加载后作为地形模式的初始区域。 */
 const globeSelection = ref(null)
 /** 每次从全球视图点击“加载”都递增，地形模式据此重新加载选区。 */
@@ -1632,6 +1626,9 @@ const signalExcessParams = computed(() => {
     arrayGain: signalExcessState.arrayGain,
     minDepth: signalExcessState.minDepth,
     maxDepth: signalExcessState.maxDepth,
+    fullDepth: signalExcessState.fullDepth,
+    sigma: signalExcessState.sigma,
+    displayMode: signalExcessState.displayMode,
   }
 })
 /** 把单个 TL 场包成 SE 场；未启用或参数无效时原样返回。 */
@@ -1646,91 +1643,121 @@ const terrainRenderFields = computed(() => terrainJobFields.value.map(layer => (
   layer.field ? { ...layer, field: wrapSignalExcess(layer.field) } : layer
 )))
 
-function focusJobLayer(jobId) {
-  const layer = jobLayers.value.find(item => item.id === jobId)
-  if (!layer) return
-  activeJobLayerId.value = jobId
-  emitViewMode('terrain')
-  globeSelection.value = acousticTerrainBounds(layer.source, layer.radiusKm)
-  globeSelectionToken.value += 1
-}
-
-function minimizeJobLayer(jobId) {
-  if (!jobLayers.value.some(item => item.id === jobId)) return
-  jobPanelMinimizedOrder.value = [...jobPanelMinimizedOrder.value.filter(id => id !== jobId), jobId]
-  if (activeJobLayerId.value === jobId) activeJobLayerId.value = ''
-}
-
-function activateJobLayer(jobId) {
-  const layer = jobLayers.value.find(item => item.id === jobId)
-  if (!layer) return
-  const previousActive = activeJobLayerId.value
-  if (previousActive && previousActive !== jobId) {
-    jobPanelMinimizedOrder.value = [...jobPanelMinimizedOrder.value.filter(id => id !== previousActive), previousActive]
-  }
-  jobPanelMinimizedOrder.value = jobPanelMinimizedOrder.value.filter(id => id !== jobId)
-  activeJobLayerId.value = jobId
-  if (!layer.visible) {
-    layer.visible = true
-    jobLayers.value = [...jobLayers.value]
-  }
-}
-
-function toggleJobLayer(jobId) {
-  const layer = jobLayers.value.find(item => item.id === jobId)
-  if (!layer) return
-  layer.visible = !layer.visible
-  jobLayers.value = [...jobLayers.value]
-}
-
-function closeJobLayer(jobId) {
-  jobLayers.value = jobLayers.value.filter(item => item.id !== jobId)
-  jobPanelMinimizedOrder.value = jobPanelMinimizedOrder.value.filter(id => id !== jobId)
-  markJobClosed(jobId)
-  if (activeJobLayerId.value === jobId) {
-    const restoreId = jobPanelMinimizedOrder.value.at(-1) || ''
-    jobPanelMinimizedOrder.value = jobPanelMinimizedOrder.value.filter(id => id !== restoreId)
-    activeJobLayerId.value = restoreId
+/** 工作记录只归档了结果与少量元数据，按结果网格和记录元数据补全计算参数。 */
+function jobCalculationParams(job = {}, field = null) {
+  const source = job.source || {}
+  const grid = field?.grid || {}
+  const stored = job.params || job.calculation_params || job.calc_params || job.request || {}
+  // 任务目录中的 params.json 同时保存了门户请求原文，优先使用其中的精确参数。
+  const portal = stored.portal_request && typeof stored.portal_request === 'object'
+    ? stored.portal_request
+    : {}
+  const reference = { ...stored, ...portal }
+  const params = { ...JSON.parse(JSON.stringify(calcParams.value)), ...reference }
+  const distanceMaxKm = (Array.isArray(grid.distance) ? grid.distance : [])
+    .map(Number)
+    .filter(Number.isFinite)
+    .reduce((max, value) => Math.max(max, value), 0) / 1000
+  const radiusKm = Math.max(
+    0.1,
+    Number(job.radius_km) || Number(stored.radius_km) || distanceMaxKm || Number(portal.range) * 1.852 || 20
+  )
+  const frequency = Number(job.frequency_hz) || Number(field?.meta?.frequencyHz)
+    || Number(reference.minFreq ?? reference.freq_hz) || 100
+  const centerAngle = Number(portal.grazingAngle ?? reference.grazingAngle)
+  const beamWidth = Number(portal.beamWidth ?? reference.beamWidth)
+  const hasBeam = Number.isFinite(centerAngle) && Number.isFinite(beamWidth)
+  const model = ['bellhop', 'ram', 'kraken'].includes(String(stored.acoustic_model || job.model || params.model || '').toLowerCase())
+    ? String(stored.acoustic_model || job.model || params.model).toLowerCase()
+    : 'bellhop'
+  const rawTime = String(portal.time || stored.environment_time || params.time || '2025-01-02T12:00:00').replace(' ', 'T')
+  const lon = Number(source.lon ?? portal.coordX ?? stored.center_lon ?? params.coordX)
+  const lat = Number(source.lat ?? portal.coordY ?? stored.center_lat ?? params.coordY)
+  const depth = Number(source.depth_m ?? portal.srcDepth ?? stored.source_depth_m ?? params.srcDepth)
+  return {
+    ...params,
+    dataset: String(portal.dataSource || stored.data_source || params.dataset || 'EnvReanalysis'),
+    time: rawTime,
+    regionType: stored.region_type || (/ice|冰/i.test(String(job.model_label || '') + String(portal.dataType || stored.data_type || '')) ? 'ice' : 'normal'),
+    coordX: Number.isFinite(lon) ? lon : Number(params.coordX),
+    coordY: Number.isFinite(lat) ? lat : Number(params.coordY),
+    srcDepth: Number.isFinite(depth) ? depth : Number(params.srcDepth),
+    range: radiusKm / 1.852,
+    minFreq: frequency,
+    maxFreq: frequency,
+    model,
+    sector: Math.max(1, Number(grid.sector) || Number(portal.sector) || Number(stored.section_count) || Number(params.sector) || 1),
+    lineCount: Math.max(0, Number(portal.lineCount ?? reference.lineCount ?? params.lineCount) || 10),
+    grazingAngleMin: hasBeam ? centerAngle - beamWidth / 2 : Number(params.grazingAngleMin),
+    grazingAngleMax: hasBeam ? centerAngle + beamWidth / 2 : Number(params.grazingAngleMax),
+    rayInterface: 'dynamic',
+    coherent: Boolean(reference.coherent ?? params.coherent),
   }
 }
 
 async function openWorkspaceJob(jobId) {
   const id = String(jobId || '')
   if (!id) return
-  const existing = jobLayers.value.find(layer => layer.id === id)
+  const existing = runHistoryLayers.value.find(layer => layer.jobId === id)
   if (existing) {
     existing.visible = true
-    jobLayers.value = [...jobLayers.value.filter(layer => layer.id !== id), existing]
-    activateJobLayer(id)
+    existing.panelVisible = true
+    existing.panelMinimized = false
+    if (runSettingsHiddenPanelId.value === existing.id) runSettingsHiddenPanelId.value = ''
+    removeRunPanelFromDock(existing.id)
+    refreshRunHistoryLayers()
     markJobOpened(id)
-    focusJobLayer(id)
+    emitViewMode('terrain')
+    focusRunHistoryLayer(existing.id)
     return
   }
   if (openingJobIds.value.includes(id)) return
   openingJobIds.value = [...openingJobIds.value, id]
   try {
-    const payload = await loadAcousticJob(id)
+    const [payload, storedParams] = await Promise.all([
+      loadAcousticJob(id),
+      loadAcousticJobParams(id).catch(() => null),
+    ])
     const parsed = parseAnalyse3DTlrd(payload?.result ?? payload)
-    const job = payload?.job || {}
+    const job = { ...(payload?.job || {}) }
+    if (storedParams) job.params = storedParams
     const source = {
       lon: Number(job.source?.lon),
       lat: Number(job.source?.lat),
       depth: Number(job.source?.depth_m) || 0,
     }
     if (!Number.isFinite(source.lon) || !Number.isFinite(source.lat)) throw new Error('工作记录缺少有效声源坐标')
-    const radiusKm = Math.max(0.1, Number(job.radius_km) || Math.max(...parsed.grid.distance.map(Number)) / 1000 || 20)
-    const layer = {
+    const distanceMaxKm = Math.max(...parsed.grid.distance.map(Number).filter(Number.isFinite), 0) / 1000
+    const radiusKm = Math.max(0.1, Number(job.radius_km) || distanceMaxKm || 20)
+    const initialAzimuth = compassBearingToInternalAzimuth(Number(parsed.grid.compassBearings?.[0]) || 0)
+    const layer = shallowReactive({
       id,
+      jobId: id,
+      origin: 'workspace',
       field: parsed,
       source,
       radiusKm,
       visible: true,
-      accent: JOB_LAYER_ACCENTS[jobLayers.value.length % JOB_LAYER_ACCENTS.length],
-    }
-    jobLayers.value = [...jobLayers.value, layer]
-    activateJobLayer(id)
+      accent: JOB_LAYER_ACCENTS[runHistoryLayers.value.length % JOB_LAYER_ACCENTS.length],
+      panelVisible: true,
+      panelMinimized: false,
+      // 胶囊与声场胶囊一致，仅把运行时间替换为工作记录 ID。
+      time: id,
+      anchor: null,
+      params: jobCalculationParams(job, parsed),
+      rayInterface: 'dynamic',
+      rayData: null,
+      rayAzimuthDeg: initialAzimuth,
+      sliceAzimuthDeg: initialAzimuth,
+      sourceRadiusKm: radiusKm,
+      sourceDepthM: Number(source.depth) || 0,
+      bottomTypeSegments: [],
+      bottomTypeState: 'idle',
+    })
+    runHistoryLayers.value = [...runHistoryLayers.value, layer]
     markJobOpened(id)
     emitViewMode('terrain')
+    focusRunHistoryLayer(id)
   } catch (error) {
     console.error('[工作声场] 打开失败：', error)
     runtimeError.value = `工作 ${id} 打开失败：${error?.message || error}`
@@ -1743,12 +1770,15 @@ watch(() => jobWorkspace.openRequestToken, () => {
   openWorkspaceJob(jobWorkspace.requestedJobId)
 })
 watch(() => jobWorkspace.closeRequestToken, () => {
-  closeJobLayer(jobWorkspace.closeRequestedJobId)
+  const layer = runHistoryLayers.value.find(item => item.jobId === jobWorkspace.closeRequestedJobId)
+  if (layer) closeRunHistoryLayer(layer.id)
 })
 const { panelRef: terrainSliceRef, dragStyle: terrainSliceStyle, startDragging: startTerrainSliceDrag } = useDraggablePanel()
 const { panelRef: terrainProfileRef, dragStyle: terrainProfileStyle, startDragging: startTerrainProfileDrag } = useDraggablePanel()
 const terrainSliceAngleLabel = computed(() => {
-  const compass = ((Math.round(internalAzimuthToCompassBearing(Number(sliceAzimuthDeg.value) || 0)) % 360) + 360) % 360
+  const layer = selectedProfileLayer.value
+  const azimuth = layer ? Number(layer.sliceAzimuthDeg) || 0 : Number(sliceAzimuthDeg.value) || 0
+  const compass = ((Math.round(internalAzimuthToCompassBearing(azimuth)) % 360) + 360) % 360
   const cardinal = compass === 0 ? 'N' : compass === 90 ? 'E' : compass === 180 ? 'S' : compass === 270 ? 'W' : ''
   return `${compass}°${cardinal ? ` ${cardinal}` : ''}`
 })
@@ -1868,6 +1898,8 @@ function runRunHistoryLayer(id) {
 }
 /** 历史声场的动态声线请求，按图层去重，避免重复点击时并发调用接口。 */
 const historyRayRequests = new Map()
+/** 方位拖动时延迟补算历史 / 工作声场的动态声线。 */
+let historyRayTimer = 0
 /**
  * 历史声场按归档时的参数补算当前方位的动态声线。
  * 归档时若尚未点过「二维传播损失」，rayData 为空；此时按该次声源 / 方位补算，
@@ -1876,8 +1908,17 @@ const historyRayRequests = new Map()
 function azimuthDeltaDeg(a, b) {
   return Math.abs((((Number(a) - Number(b)) % 360) + 540) % 360 - 180)
 }
+/** 动态声线接口只支持 Bellhop；缺失模型时按 Bellhop 处理。 */
+function isHistoryRayCapable(layer) {
+  if (!layer?.params) return false
+  const model = String(layer.params.model || '').trim().toLowerCase()
+  return !model || model === 'bellhop'
+}
 async function ensureHistoryLayerDynamicRays(layer) {
-  if (!layer?.params || layer.params.model !== 'bellhop') return null
+  if (!isHistoryRayCapable(layer)) {
+    if (layer) layer.rayLoading = false
+    return null
+  }
   const desiredAzimuth = normalizeAzimuth360(Number(layer.sliceAzimuthDeg) || 0)
   const cachedAzimuth = Number(layer.rayAzimuthDeg ?? layer.sliceAzimuthDeg)
   const matchesAzimuth = azimuthDeltaDeg(cachedAzimuth, desiredAzimuth) < 1e-6
@@ -1926,6 +1967,22 @@ async function ensureHistoryLayerDynamicRays(layer) {
     refreshRunHistoryLayers()
   }
 }
+/** 方位拖动时先撤掉旧方位声线，停止拖动后再按新方位补算。 */
+function scheduleHistoryLayerDynamicRays(layer, delay = 320) {
+  if (!isHistoryRayCapable(layer)) {
+    if (layer) layer.rayLoading = false
+    return
+  }
+  clearTimeout(historyRayTimer)
+  layer.rayData = null
+  layer.rayLoading = true
+  refreshRunHistoryLayers()
+  historyRayTimer = window.setTimeout(() => {
+    historyRayTimer = 0
+    if (!runHistoryLayers.value.some(item => item.id === layer.id)) return
+    void ensureHistoryLayerDynamicRays(layer)
+  }, Math.max(0, Number(delay) || 0))
+}
 /** 历史声场胶囊「二维传播损失」：打开该次声场的垂直切面。 */
 function showHistoryLayerProfile(id) {
   const layer = runHistoryLayers.value.find(item => item.id === id)
@@ -1944,16 +2001,41 @@ function showHistoryLayerProfile(id) {
   selectedProfileLayerId.value = id
   terrainSliceOpen.value = true
   terrainSliceMinimized.value = false
+  terrainProfileOpen.value = true
+  terrainProfileMinimized.value = false
   removeTerrainWindowFromDock('slice')
-  void ensureHistoryLayerDynamicRays(layer)
-  nextTick(() => terrainLossChartRef.value?.refreshLayout?.())
+  removeTerrainWindowFromDock('profile')
+  // 「二维传播损失」胶囊入口本身就代表要查看动态声线。
+  verticalSliceControls.dynamicRays = true
+  void ensureHistoryLayerDynamicRays(layer).then((data) => {
+    if (!data || selectedProfileLayerId.value !== layer.id) return
+    chartRefreshToken.value += 1
+    viewer?.scene?.requestRender?.()
+  })
+  nextTick(() => {
+    terrainLossChartRef.value?.refreshLayout?.()
+    chartRefreshToken.value += 1
+  })
   viewer?.scene?.requestRender?.()
+}
+/** 关闭当前正在展示该声场的垂直切面与声速剖面窗口。 */
+function closeProfileWindowsForLayer(id) {
+  if (selectedProfileLayerId.value !== id) return
+  selectedProfileLayerId.value = ''
+  terrainSliceOpen.value = false
+  terrainSliceMinimized.value = false
+  terrainProfileOpen.value = false
+  terrainProfileMinimized.value = false
+  removeTerrainWindowFromDock('slice')
+  removeTerrainWindowFromDock('profile')
 }
 function closeRunHistoryLayer(id) {
   const layer = runHistoryLayers.value.find(item => item.id === id)
   if (!layer) return
   try { layer.renderer?.destroy?.() } catch {}
-  if (selectedProfileLayerId.value === id) selectedProfileLayerId.value = ''
+  if (layer.jobId) markJobClosed(layer.jobId)
+  closeProfileWindowsForLayer(id)
+  if (runSettingsHiddenPanelId.value === id) runSettingsHiddenPanelId.value = ''
   runHistoryLayers.value = runHistoryLayers.value.filter(item => item.id !== id)
   removeRunPanelFromDock(id)
   viewer?.scene?.requestRender?.()
@@ -1973,7 +2055,7 @@ function closeTerrainRun() {
   currentVolumeTexture = null
   terrainTexture.value = null
   soundResultCache['3d'] = null
-  if (!runHistoryLayers.value.length && !jobLayers.value.length) {
+  if (!runHistoryLayers.value.length) {
     volumeVisible.value = false
     volumeRenderingControls.volumeVisible = false
   }
@@ -2544,9 +2626,21 @@ const sliceAzimuthDeg = ref(compassBearingToInternalAzimuth(verticalSliceControl
 
 /* ── 垂直切面 / 动态声线使用的数据（当前结果或选中的历史声场） ── */
 const profileData = computed(() => selectedProfileLayer.value?.field || raySourceData.value)
-const profileRayData = computed(() => (
-  selectedProfileLayer.value ? selectedProfileLayer.value.rayData : staticRayData.value
-))
+/** 垂直切面颜色范围：信号余量模式下使用 SE/Pd 自身的色标范围。 */
+const profileDbRange = computed(() => {
+  const params = signalExcessParams.value
+  if (!params) return { min: verticalSliceControls.dbMin, max: verticalSliceControls.dbMax }
+  if (params.displayMode === 'pd') return { min: 0, max: 100 }
+  const min = Number(signalExcessState.dbMin)
+  const max = Number(signalExcessState.dbMax)
+  if (Number.isFinite(min) && Number.isFinite(max) && max > min) return { min, max }
+  return { min: -60, max: 60 }
+})
+/** 信号余量开启时垂直切面只显示该方位的 SE/Pd，不再叠加动态声线。 */
+const profileRayData = computed(() => {
+  if (signalExcessState.enabled) return null
+  return selectedProfileLayer.value ? selectedProfileLayer.value.rayData : staticRayData.value
+})
 const profileAnimated = computed(() => {
   const layer = selectedProfileLayer.value
   const interfaceTag = layer ? layer.rayInterface : calcParams.value.rayInterface
@@ -2613,9 +2707,15 @@ watch(() => verticalSliceControls.sspWindow, (val) => {
   terrainProfileOpen.value = !!val
 })
 watch(() => verticalSliceControls.sliceAzimuthDeg, (val) => {
-  const compass = ((Math.round(Number(val) || 0) % 360) + 360) % 360
+  const compass = normalizeAzimuth360(Number(val) || 0)
   const v = compassBearingToInternalAzimuth(compass)
-  if (sliceAzimuthDeg.value === v) return
+  const layer = selectedProfileLayer.value
+  if (layer) {
+    if (Math.abs((Number(layer.sliceAzimuthDeg) || 0) - v) < 1e-6) return
+    onProfileAzimuthChange(v)
+    return
+  }
+  if (Math.abs(sliceAzimuthDeg.value - v) < 1e-6) return
   sliceAzimuthDeg.value = v
   onAzimuthUiChange()
 })
@@ -2641,9 +2741,9 @@ watch(() => terrainProfileOpen.value, (val) => {
     removeTerrainWindowFromDock('profile')
   }
 })
-watch(() => sliceAzimuthDeg.value, (val) => {
-  const v = Math.round(internalAzimuthToCompassBearing(Number(val) || 0)) % 360
-  if (verticalSliceControls.sliceAzimuthDeg !== v) verticalSliceControls.sliceAzimuthDeg = v
+watch(() => profileAzimuthDeg.value, (val) => {
+  const v = normalizeAzimuth360(internalAzimuthToCompassBearing(Number(val) || 0))
+  if (Math.abs(verticalSliceControls.sliceAzimuthDeg - v) > 1e-6) verticalSliceControls.sliceAzimuthDeg = v
 })
 /* ── 侧边栏「声线播放」控件 → 传播时钟 / 声线显隐 ── */
 watch(() => verticalSliceControls.raySpeed, (value) => setRayFlowSpeed(value), { immediate: true })
@@ -2819,6 +2919,54 @@ const pointerEnabled = ref(true)
 const pointerRingVisible = ref(true)
 /** 数据实际存在的方位列表（度）：指针只能停靠在这些方位上 */
 const availableAzimuths = ref([])
+/** 当前方位方向线所依附声场体的实际计算方位（内部方位：正东 0°、逆时针）。 */
+const activeSliceAzimuths = computed(() => {
+  const grid = selectedProfileLayer.value?.field?.grid
+  if (grid && Number(grid.sector) > 0) {
+    return tlrdSectorAzimuths(grid.sector, grid.compassBearings)
+  }
+  return availableAzimuths.value
+})
+/** 控制面板切面方位滑杆的候选方位（内部方位，按罗盘方位排序）。 */
+const sliceAzimuthOptions = computed(() => {
+  const unique = []
+  for (const raw of availableAzimuths.value) {
+    const number = Number(raw)
+    if (!Number.isFinite(number)) continue
+    const value = normalizeAzimuth360(number)
+    if (!unique.some((item) => Math.abs(item - value) < 1e-6)) unique.push(value)
+  }
+  return unique.sort((a, b) => internalAzimuthToCompassBearing(a) - internalAzimuthToCompassBearing(b))
+})
+const sliceAzimuthSliderIndex = computed(() => {
+  const options = sliceAzimuthOptions.value
+  if (!options.length) return 0
+  const current = nearestAvailableAzimuth(Number(sliceAzimuthDeg.value))
+  let best = 0
+  let bestDiff = Infinity
+  options.forEach((value, index) => {
+    const diff = Math.abs(value - current)
+    if (diff < bestDiff) {
+      bestDiff = diff
+      best = index
+    }
+  })
+  return best
+})
+/** 侧边栏方位滑杆候选方位（罗盘方位，升序）。 */
+const sidebarSliceAzimuthOptions = computed(() => {
+  const unique = []
+  for (const raw of activeSliceAzimuths.value) {
+    const number = Number(raw)
+    if (!Number.isFinite(number)) continue
+    const value = normalizeAzimuth360(internalAzimuthToCompassBearing(number))
+    if (!unique.some((item) => Math.abs(item - value) < 1e-6)) unique.push(value)
+  }
+  return unique.sort((a, b) => a - b)
+})
+watch(sidebarSliceAzimuthOptions, (options) => {
+  acousticSceneState.sliceAzimuths = options
+}, { immediate: true })
 
 // TL 色标（归一化 0–1 → RGB 0–255）：固定红→蓝 6 段，按自定义 dB 范围映射
 const colorStops = ref(
@@ -4692,7 +4840,7 @@ function onProfileAzimuthChange(deg) {
   if (layer) {
     layer.sliceAzimuthDeg = v
     refreshRunHistoryLayers()
-    void ensureHistoryLayerDynamicRays(layer)
+    scheduleHistoryLayerDynamicRays(layer, 0)
     return
   }
   sliceAzimuthDeg.value = v
@@ -4705,10 +4853,31 @@ function onProfileAzimuthChange(deg) {
 
 /** 滑块/下拉改变切面方位：体渲染立即响应，声线接口在停止操作后再调用。 */
 function onAzimuthUiChange() {
+  const layer = selectedProfileLayer.value
+  if (layer) {
+    const next = normalizeAzimuth360(Number(sliceAzimuthDeg.value) || 0)
+    if (azimuthDeltaDeg(layer.sliceAzimuthDeg, next) > 1e-6) {
+      layer.sliceAzimuthDeg = next
+      refreshRunHistoryLayers()
+      scheduleHistoryLayerDynamicRays(layer)
+    }
+    viewer?.scene?.requestRender?.()
+    return
+  }
   syncSoundField()
   scheduleSliceCurtain()
   scheduleRayDataForAzimuth(sliceAzimuthDeg.value)
   scheduleBottomTypesForAzimuth(sliceAzimuthDeg.value)
+}
+
+/** 控制面板切面方位滑杆：只在实际计算的方位之间按索引滑动。 */
+function onSliceAzimuthSliderInput(event) {
+  const index = Math.round(Number(event?.target?.value))
+  const value = sliceAzimuthOptions.value[index]
+  if (!Number.isFinite(value)) return
+  if (Math.abs(sliceAzimuthDeg.value - value) < 1e-6) return
+  sliceAzimuthDeg.value = value
+  onAzimuthUiChange()
 }
 
 /** 数据筛选范围变化：限制在数据 TL 范围内并保证下限 < 上限 */
@@ -4805,7 +4974,7 @@ function archiveCurrent3dRun() {
     soundField.setScatterPoints([])
     if (props.viewMode === 'terrain') soundField.releaseRenderer()
   } catch {}
-  const layer = {
+  const layer = shallowReactive({
     id,
     field,
     source,
@@ -4827,7 +4996,7 @@ function archiveCurrent3dRun() {
     sourceDepthM: Number(sourcePoint.value?.depth_m ?? calcParams.value.srcDepth),
     bottomTypeSegments: [...bottomTypeSegments.value],
     bottomTypeState: bottomTypeState.value,
-  }
+  })
   if (terrainRunMinimized.value) {
     runPanelDockOrder.value = runPanelDockOrder.value.map(item => item === CURRENT_RUN_PANEL_ID ? id : item)
   } else {
@@ -5934,9 +6103,8 @@ onDeactivated(() => {
 })
 
 onBeforeUnmount(() => {
-  for (const layer of jobLayers.value) markJobClosed(layer.id)
-  jobLayers.value = []
   for (const layer of runHistoryLayers.value) {
+    if (layer.jobId) markJobClosed(layer.jobId)
     try { layer.renderer?.destroy?.() } catch {}
   }
   runHistoryLayers.value = []
@@ -5961,6 +6129,8 @@ onBeforeUnmount(() => {
   azimuthSyncTimer = null
   clearTimeout(omni2dTimer)
   omni2dTimer = 0
+  clearTimeout(historyRayTimer)
+  historyRayTimer = 0
   clearTimeout(sliceCurtainTimer)
   sliceCurtainTimer = 0
   if (depthExagSyncRaf) cancelAnimationFrame(depthExagSyncRaf)
@@ -6004,37 +6174,6 @@ onBeforeUnmount(() => {
 .cesium-container {
   width: 100%;
   height: 100%;
-}
-
-.job-field-stack {
-  position: absolute;
-  z-index: 18;
-  top: 74px;
-  left: 22px;
-  display: grid;
-  gap: 7px;
-  max-height: calc(100% - 130px);
-  overflow-y: auto;
-  padding: 2px 6px 8px 2px;
-  transition: opacity .32s ease;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(88,165,198,.35) transparent;
-}
-
-.job-field-dock {
-  position: absolute;
-  z-index: 19;
-  top: 10px;
-  left: 50%;
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  max-width: calc(100% - 260px);
-  overflow-x: auto;
-  padding: 2px 5px 7px;
-  transform: translateX(-50%);
-  scrollbar-width: thin;
-  scrollbar-color: rgba(88,165,198,.35) transparent;
 }
 
 .cesium-container :deep(.cesium-viewer),

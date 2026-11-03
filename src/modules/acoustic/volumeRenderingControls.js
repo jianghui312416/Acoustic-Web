@@ -94,6 +94,8 @@ export const volumeRenderingControls = reactive({
 /** 声场视图向侧边栏同步的只读运行状态。 */
 export const acousticSceneState = reactive({
   hasTerrainVolume: false,
+  /** 方位方向线所在声场体的实际计算方位（罗盘方位，升序）。 */
+  sliceAzimuths: [],
 })
 
 export function activeVolumeColorStops(id = volumeRenderingControls.colormap) {

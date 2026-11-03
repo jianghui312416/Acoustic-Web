@@ -39,7 +39,8 @@ export const verticalSliceControls = reactive({
 /** 归一化方位角 / dB 范围 / 播放速度等数值，避免越界 / NaN */
 export function clampVerticalSliceControls(controls = verticalSliceControls) {
   const azimuth = Number(controls.sliceAzimuthDeg)
-  controls.sliceAzimuthDeg = Number.isFinite(azimuth) ? ((Math.round(azimuth) % 360) + 360) % 360 : 0
+  // 保留实际计算方位的精度（如 360/sector 的 51.43°），仅做 0~360 归一化。
+  controls.sliceAzimuthDeg = Number.isFinite(azimuth) ? ((azimuth % 360) + 360) % 360 : 0
 
   const clamp = (value, min, max, fallback) => {
     const number = Number(value)
