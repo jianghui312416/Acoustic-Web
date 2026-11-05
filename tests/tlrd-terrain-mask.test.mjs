@@ -64,6 +64,30 @@ test('masks land and below-seabed TL before volume interpolation', () => {
   assert.equal(parsed.stats.invalidSubstrateCount, 6)
 })
 
+test('strict nearest mode keeps one row per original sector and hides 200 sentinels', () => {
+  const json = fixture()
+  json.Data.Units[0].Response.loadingTlv.profile.data[0][0] = 200
+  const parsed = parseAnalyse3DTlrd(json)
+  const texture = decodeTlrdPolarVolume(parsed, {
+    sourceLon: 116,
+    sourceLat: 16,
+    angleInterp: 1,
+    strictNearest: true,
+  })
+  assert.equal(texture.height, 2, 'one texture row per original sector, no angle interpolation')
+  assert.equal(texture.textureFilter, 'nearest')
+  assert.equal(texture.strictNearest, true)
+  const voxel = (z, y, x) => {
+    const o = (((z * texture.height + y) * texture.width + x) * 4)
+    return texture.data.slice(o, o + 4)
+  }
+  assert.equal(voxel(0, 0, 0)[3], 0, '200 (no water coverage) is transparent in reference mode')
+  assert.equal(voxel(0, 0, 1)[3], 255, 'valid water node stays visible')
+  assert.equal(voxel(0, 1, 0)[3], 0, 'land sector stays transparent')
+  // G 通道存该列海底深度：depthMin=0 / depthMax=50，20 m → round(20/50*255)=102
+  assert.equal(voxel(0, 0, 1)[1], 102, 'bottom depth is packed for near-bottom feathering')
+})
+
 test('keeps land-sector alpha zero and only feathers the water boundary', () => {
   const parsed = parseAnalyse3DTlrd(fixture())
   const texture = decodeTlrdPolarVolume(parsed, {

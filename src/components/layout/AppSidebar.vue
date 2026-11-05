@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <aside class="app-sidebar" :class="{ collapsed }" aria-label="主导航">
     <div class="sidebar-scroll">
       <button type="button" class="run-button" title="运行示例位置的声场计算" aria-label="模拟运行" @click="$emit('run')">
@@ -255,6 +255,12 @@
               </select>
             </label>
 
+            <!-- <label class="feature-switch">
+              <input v-model="visualControls.strictNearest" type="checkbox" @change="normalizeControls" />
+              <span class="switch-track"><i></i></span>
+              <span>严格最近邻（不插值）</span>
+            </label> -->
+
             <p class="feature-section-title">dB 范围</p>
             <div class="db-control-grid">
               <span>最小值</span><span>最大值</span>
@@ -375,6 +381,11 @@
               <span class="feature-switch-label"><span aria-hidden="true">➤</span><span>方位方向线</span></span>
             </label>
             <label class="feature-switch">
+              <input v-model="sliceControls.clipBody" type="checkbox" />
+              <span class="switch-track"><i></i></span>
+              <span class="feature-switch-label"><span aria-hidden="true">✂</span><span>裁剪体</span></span>
+            </label>
+            <label class="feature-switch">
               <input v-model="sliceControls.sspWindow" type="checkbox" />
               <span class="switch-track"><i></i></span>
               <span class="feature-switch-label"><span aria-hidden="true">📈</span><span>声速剖面窗口</span></span>
@@ -465,7 +476,6 @@ import {
   clampVolumeRenderingControls,
   volumeRenderingControls,
 } from '@/modules/acoustic/volumeRenderingControls.js'
-import { VOLUME_TL_COLOR_STOPS } from '@/sdk/tlColor.js'
 import {
   clampVerticalSliceControls,
   verticalSliceControls,
@@ -527,7 +537,8 @@ function stopsToGradient(stops) {
   return `linear-gradient(90deg, ${(stops || []).map(([t, rgb]) => `rgb(${rgb.join(',')}) ${(Number(t) * 100).toFixed(1)}%`).join(', ')})`
 }
 const volumeColorGradient = computed(() => stopsToGradient(activeVolumeColorStops(visualControls.colormap)))
-const sliceColorGradient = computed(() => stopsToGradient(VOLUME_TL_COLOR_STOPS))
+// 垂直切面的色标类型跟随三维体绘制的色图，两者保持同一色带。
+const sliceColorGradient = computed(() => stopsToGradient(activeVolumeColorStops(visualControls.colormap)))
 const rotationAxes = Object.freeze([
   { key: 'rotationX', label: 'X' },
   { key: 'rotationY', label: 'Y' },

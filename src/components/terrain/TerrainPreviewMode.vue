@@ -111,6 +111,8 @@ const props = defineProps({
   directionLineVisible: { type: Boolean, default: false },
   /** 方向方位线所属声场体 id；为空时画在首个（当前）声场体上。 */
   directionLineLayerId: { type: String, default: '' },
+  /** 裁剪体：隐藏方位方向线箭头所指方向的半个体，露出切面。 */
+  clipBody: { type: Boolean, default: false },
   /** 全球视图红框选中的区域；token 变化时才重新加载，避免覆盖运行后的声源取景。 */
   initialBounds: { type: Object, default: null },
   initialBoundsToken: { type: Number, default: 0 },
@@ -118,7 +120,7 @@ const props = defineProps({
   /** 参数卡片打开期间暂时隐藏站点卡片，关闭后恢复。 */
   stationParametersOpen: { type: Boolean, default: false },
 })
-const emit = defineEmits(['anchor', 'layer-anchors', 'bounds-change', 'load-terrain', 'request-globe', 'station-run', 'station-parameters', 'station-pick', 'noise', 'update:thumbnailCollapsed'])
+const emit = defineEmits(['anchor', 'layer-anchors', 'bounds-change', 'load-terrain', 'request-globe', 'station-run', 'station-parameters', 'station-pick', 'noise', 'update:thumbnailCollapsed', 'arrow-azimuth'])
 const station = ref(null)
 let suspendedStation = null
 function runStation(point) { emit('station-run', point) }
@@ -212,6 +214,11 @@ let token = 0
 let disposed = false
 let dragState = null
 let lastScene = null
+/** 方位方向线箭头拖拽状态 */
+let arrowDrag = null
+let arrowEmitRaf = 0
+let pendingArrowDeg = null
+const ARROW_HIT_RADIUS = 18
 let globeTransitionRaf = 0
 let savedTerrainCamera = null
 const MIN_CAMERA_ZOOM = 0.1
@@ -237,7 +244,11 @@ function sourceBounds() {
 }
 
 function sceneControls() {
-  const controls = { ...visualControls, colorStops: activeVolumeColorStops(visualControls.colormap) }
+  const controls = {
+    ...visualControls,
+    colorStops: activeVolumeColorStops(visualControls.colormap),
+    clipBody: props.clipBody === true,
+  }
   const seActive = Boolean(props.field?.signalExcess)
     || (props.fields || []).some(layer => layer?.field?.signalExcess)
   if (seActive) {
@@ -608,8 +619,103 @@ function onExaggerationPointerUp(event) {
   scheduleDraw()
 }
 
+/** 方向方位线所属声场体（与 terrainScene 的 layerId 规则一致）。 */
+function directionField() {
+  const id = props.directionLineLayerId
+  if (id && id !== 'current') {
+    const layer = (props.fields || []).find(item => item?.id === id)
+    if (layer?.field) return layer.field
+  }
+  return props.field
+}
+
+function directionMaxRadius() {
+  const distances = directionField()?.grid?.distance
+  if (!Array.isArray(distances) || !distances.length) return 0
+  let max = 0
+  for (const value of distances) {
+    const n = Number(value)
+    if (Number.isFinite(n) && n > max) max = n
+  }
+  return max
+}
+
+function canvasPoint(event) {
+  const rect = canvasEl.value?.getBoundingClientRect()
+  if (!rect) return null
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top }
+}
+
+function arrowTipPoint(azimuthDeg) {
+  // 优先使用绘制时记录的箭头端点，保证命中判定与画面上看到的箭头一致。
+  if (lastScene?.directionArrow?.tip) return lastScene.directionArrow.tip
+  const projector = lastScene?.directionProjector || lastScene?.projectPolar
+  const maxRadius = lastScene?.directionArrow?.maxRadius || directionMaxRadius()
+  if (typeof projector !== 'function' || !(maxRadius > 0)) return null
+  const point = projector(((Number(azimuthDeg) || 0) * Math.PI) / 180, maxRadius, 0)
+  return point && Number.isFinite(point.x) && Number.isFinite(point.y) ? point : null
+}
+
+function isNearArrow(event) {
+  if (!props.directionLineVisible) return false
+  const point = canvasPoint(event)
+  if (!point) return false
+  const arrow = lastScene?.directionArrow
+  const tip = arrow?.tip || arrowTipPoint(props.rayAzimuthDeg)
+  if (!tip) return false
+  if (Math.hypot(point.x - tip.x, point.y - tip.y) <= ARROW_HIT_RADIUS) return true
+  // 箭头端未命中时，允许抓住方向线本身拖动。
+  const start = arrow?.start
+  if (!start) return false
+  const dx = tip.x - start.x
+  const dy = tip.y - start.y
+  const lengthSq = dx * dx + dy * dy
+  if (lengthSq <= 1e-6) return false
+  const t = clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq, 0, 1)
+  return Math.hypot(point.x - (start.x + dx * t), point.y - (start.y + dy * t)) <= ARROW_HIT_RADIUS
+}
+
+function emitArrowAzimuth(deg) {
+  pendingArrowDeg = ((Number(deg) % 360) + 360) % 360
+  if (arrowEmitRaf) return
+  arrowEmitRaf = requestAnimationFrame(() => {
+    arrowEmitRaf = 0
+    const value = pendingArrowDeg
+    pendingArrowDeg = null
+    if (value != null) emit('arrow-azimuth', value)
+  })
+}
+
+function updateArrowFromPointer(event) {
+  const projector = lastScene?.directionProjector || lastScene?.projectPolar
+  const maxRadius = lastScene?.directionArrow?.maxRadius || directionMaxRadius()
+  const point = canvasPoint(event)
+  if (typeof projector !== 'function' || !(maxRadius > 0) || !point) return
+  let bestDeg = (((Number(props.rayAzimuthDeg) || 0) % 360) + 360) % 360
+  let bestDistance = Infinity
+  // 数值反解：沿箭头圆周采样投影点，取离鼠标最近的角度（透视/旋转下仍准确）。
+  for (let deg = 0; deg < 360; deg += 1) {
+    const p = projector((deg * Math.PI) / 180, maxRadius, 0)
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue
+    const distance = (p.x - point.x) ** 2 + (p.y - point.y) ** 2
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestDeg = deg
+    }
+  }
+  emitArrowAzimuth(bestDeg)
+}
+
 function onPointerDown(event) {
   if (!grid.value || (event.button !== 0 && event.button !== 2)) return
+  // 命中方向方位线箭头时优先进入旋转，而不是平移/旋转相机。
+  if (event.button === 0 && isNearArrow(event)) {
+    event.preventDefault()
+    canvasEl.value?.setPointerCapture?.(event.pointerId)
+    arrowDrag = { pointerId: event.pointerId }
+    if (canvasEl.value) canvasEl.value.style.cursor = 'grabbing'
+    return
+  }
   const mode = event.button === 2 ? 'rotate' : 'pan'
   canvasEl.value?.setPointerCapture?.(event.pointerId)
   dragState = {
@@ -638,6 +744,11 @@ function pickHover(event) {
 }
 
 function onPointerMove(event) {
+  if (arrowDrag?.pointerId === event.pointerId) {
+    event.preventDefault()
+    updateArrowFromPointer(event)
+    return
+  }
   if (dragState?.pointerId === event.pointerId) {
     const dx = event.clientX - dragState.x
     const dy = event.clientY - dragState.y
@@ -664,6 +775,12 @@ function onPointerMove(event) {
 }
 
 function onPointerUp(event) {
+  if (arrowDrag?.pointerId === event.pointerId) {
+    arrowDrag = null
+    try { canvasEl.value?.releasePointerCapture?.(event.pointerId) } catch {}
+    if (canvasEl.value) canvasEl.value.style.cursor = ''
+    return
+  }
   if (!dragState || dragState.pointerId !== event.pointerId) return
   const moved = dragState.moved
   const mode = dragState.mode
@@ -794,7 +911,7 @@ watch(() => props.field, () => scheduleDraw())
 watch(() => props.receiver, () => scheduleDraw(), { deep: true })
 watch(() => props.fields, () => scheduleDraw(), { deep: true })
 watch(() => props.rayData, rebuildRayFlow)
-watch(() => [props.rayAzimuthDeg, props.raysVisible, props.raysStatic, props.raysAnimated, props.directionLineVisible, props.directionLineLayerId], () => {
+watch(() => [props.rayAzimuthDeg, props.raysVisible, props.raysStatic, props.raysAnimated, props.directionLineVisible, props.directionLineLayerId, props.clipBody], () => {
   scheduleDraw()
   syncRayAnimation()
 })

@@ -144,6 +144,9 @@ export function drawTerrainScene(canvas, grid, {
 
   let anchor = null
   let rayProjector = null
+  /** 方向方位线箭头端点与所属声场体的极坐标投影（供地形模式拖拽命中/反解角度）。 */
+  let directionArrow = null
+  let directionProjector = null
   const anchors = {}
   const fieldLayers = [
     ...(field && source ? [{ id: 'current', field, source, visible: controls.volumeVisible !== false, primary: true }] : []),
@@ -206,6 +209,22 @@ export function drawTerrainScene(canvas, grid, {
       return project(lon, lat, local.z)
     }
     if (fieldLayer.primary) rayProjector = projectPolar
+
+    // 裁剪体：仅对方向方位线所在的声场体，沿方向线方位的竖直平面切掉一侧，
+    // 在切口补竖直切面，露出该方位本身的 TL 剖面（而非与其垂直的面）。
+    const directionTargetId = directionLine?.layerId
+    const isDirectionLayer = directionTargetId ? fieldLayer.id === directionTargetId : fieldLayer.primary
+    const clipAzimuthDeg = Number(directionLine?.azimuthDeg)
+    const clipAngle = controls.clipBody === true && isDirectionLayer && Number.isFinite(clipAzimuthDeg)
+      ? clipAzimuthDeg * Math.PI / 180
+      : null
+    const isRemovedAngle = (angle) => {
+      if (clipAngle == null) return false
+      const d = Math.atan2(Math.sin(angle - clipAngle), Math.cos(angle - clipAngle))
+      // 保留 [箭头方位, 箭头方位+180°] 一侧，切面正好落在方向线所在的竖直平面，
+      // 而不是与方向线垂直的平面。
+      return d < -1e-6
+    }
 
     const axisNodes = (count, step) => {
       const nodes = []
@@ -300,6 +319,7 @@ export function drawTerrainScene(canvas, grid, {
         const t1 = (subdivision + 1) / subdivisions
         const angle0 = a0 + (a1 - a0) * t0
         const angle1 = a0 + (a1 - a0) * t1
+        if (isRemovedAngle((angle0 + angle1) / 2)) continue
         for (let radial = 0; radial < radialNodes.length - 1; radial++) {
           const r0 = radialNodes[radial]
           const r1 = radialNodes[radial + 1]
@@ -325,6 +345,7 @@ export function drawTerrainScene(canvas, grid, {
         const t1 = (subdivision + 1) / subdivisions
         const angle0 = a0 + (a1 - a0) * t0
         const angle1 = a0 + (a1 - a0) * t1
+        if (isRemovedAngle((angle0 + angle1) / 2)) continue
         for (let layer = 0; layer < depthNodes.length - 1; layer++) {
           const z0 = depthNodes[layer]
           const z1 = depthNodes[layer + 1]
@@ -360,6 +381,7 @@ export function drawTerrainScene(canvas, grid, {
         const t1 = (subdivision + 1) / subdivisions
         const angle0 = a0 + (a1 - a0) * t0
         const angle1 = a0 + (a1 - a0) * t1
+        if (isRemovedAngle((angle0 + angle1) / 2)) continue
         for (let radial = 0; radial < radialNodes.length - 1; radial++) {
           const r0 = radialNodes[radial]
           const r1 = radialNodes[radial + 1]
@@ -381,6 +403,45 @@ export function drawTerrainScene(canvas, grid, {
             angularTl(s, t0, za0, r0), angularTl(s, t1, za1, r0),
             angularTl(s, t1, zb1, r1), angularTl(s, t0, zb0, r1),
           ], .22 + opacity * .28)
+        }
+      }
+    }
+
+    // 裁剪边界补竖直切面（过声源、沿 ±90° 边界），显示被切开处的 TL 剖面。
+    if (clipAngle != null) {
+      const sectorForAngle = (angle) => {
+        let best = 0
+        let bestDiff = Infinity
+        for (let index = 0; index < sector; index++) {
+          const diff = Math.abs(Math.atan2(
+            Math.sin(angle - centerAngles[index]),
+            Math.cos(angle - centerAngles[index])
+          ))
+          if (diff < bestDiff) {
+            bestDiff = diff
+            best = index
+          }
+        }
+        return best
+      }
+      for (const boundaryAngle of [clipAngle, clipAngle + Math.PI]) {
+        const s = sectorForAngle(boundaryAngle)
+        for (let layer = 0; layer < depthNodes.length - 1; layer++) {
+          const z0 = depthNodes[layer]
+          const z1 = depthNodes[layer + 1]
+          for (let radial = 0; radial < radialNodes.length - 1; radial++) {
+            const r0 = radialNodes[radial]
+            const r1 = radialNodes[radial + 1]
+            pushFace([
+              polar(boundaryAngle, distance[r0], depthAt(z0)),
+              polar(boundaryAngle, distance[r1], depthAt(z0)),
+              polar(boundaryAngle, distance[r1], depthAt(z1)),
+              polar(boundaryAngle, distance[r0], depthAt(z1)),
+            ], [
+              rawTl(s, z0, r0), rawTl(s, z0, r1),
+              rawTl(s, z1, r1), rawTl(s, z1, r0),
+            ], .5 + opacity * .3)
+          }
         }
       }
     }
@@ -484,10 +545,6 @@ export function drawTerrainScene(canvas, grid, {
       ctx.restore()
     }
     // 方向方位线跟随当前选中的声场体；未指定时仍落在首个（当前）声场体上。
-    const directionTargetId = directionLine?.layerId
-    const isDirectionLayer = directionTargetId
-      ? fieldLayer.id === directionTargetId
-      : fieldLayer.primary
     if (isDirectionLayer && directionLine?.visible !== false) {
       const directionAzimuth = Number(directionLine?.azimuthDeg)
       const maxRadius = Math.max(...distance.map(Number).filter(Number.isFinite), 0)
@@ -496,6 +553,8 @@ export function drawTerrainScene(canvas, grid, {
         const start = projectPolar(directionAngle, 0, 0)
         const end = projectPolar(directionAngle, maxRadius, 0)
         if ([start.x, start.y, end.x, end.y].every(Number.isFinite)) {
+          directionArrow = { start, tip: end, azimuthDeg: directionAzimuth, maxRadius }
+          directionProjector = projectPolar
           const dx = end.x - start.x
           const dy = end.y - start.y
           const length = Math.hypot(dx, dy)
@@ -559,7 +618,12 @@ export function drawTerrainScene(canvas, grid, {
   }
   const selectedRayProjector = rayProjectorForSource(raySource)
   if (selectedRayProjector) rayProjector = selectedRayProjector
-  return { points, anchor, anchors, faces, project, mesh, lighting, projectPolar: rayProjector }
+  return {
+    points, anchor, anchors, faces, project, mesh, lighting,
+    projectPolar: rayProjector,
+    directionArrow,
+    directionProjector,
+  }
 }
 
 const AXIS_TICKS = 6

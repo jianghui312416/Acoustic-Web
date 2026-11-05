@@ -9,7 +9,7 @@ const {
 
 test('volume menu exposes translated color maps and returns isolated SDK stops', () => {
   assert.deepEqual(VOLUME_COLORMAPS.map((item) => item.label), [
-    'Viridis', 'Plasma', 'Magma', 'Inferno', 'Turbo', 'Cool', 'Warm', 'Jet', 'Jet（reversed）',
+    'custom', 'Viridis', 'Plasma', 'Magma', 'Inferno', 'Turbo', 'Cool', 'Warm', 'Jet', 'Jet（reversed）',
   ])
   const first = activeVolumeColorStops('viridis')
   first[0][1][0] = 255

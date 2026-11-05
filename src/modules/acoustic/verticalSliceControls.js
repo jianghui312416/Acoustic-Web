@@ -28,6 +28,8 @@ export const verticalSliceControls = reactive({
   seafloorLineAndMask: true,
   seafloorMask: true,
   east90Indicator: true,
+  /** 裁剪体：开启后拖动方位指针箭头，隐藏箭头所指方向的半个体，露出过声源的切面。 */
+  clipBody: false,
   sspWindow: false,
   cursorReadout: false,
   dynamicRays: true,
@@ -48,6 +50,7 @@ export function clampVerticalSliceControls(controls = verticalSliceControls) {
   }
   controls.dbMin = clamp(controls.dbMin, 0, 199, 60)
   controls.dbMax = clamp(controls.dbMax, controls.dbMin + 1, 200, 120)
+  controls.clipBody = controls.clipBody === true
   controls.raySpeed = clamp(controls.raySpeed, 0.25, 8, 1)
   controls.rayTimelineMs = clamp(controls.rayTimelineMs, 100, 600000, 8000)
   return controls

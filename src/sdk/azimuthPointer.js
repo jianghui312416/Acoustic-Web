@@ -543,7 +543,7 @@ export class AzimuthPointer {
 
   // ── 内部：交互 ───────────────────────────────────────────────
   _bindEvents() {
-    const canvas = this.viewer.canvas
+    const canvas = this.viewer.canvas || this.viewer.scene?.canvas
     if (!canvas) return
     this._handler = new Cesium.ScreenSpaceEventHandler(canvas)
     this._handler.setInputAction((evt) => this._onLeftDown(evt), Cesium.ScreenSpaceEventType.LEFT_DOWN)
@@ -563,24 +563,48 @@ export class AzimuthPointer {
     }
   }
 
-  /** 命中判定：屏幕像素距离中心手柄 / 指针端点是否在阈值内 */
+  /** 命中判定：中心手柄、指针端点或整根指针线，屏幕像素距离在阈值内即可拖动。 */
   _isPickable(windowPos) {
+    if (!windowPos) return false
     const radius = Number(this.style.hitPixelRadius) || 18
-    return (
-      this._screenDistance(this._centerCartesian, windowPos) <= radius ||
-      this._screenDistance(this._tipCartesian, windowPos) <= radius
-    )
+    const center = this._toWindow(this._centerCartesian)
+    const tip = this._toWindow(this._tipCartesian)
+    if (center && Cesium.Cartesian2.distance(center, windowPos) <= radius) return true
+    if (tip && Cesium.Cartesian2.distance(tip, windowPos) <= radius) return true
+    if (center && tip) return this._distanceToSegment(windowPos, center, tip) <= radius
+    return false
   }
 
-  _screenDistance(cartesian, windowPos) {
-    if (!cartesian || !windowPos) return Infinity
+  /** 世界坐标 → 窗口坐标（CSS 像素）。兼容不同 GeoVis/Cesium 版本的函数名。 */
+  _toWindow(cartesian) {
+    if (!cartesian) return null
     try {
-      const win = Cesium.SceneTransforms.worldToWindowCoordinates(this.viewer.scene, cartesian)
-      if (!win) return Infinity
-      return Cesium.Cartesian2.distance(win, windowPos)
+      const transforms = Cesium.SceneTransforms
+      const scene = this.viewer.scene
+      // 本项目 GeoVis 提供 wgs84ToWindowCoordinates；旧版 Cesium 用 worldToWindowCoordinates。
+      // 若函数名不存在，命中判定会永远失败，导致箭头看似无法拖动。
+      const win =
+        typeof transforms?.worldToWindowCoordinates === 'function'
+          ? transforms.worldToWindowCoordinates(scene, cartesian)
+          : typeof transforms?.wgs84ToWindowCoordinates === 'function'
+            ? transforms.wgs84ToWindowCoordinates(scene, cartesian)
+            : null
+      return win ?? null
     } catch {
-      return Infinity
+      return null
     }
+  }
+
+  /** 点到线段的屏幕像素距离 */
+  _distanceToSegment(point, a, b) {
+    const abx = b.x - a.x
+    const aby = b.y - a.y
+    const apx = point.x - a.x
+    const apy = point.y - a.y
+    const lengthSq = abx * abx + aby * aby
+    if (lengthSq <= 1e-6) return Math.hypot(point.x - a.x, point.y - a.y)
+    const t = Math.max(0, Math.min(1, (apx * abx + apy * aby) / lengthSq))
+    return Math.hypot(point.x - (a.x + abx * t), point.y - (a.y + aby * t))
   }
 
   _onLeftDown(evt) {

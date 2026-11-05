@@ -95,7 +95,11 @@
 <script setup>
 import { ref, computed, watch, onMounted, onActivated, onBeforeUnmount, nextTick } from 'vue'
 import echarts from '@/plugins/echarts.js'
-import { VOLUME_TL_COLOR_STOPS, internalAzimuthToCompassBearing } from '@/sdk'
+import { internalAzimuthToCompassBearing } from '@/sdk'
+import {
+  activeVolumeColorStops,
+  volumeRenderingControls,
+} from '@/modules/acoustic/volumeRenderingControls.js'
 import {
   normalize360,
   nearestIndex,
@@ -594,9 +598,12 @@ function nmTickPlan(valuesMeters, targetTicks) {
 
 /* ────────────────────────────── 图表渲染 ────────────────────────────── */
 
-/** 当前色带：TL 使用体渲染色标；信号余量模式使用发散 SE/Pd 色标。 */
+/** 垂直切面的 TL 色标类型跟随三维体绘制的色图（bellhop / viridis / jet…）。 */
+const tlColorStops = computed(() => activeVolumeColorStops(volumeRenderingControls.colormap))
+
+/** 当前色带：TL 使用与体绘制相同的色图；信号余量模式使用发散 SE/Pd 色标。 */
 function valueColorStopsSource() {
-  return seActive.value ? SIGNAL_EXCESS_COLOR_STOPS : VOLUME_TL_COLOR_STOPS
+  return seActive.value ? SIGNAL_EXCESS_COLOR_STOPS : tlColorStops.value
 }
 
 /** 色带 CSS 颜色列表（供 ECharts visualMap 使用）。 */
@@ -628,7 +635,8 @@ function sampleDisplayTlColor(value) {
  */
 function createSmoothTlTexture(profileData) {
   const modeKey = seActive.value ? (sePdMode.value ? 'pd' : 'se') : 'tl'
-  const rangeKey = `${modeKey}:${props.dbMin}:${props.dbMax}`
+  const schemeKey = seActive.value ? '' : volumeRenderingControls.colormap
+  const rangeKey = `${modeKey}:${schemeKey}:${props.dbMin}:${props.dbMax}`
   if (smoothTextureCanvas && smoothTextureProfile === profileData && smoothTextureRange === rangeKey) {
     return smoothTextureCanvas
   }
@@ -1402,6 +1410,7 @@ watch(
     props.readoutEnabled,
     props.dbMin,
     props.dbMax,
+    volumeRenderingControls.colormap,
     props.signalExcess,
     props.receiverMarker,
     props.receiverPlacementEnabled,

@@ -74,9 +74,12 @@ export async function maskVolumeByTerrain(texture, terrainProvider, options = {}
     return { supported: false, sampledColumns: 0, landColumns: 0, maskedVoxels: 0, visiblePathMaxM: 0 }
   }
 
+  // 严格最近邻纹理每行就是一个原始扇区（行中心 = 扇区中心），不能用 y/(height-1)
+  // 把行线性铺满 360°，否则海底掩膜会按错误方位采样。
+  const strictRows = texture.strictNearest === true
   const positions = new Array(width * height)
   for (let y = 0; y < height; y++) {
-    const ty = height > 1 ? y / (height - 1) : 0
+    const ty = strictRows ? y / height : height > 1 ? y / (height - 1) : 0
     // shader 的极坐标方位采用罗盘方位：0° 北、90° 东、顺时针。
     const bearing = angleMin + (angleMax - angleMin) * ty
     for (let x = 0; x < width; x++) {

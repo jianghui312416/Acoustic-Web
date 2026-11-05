@@ -85,6 +85,49 @@ test('sends selected model SN and Plugin in the portal request', async () => {
   assert.equal(requests[1].Data.Units[0].Request.beamWidth, undefined)
 })
 
+test('routes RAM terrain runs to its non-ice and ice 3D field plugins', async () => {
+  const originalFetch = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (_url, options) => {
+    const request = JSON.parse(options.body)
+    requests.push(request)
+    return {
+      ok: true,
+      async json() {
+        return {
+          Data: {
+            Units: [{
+              Plugin: request.Data.Units[0].Plugin,
+              Response: { loadingTlv: {} },
+              ResultCode: 0,
+            }],
+          },
+        }
+      },
+    }
+  }
+
+  try {
+    const params = { range: 10, sector: 8, lineCount: 12, azimuth: 45 }
+    await analyse3dTLRDByModel(params, 'ram', false)
+    await analyse3dTLRDByModel(params, 'ram', true)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  assert.deepEqual(
+    requests.map(({ Data }) => [Data.SN, Data.Units[0].Plugin]),
+    [
+      [19, 'AnalyseRam3DTLRD'],
+      [21, 'AnalyseIceRam3DTLRD'],
+    ]
+  )
+  for (const request of requests) {
+    assert.equal(request.Data.Units[0].Request.lineCount, undefined)
+    assert.equal(request.Data.Units[0].Request.azimuth, undefined)
+  }
+})
+
 test('uses the current registry SNs for ray and dataset requests', async () => {
   const originalFetch = globalThis.fetch
   const requests = []

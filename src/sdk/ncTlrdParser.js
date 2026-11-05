@@ -412,6 +412,9 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
   // 方位插值倍数：扇区之间做线性插值，默认 2（与 tlTxtVolume 一致，让方位过渡平滑）
   const angleInterp = Math.max(1, Number(opts.angleInterp) || 2)
   const wrapTheta = opts.wrapTheta !== false
+  // 严格最近邻：与 bellhop_gebco 参考工程一致——方位/距离/深度均取最近原始节点、
+  // 不插值、不回填缺测值，缺测保持透明；同时把每列海底深度写入 G 通道供近底羽化。
+  const strictNearest = opts.strictNearest === true
 
   // RGBA 体纹理为 4 字节/体素，还会上传一份到 GPU。固定 8 倍方位插值会在
   // 大网格上生成数亿体素，因此按体素预算自适应降低方位采样；小数据保持原样。
@@ -421,13 +424,21 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
   const maxHeight = Math.max(2, Math.floor(maxVoxels / Math.max(1, col * row)))
 
   // 环形方位纹理首尾各保留一行相同扇区，避免 CLAMP_TO_EDGE 在 0°/360° 处
-  // 产生断缝；非环形数据仍保持普通插值行数。
-  const requestedHeight = wrapTheta && sector > 1
-    ? Math.max(sector + 1, Math.round(sector * angleInterp) + 1)
-    : Math.max(sector, Math.round(sector * angleInterp))
+  // 产生断缝；非环形数据仍保持普通插值行数。严格最近邻时每扇区只保留一行（不插值）。
+  const strictHeight = strictNearest ? Math.max(1, sector) : 0
+  const requestedHeight = strictNearest
+    ? strictHeight
+    : wrapTheta && sector > 1
+      ? Math.max(sector + 1, Math.round(sector * angleInterp) + 1)
+      : Math.max(sector, Math.round(sector * angleInterp))
   const minHeight = requestedHeight > 1 ? 2 : 1
-  const height = Math.max(minHeight, Math.min(requestedHeight, maxHeight))
+  const height = strictNearest
+    ? strictHeight
+    : Math.max(minHeight, Math.min(requestedHeight, maxHeight))
   const depthValues = grid.depth.slice(0, row)
+  // 深度跨度：近底羽化需要用实际深度（米）重建海底与采样点深度，提前计算。
+  const depthMinM = depthValues[0] ?? 0
+  const depthMaxM = depthValues[depthValues.length - 1] ?? depthMinM + 1
 
   // 值域：仅统计有效体素（200 / 9999 已在上一步被剔除）
   let vMin = Number.isFinite(parsed.stats.valueMin) ? parsed.stats.valueMin : Infinity
@@ -447,6 +458,13 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
   const s1Arr = new Int32Array(height)
   const fracArr = new Float64Array(height)
   for (let y = 0; y < height; y++) {
+    // 严格最近邻：每行精确对应一个原始扇区，不做任何方位混合。
+    if (strictNearest) {
+      s0Arr[y] = y % sector
+      s1Arr[y] = y % sector
+      fracArr[y] = 0
+      continue
+    }
     const t = height > 1 ? y / (height - 1) : 0
     // 环形：最后一行回到 sector 0；非环形：首尾精确落在首/末扇区。
     const sectorF = wrapTheta ? t * sector : t * Math.max(0, sector - 1)
@@ -462,6 +480,22 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
     }
     s0Arr[y] = s0
     s1Arr[y] = s1
+  }
+
+  // 严格最近邻：每列海底深度（米，0–255 归一化）写入 G 通道，用于着色器近底平滑羽化。
+  const bottomNorm = strictNearest ? new Float32Array(height * col) : null
+  if (bottomNorm) {
+    for (let y = 0; y < height; y++) {
+      const s = s0Arr[y]
+      for (let ix = 0; ix < col; ix++) {
+        const depth = parsed.seabedDepthAt(s, ix)
+        // 缺测海底写 255（最深）→ 着色器不会误把整列羽化掉；有效深度按 0–255 归一化。
+        const norm = Number.isFinite(depth) && depthMaxM > depthMinM
+          ? Math.max(0, Math.min(255, Math.round(((depth - depthMinM) / (depthMaxM - depthMinM)) * 255)))
+          : 255
+        bottomNorm[y * col + ix] = norm
+      }
+    }
   }
 
   // TL 扁平数组 + 每扇区 / 每深度层的行首偏移：热循环内用一次加法取代 parsed.at() 的
@@ -498,6 +532,9 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
           v = NaN
         }
 
+        // 参考工程把缺测节点显示为透明；严格最近邻模式下 200（水体未覆盖）同样按缺测处理。
+        // 平滑模式仍保留旧行为：200 映射到色标最大值。
+        if (strictNearest && v === TLRD_INVALID_WATER) v = NaN
         const o = outRow + ix * 4
         if (v === v) {
           // 归一化到 0–255（NaN 已排除，v0/v1 的自比较即 isFinite 判定）
@@ -505,7 +542,8 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
           if (n < 0) n = 0
           else if (n > 255) n = 255
           data[o] = n
-          data[o + 1] = n
+          // G 通道：严格最近邻时存每列海底深度（近底羽化用），否则保持灰度 R=G=B
+          data[o + 1] = bottomNorm ? bottomNorm[y * col + ix] : n
           data[o + 2] = n
           // 不再把“一个扇区有效、相邻扇区为陆地”的插值格强行设为完全有效；
           // 覆盖率会向陆地扇区平滑衰减，并在陆地扇区中心严格为 0。
@@ -520,15 +558,14 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
       }
     }
   }
-  // 无效体素（200 / 9999 哨兵、海底以下）回填邻近有效值，A 通道仍为 0（本身不渲染）：
-  // 避免三线性插值在远距离末端 / 海底等数据边界把 TL 稀释成值域最低端（表现为数据里
-  // 并不存在的低 TL —— 色标下限色）
-  fillInvalidVoxelRgb(data, col, height, row, { wrapY: wrapTheta })
+  // 平滑插值模式：无效体素（200 / 9999 哨兵、海底以下）回填邻近有效值，A 通道仍为 0，
+  // 避免三线性插值在数据边界把 TL 稀释到值域最低端；严格最近邻则保留缺测体素透明。
+  if (!strictNearest) {
+    fillInvalidVoxelRgb(data, col, height, row, { wrapY: wrapTheta })
+  }
 
   const distance = grid.distance
   const pathMaxM = Math.max(1, distance.length ? distance[distance.length - 1] : col)
-  const depthMinM = depthValues[0] ?? 0
-  const depthMaxM = depthValues[depthValues.length - 1] ?? depthMinM + 1
 
   const degLat = Math.max(1e-6, pathMaxM / M_PER_DEG_LAT)
   const degLon = Math.max(1e-6, pathMaxM / Math.max(1e-6, M_PER_DEG_LON * Math.cos((sourceLat * Math.PI) / 180)))
@@ -538,8 +575,11 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
     height,
     depth: row,
     data,
-    // WebGL sampler3D 使用硬件三线性过滤；只改变显示采样，不改写 Bellhop TL 数据。
-    textureFilter: 'linear',
+    // 严格最近邻：禁用硬件插值（NEAREST），并在着色器中逐节点取最近原始体素；
+    // 平滑模式保持 sampler3D 三线性过滤。
+    textureFilter: strictNearest ? 'nearest' : 'linear',
+    strictNearest,
+    hasBottomDepth: strictNearest,
     valueMin: vMin,
     valueMax: vMax,
     lonMin: sourceLon - degLon,

@@ -512,6 +512,8 @@ export class ShaderVolume3DPrimitive {
       alphaByValue: new Cesium.Cartesian2(),
       cameraUvw: new Cesium.Cartesian3(),
       sampleStep: 0.01,
+      strictNearest: 0,
+      featherM: 160,
     }
     this.ncUniforms = u
     this.ncUniformMap = {
@@ -526,6 +528,8 @@ export class ShaderVolume3DPrimitive {
       u_sliceMeta: () => u.sliceMeta,
       u_alphaByValue: () => u.alphaByValue,
       u_sampleStep: () => u.sampleStep,
+      u_strictNearest: () => u.strictNearest,
+      u_featherM: () => u.featherM,
       u_valueInfo: () => u.valueInfo,
       u_colorInfo: () => u.colorInfo,
       u_depthInfo: () => u.depthInfo,
@@ -1567,6 +1571,10 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
       uniform vec2 u_alphaByValue;
       // 归一化纹理坐标中的最大步长；实际步长还会按当前射线穿过的体素数自适应缩小。
       uniform float u_sampleStep;
+      // 严格最近邻（bellhop_gebco 参考模式）：1 = 逐节点 texelFetch、不做三线性插值。
+      uniform int u_strictNearest;
+      // 近底平滑羽化宽度（米）：海底之上 featerM 米内透明度渐变到 0。
+      uniform float u_featherM;
 
       vec3 getStopColor(float x) {
         float v = clamp(x, 0.0, 1.0);
@@ -1705,7 +1713,20 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
 
           // sampler3D 的 LINEAR 过滤在三轴上执行硬件三线性插值；A 通道也参与插值，
           // 因此将其作为连续覆盖度使用，而不是把每个网格单元当作实体色块。
-          vec4 voxel = texture(u_volumeTexture, clamp(texUvw, vec3(0.001), vec3(0.999)));
+          vec4 voxel;
+          if (u_strictNearest == 1) {
+            // 严格最近邻（bellhop_gebco 参考模式）：方位取各扇区中心 ±45° 最近扇区，
+            // 距离/深度取最近原始节点，逐节点 texelFetch，不做任何插值。
+            int nRange = int(textureShape.x);
+            int nSector = int(textureShape.y);
+            int nDepth = int(textureShape.z);
+            int rIdx = clamp(int(floor(texUvw.x * float(nRange - 1) + 0.5)), 0, nRange - 1);
+            int zIdx = clamp(int(floor(texUvw.z * float(nDepth - 1) + 0.5)), 0, nDepth - 1);
+            int sIdx = int(floor(texUvw.y * float(nSector) + 0.5)) % nSector;
+            voxel = texelFetch(u_volumeTexture, ivec3(rIdx, sIdx, zIdx), 0);
+          } else {
+            voxel = texture(u_volumeTexture, clamp(texUvw, vec3(0.001), vec3(0.999)));
+          }
           float coverage = smoothstep(0.015, 0.92, voxel.a);
 
           // 体边缘淡出 1.5 个体素，消除包围盒/首末切片的硬轮廓与纹理接缝。
@@ -1717,6 +1738,12 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
             ? 1.0
             : edgeLow.y * edgeHigh.y;
           coverage *= min(min(edgeLow.x * edgeHigh.x, angleEdge), edgeLow.z * edgeHigh.z);
+          // 近底平滑羽化：严格最近邻模式下按原始海底深度（G 通道）渐变，消除海底硬边缘。
+          if (u_strictNearest == 1 && voxel.g > 0.0) {
+            float depthM = mix(u_wedgeMeta2.z, u_wedgeMeta2.w, texUvw.z);
+            float bottomM = mix(u_wedgeMeta2.z, u_wedgeMeta2.w, voxel.g);
+            coverage *= smoothstep(0.0, max(8.0, u_featherM), bottomM - depthM);
+          }
           if (coverage <= 0.001) continue;
 
           float dataRatio = clamp(voxel.r, 0.0, 1.0);
@@ -1726,15 +1753,23 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
 
           float colorSpan = max(0.001, u_colorInfo.y - u_colorInfo.x);
           float displayRatio = clamp((realValue - u_colorInfo.x) / colorSpan, 0.0, 1.0);
-          displayRatio = pow(displayRatio, max(0.35, u_colorInfo.z));
+          // 参考模式不做色标 gamma，保持 fieldColor 原始分段映射；平滑模式沿用可调 gamma。
+          if (u_strictNearest == 0) displayRatio = pow(displayRatio, max(0.35, u_colorInfo.z));
 
           vec3 color = getVolumeColor(displayRatio);
-          // 将色标透明度逐采样应用：低信息量区域保持可见但更透明，内部特征可透过外层显示。
-          float valueAlpha = pow(
-            clamp(mix(u_alphaByValue.x, u_alphaByValue.y, displayRatio), 0.0, 1.0),
-            max(0.1, u_colorInfo.w)
-          );
-          float opacitySignal = mix(0.08, 1.0, valueAlpha);
+          float opacitySignal;
+          if (u_strictNearest == 1) {
+            // bellhop_gebco 参考工程：低声损失更不透明，但最弱区域仍保留 0.56 的密度，
+            // 使外围蓝/青色声场可见，而不是按色标 alpha 直接淡出。
+            opacitySignal = 0.56 + 0.44 * clamp((110.0 - realValue) / 70.0, 0.0, 1.0);
+          } else {
+            // 将色标透明度逐采样应用：低信息量区域保持可见但更透明，内部特征可透过外层显示。
+            float valueAlpha = pow(
+              clamp(mix(u_alphaByValue.x, u_alphaByValue.y, displayRatio), 0.0, 1.0),
+              max(0.1, u_colorInfo.w)
+            );
+            opacitySignal = mix(0.08, 1.0, valueAlpha);
+          }
 
           // Beer-Lambert 步长校正：透明度与实际射线距离相关，而不是与采样次数相关。
           // 因而调节采样密度不会造成明暗条带或整体透明度跳变。
@@ -1883,6 +1918,10 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
       uniforms.depthInfo.w = volume.sourceDepth
       // sampling 是归一化纹理坐标的最大步长；shader 会结合纹理三轴分辨率进一步缩小。
       uniforms.sampleStep = clamp(Number(sampling) || 0.01, 0.001, 0.05)
+      uniforms.strictNearest = volume.strictNearest ? 1 : 0
+      // 近底羽化宽度：参考工程默认 160 m，浅水时按深度跨度的 25% 上限自适应缩小。
+      const featherDepthSpan = Math.max(1, meta.depthMaxM - meta.depthMinM)
+      uniforms.featherM = Math.max(8, Math.min(160, featherDepthSpan * 0.25))
       Cesium.Cartesian3.clone(cameraUvw, uniforms.cameraUvw)
 
       const uniformMap = this.ncUniformMap

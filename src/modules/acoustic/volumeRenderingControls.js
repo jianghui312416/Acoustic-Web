@@ -2,6 +2,21 @@ import { reactive } from 'vue'
 
 export const VOLUME_COLORMAPS = Object.freeze([
   Object.freeze({
+    // 与 bellhop_gebco 参考工程 fieldColor 一致的 8 段色带（45–128+ dB，红黄绿青蓝）。
+    id: 'bellhop',
+    label: 'custom',
+    stops: Object.freeze([
+      [0.0, [227, 20, 48]],
+      [0.1205, [252, 54, 36]],
+      [0.2169, [255, 194, 23]],
+      [0.3012, [178, 235, 31]],
+      [0.3976, [31, 207, 89]],
+      [0.5181, [13, 171, 184]],
+      [0.6867, [15, 92, 204]],
+      [1.0, [6, 26, 97]],
+    ]),
+  }),
+  Object.freeze({
     id: 'viridis',
     label: 'Viridis',
     stops: Object.freeze([
@@ -79,9 +94,12 @@ export const volumeRenderingControls = reactive({
   opacity: 1.7,
   sampling: 0.01,
   alphaPower: 1.3,
-  colormap: 'jet-reversed',
-  dbMin: 60,
-  dbMax: 120,
+  colormap: 'bellhop',
+  /** 严格最近邻：与 bellhop_gebco 参考工程一致，方位/距离/深度均取最近节点、不插值。 */
+  strictNearest: true,
+  /** 参考工程 fieldColor 的 TL 映射域为 45–128 dB，默认 dB 范围与之对齐。 */
+  dbMin: 45,
+  dbMax: 128,
   rotationX: 0,
   rotationY: 0,
   rotationZ: 0,
@@ -112,8 +130,9 @@ export function clampVolumeRenderingControls(controls = volumeRenderingControls)
   controls.opacity = clamp(controls.opacity, 0.2, 5, 1.7)
   controls.sampling = clamp(controls.sampling, 0.004, 0.03, 0.01)
   controls.alphaPower = clamp(controls.alphaPower, 0.35, 3, 1.3)
-  controls.dbMin = clamp(controls.dbMin, 0, 199, 60)
-  controls.dbMax = clamp(controls.dbMax, controls.dbMin + 1, 200, 120)
+  controls.strictNearest = controls.strictNearest !== false
+  controls.dbMin = clamp(controls.dbMin, 0, 199, 45)
+  controls.dbMax = clamp(controls.dbMax, controls.dbMin + 1, 200, 128)
   controls.rotationX = clamp(controls.rotationX, 0, 359, 0)
   controls.rotationY = clamp(controls.rotationY, 0, 359, 0)
   controls.rotationZ = clamp(controls.rotationZ, 0, 359, 0)

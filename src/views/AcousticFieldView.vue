@@ -36,6 +36,8 @@
       :rays-animated="profileTerrainRaysAnimated"
       :direction-line-visible="verticalSliceControls.east90Indicator"
       :direction-line-layer-id="profileDirectionLayerId"
+      :clip-body="verticalSliceControls.clipBody"
+      @arrow-azimuth="onTerrainArrowAzimuth"
       :initial-bounds="globeSelection"
       :initial-bounds-token="globeSelectionToken"
       :thumbnail-collapsed="thumbnailCollapsed"
@@ -2753,6 +2755,23 @@ watch(() => terrainSliceOpen.value, (val) => {
 watch(sliceEnabled, (enabled, previous) => {
   if (enabled && !previous) seekRayFlowClock(0)
 })
+// 裁剪体开关：开启时恢复上次裁剪方向并显示可拖拽箭头；关闭时恢复完整声场。
+watch(() => verticalSliceControls.clipBody, (enabled) => {
+  if (enabled) {
+    if (Number.isFinite(lastClipAzimuthDeg)) sliceAzimuthDeg.value = lastClipAzimuthDeg
+    else lastClipAzimuthDeg = Number(sliceAzimuthDeg.value) || 0
+  }
+  setupAzimuthPointer()
+  applyPointerVisibility()
+  syncSoundField()
+  viewer?.scene?.requestRender?.()
+})
+// 方位方向线开关：开启时箭头可拖动切换方位，关闭时按指针自身开关决定显隐。
+watch(() => verticalSliceControls.east90Indicator, () => {
+  setupAzimuthPointer()
+  applyPointerVisibility()
+  viewer?.scene?.requestRender?.()
+})
 watch(() => terrainProfileOpen.value, (val) => {
   if (verticalSliceControls.sspWindow !== !!val) verticalSliceControls.sspWindow = !!val
   if (!val) {
@@ -3413,6 +3432,47 @@ watch(depthExaggeration, (value) => {
     volumeRenderingControls.terrainExaggeration = next
   }
 })
+
+// 严格最近邻开关切换时重建三维体纹理：默认不插值（bellhop_gebco 参考模式），
+// 关闭后恢复 8 倍方位插值。仅重建纹理与几何，不动声线/方位/散射点等状态。
+watch(
+  () => volumeRenderingControls.strictNearest,
+  async (strictNearest) => {
+    if (!raySourceData.value || !soundField) return
+    try {
+      const parsed = parseAnalyse3DTlrd(raySourceData.value)
+      const texture = decodeTlrdPolarVolume(parsed, {
+        sourceLon: Number(calcParams.value.coordX),
+        sourceLat: Number(calcParams.value.coordY),
+        angleInterp: strictNearest !== false ? 1 : TLRD_ANGLE_INTERP,
+        strictNearest: strictNearest !== false,
+      })
+      try {
+        await maskVolumeByTerrain(texture, viewer?.scene?.terrainProvider)
+      } catch (e) {
+        console.warn('[三维声场地形掩膜] 地形采样不可用，保留接口海底掩膜：', e?.message ?? e)
+      }
+      currentVolumeTexture = texture
+      terrainTexture.value = texture
+      soundField.depthExaggeration = depthExaggeration.value
+      soundField.setVolume(texture, (raw) => raw)
+      const wedge = texture.wedgeMeta ?? {}
+      bounds.value = {
+        lon: { min: texture.lonMin, max: texture.lonMax },
+        lat: { min: texture.latMin, max: texture.latMax },
+        depth: { min: texture.depthMin, max: texture.depthMax },
+        value: { min: texture.valueMin, max: texture.valueMax },
+      }
+      texWidth.value = texture.width
+      texHeight.value = texture.height
+      texDepth.value = texture.depth
+      validVoxelPct.value = ((texture.validVoxelRatio ?? 0) * 100).toFixed(1)
+      syncSoundField()
+    } catch (e) {
+      console.warn('[三维声场严格最近邻] 重建纹理失败：', e?.message ?? e)
+    }
+  }
+)
 
 // 显隐是独立图层状态：不进入 setDisplay，不更新体纹理、几何或相机。
 watch(
@@ -4309,6 +4369,18 @@ function getWebGL2(context) {
 
 /** 根据当前 UI 状态组装切面裁切参数 */
 function getSliceClipOptions() {
+  // 裁剪体：拖动方位指针箭头时，隐藏箭头所指方向的半个体，保留另一侧，
+  // 从而露出过声源、与箭头方向垂直的竖直切面。关闭后不裁剪，显示完整声场。
+  if (verticalSliceControls.clipBody) {
+    return {
+      enabled: true,
+      mode: VOLUME_SLICE_MODE.azimuth,
+      position: 0.5,
+      // 保留 [箭头方位, 箭头方位+180°] 的半个圆柱：切面落在箭头所在的竖直平面，
+      // 显示该方位的传播损失剖面，而不是与方向线垂直的面。
+      azimuthDeg: sliceAzimuthDeg.value,
+    }
+  }
   return {
     enabled: sliceEnabled.value,
     mode: VOLUME_SLICE_MODE[sliceMode.value] ?? VOLUME_SLICE_MODE.azimuth,
@@ -4378,7 +4450,10 @@ function isCurrentVolumePointVisible(lon, lat) {
   const angleSpan = Math.max(0.001, angleMax - angleMin)
   const angleT = (((bearing - angleMin) % 360) + 360) % 360 / angleSpan
   const x = Math.max(0, Math.min(texture.width - 1, Math.round(pathT * (texture.width - 1))))
-  const y = Math.max(0, Math.min(texture.height - 1, Math.round(angleT * (texture.height - 1))))
+  // 严格最近邻纹理每行对应一个原始扇区，按着色器的最近扇区规则取行（含 0°/360° 环绕）。
+  const y = texture.strictNearest
+    ? Math.floor(angleT * texture.height + 0.5) % Math.max(1, texture.height)
+    : Math.max(0, Math.min(texture.height - 1, Math.round(angleT * (texture.height - 1))))
   const z = Math.max(0, Math.min(texture.depth - 1, Number(omni2dDepthIndex.value) || 0))
   return texture.data[(((z * texture.height + y) * texture.width + x) * 4) + 3] > 0
 }
@@ -4529,19 +4604,37 @@ function syncSoundField(options = {}) {
 }
 
 let azimuthSyncTimer = null
+/** 最近一次「裁剪体」方向（内部角，正东 0°、逆时针），关闭再开启时恢复该裁剪效果。 */
+let lastClipAzimuthDeg = null
 
 /** 创建 / 更新声源点上方「可拖拽方位指针」 */
 function setupAzimuthPointer() {
   if (!soundField?.loaded) return
+  const clipMode = verticalSliceControls.clipBody
+  const directionLine = verticalSliceControls.east90Indicator
+  // 方位方向线开启时箭头也需可拖拽切换方位；裁剪体模式下取消吸附做连续旋转。
+  const interactive = pointerEnabled.value || clipMode || directionLine
   soundField.setAzimuthPointer({
-    azimuths: availableAzimuths.value,
+    azimuths: clipMode ? [] : availableAzimuths.value,
+    snapStepDeg: 1,
     azimuthDeg: Number(sliceAzimuthDeg.value),
-    visible: pointerEnabled.value,
-    draggable: pointerEnabled.value,
-    ringVisible: pointerRingVisible.value,
+    visible: interactive && (!sliceEnabled.value || clipMode || directionLine),
+    draggable: interactive,
+    // 仅方位方向线驱动时只显示箭头/杆，不显示辅助圈，避免默认多出一整圈刻度。
+    ringVisible: pointerRingVisible.value && (pointerEnabled.value || clipMode),
     // 拖拽停靠到某个方位后刷新该方位的声线剖面
     onAzimuthChange: (deg) => {
       sliceAzimuthDeg.value = deg
+      if (clipMode) {
+        // 裁剪体：只更新体裁剪与方向线，避免连续拖拽触发声线 / 底质接口。
+        lastClipAzimuthDeg = deg
+        clearTimeout(azimuthSyncTimer)
+        azimuthSyncTimer = setTimeout(() => {
+          azimuthSyncTimer = null
+          syncSoundField()
+        }, 30)
+        return
+      }
       // 声线重建较重，快速拖拽时做一次节流合并
       clearTimeout(azimuthSyncTimer)
       azimuthSyncTimer = setTimeout(() => {
@@ -4555,11 +4648,15 @@ function setupAzimuthPointer() {
   })
 }
 
-/** 指针显隐：启用方位剖面时不再在三维体上标方向 */
+/** 指针显隐：方位方向线 / 裁剪体开启时保留箭头，可拖拽切换方位。 */
 function applyPointerVisibility() {
-  const show = pointerEnabled.value && !sliceEnabled.value
+  const clipMode = verticalSliceControls.clipBody
+  const directionLine = verticalSliceControls.east90Indicator
+  const interactive = pointerEnabled.value || clipMode || directionLine
+  const show = interactive && (!sliceEnabled.value || clipMode || directionLine)
   soundField?.setAzimuthPointerVisible(show)
-  soundField?.pointer?.setDraggable(pointerEnabled.value)
+  soundField?.pointer?.setDraggable(interactive)
+  soundField?.setAzimuthPointerRingVisible(pointerRingVisible.value && (pointerEnabled.value || clipMode))
 }
 
 /** 方位指针开关 */
@@ -4895,6 +4992,32 @@ function onProfileAzimuthChange(deg) {
   scheduleSliceCurtain()
   scheduleRayDataForAzimuth(v, 0)
   scheduleBottomTypesForAzimuth(v, 0)
+}
+
+/**
+ * 地形模式拖动方向方位线箭头：裁剪体开启时只更新裁剪方位（保留上次裁剪角度），
+ * 关闭时按普通切换方位处理，刷新剖面与声线。
+ */
+function onTerrainArrowAzimuth(deg) {
+  const v = normalizeAzimuth360(Number(deg) || 0)
+  const layer = selectedProfileLayer.value
+  if (layer) {
+    if (Math.abs((Number(layer.sliceAzimuthDeg) || 0) - v) < 1e-6) return
+    layer.sliceAzimuthDeg = v
+    if (verticalSliceControls.clipBody) {
+      lastClipAzimuthDeg = v
+      return
+    }
+    scheduleHistoryLayerDynamicRays(layer, 0)
+    return
+  }
+  if (Math.abs(sliceAzimuthDeg.value - v) < 1e-6) return
+  sliceAzimuthDeg.value = v
+  if (verticalSliceControls.clipBody) {
+    lastClipAzimuthDeg = v
+    return
+  }
+  onAzimuthUiChange()
 }
 
 /** 滑块/下拉改变切面方位：体渲染立即响应，声线接口在停止操作后再调用。 */
@@ -5336,11 +5459,12 @@ function seaIceQueryBounds(lonDeg, latDeg, rangeNm) {
 }
 
 /**
- * 射线模型运行前查询声源及半径覆盖范围内的海冰厚度。
+ * 三维声场运行前查询声源及半径覆盖范围内的海冰厚度。
  * 非陆地值（9999 为陆地/缺测）中存在 >0 的冰厚即按冰区计算。
+ * 海区判定与声学模型无关：RAM/KRAKEN 也必须在点选位置后切换到
+ * 各自的冰区 / 非冰区三维 Plugin。
  */
-async function detectRayModelSeaIce() {
-  if (!isRayModel.value) return
+async function detectModelSeaIce() {
   const lon = Number(calcParams.value.coordX)
   const lat = Number(calcParams.value.coordY)
   const rangeNm = Number(calcParams.value.range)
@@ -5397,10 +5521,8 @@ async function loadData() {
   rayLoadToken++
   clearTimeout(rayLoadTimer)
   rayLoadTimer = 0
-  if (isRayModel.value) {
-    loadingMessage.value = '检查声源区域海冰覆盖…'
-    await detectRayModelSeaIce()
-  }
+  loadingMessage.value = '检查声源区域海冰覆盖…'
+  await detectModelSeaIce()
   loadingMessage.value = '调用声场计算接口…'
 
   if (!soundField) {
@@ -5820,7 +5942,7 @@ async function validateSourceDepthAgainstTerrain() {
   }
 }
 
-/** 调用 Analyse3DTLRD 接口计算三维传播损失「标准格式」声场 */
+/** 按当前模型与海区调用对应接口，计算「标准格式」三维声场。 */
 async function loadTlrdData() {
   loadingMessage.value = '校验声源位置与当地水深…'
   await validateSourceDepthAgainstTerrain()
@@ -5844,11 +5966,14 @@ async function loadTlrdData() {
     compassBearingToInternalAzimuth(Number(calcParams.value.azimuth))
   )
   // 声源经纬度使用表单输入的 coordX / coordY
+  // 严格最近邻（默认）与 bellhop_gebco 参考工程一致：不插值、逐节点取最近原始值；
+  // 关闭后恢复 8 倍方位插值，扇区之间平滑过渡。
+  const strictNearest = volumeRenderingControls.strictNearest !== false
   const texture = decodeTlrdPolarVolume(parsed, {
     sourceLon: Number(calcParams.value.coordX),
     sourceLat: Number(calcParams.value.coordY),
-    // 提高方位纹理分辨率，使少量计算扇区之间的过渡和海岸裁剪不再呈大块扇面。
-    angleInterp: TLRD_ANGLE_INTERP,
+    angleInterp: strictNearest ? 1 : TLRD_ANGLE_INTERP,
+    strictNearest,
   })
 
   // 后端 altitudeList 负责海底裁剪；数字地球地形再负责扇区之间的真实陆地/岸线裁剪。
