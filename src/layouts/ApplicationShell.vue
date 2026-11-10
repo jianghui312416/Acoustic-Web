@@ -14,6 +14,8 @@
       @toggle-collapse="$emit('toggle-collapse')"
       @toggle-thumbnail="$emit('toggle-thumbnail')"
       @run="$emit('run')"
+      @run-signal="$emit('run-signal')"
+      @stop-signal="$emit('stop-signal')"
     />
     <main class="application-content">
       <slot />
@@ -42,6 +44,8 @@ defineEmits([
   'toggle-collapse',
   'toggle-thumbnail',
   'run',
+  'run-signal',
+  'stop-signal',
 ])
 </script>
 

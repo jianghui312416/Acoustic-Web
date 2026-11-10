@@ -71,12 +71,14 @@ import {
   moveTerrainBounds,
   panThumbView,
   resizeTerrainBounds,
+  lonLatToWorldPoint,
   viewPointToLonLat,
   zoomThumbView,
 } from '@/utils/terrainPreview.js'
 import { inverseMercatorY } from '@/utils/terrainPreview.js'
 import { loadBathymetry } from '@/utils/bathymetry.js'
 import { bathymetryColor } from '@/utils/terrainScene.js'
+import { aisMonitorState } from '@/modules/ais/aisMonitorStore.js'
 
 const props = defineProps({
   bounds: { type: Object, required: true },
@@ -384,6 +386,55 @@ function renderMap() {
   ctx.fillStyle = 'rgba(7, 38, 72, 0.28)'
   ctx.fillRect(0, 0, width, height)
   drawGraticule(ctx, width, height, view)
+  drawAisPresence(ctx, width, height, view)
+}
+
+function drawAisPresence(ctx, width, height, view) {
+  if (!aisMonitorState.displayEnabled) return
+  const viewWidth = Math.max(1e-9, view.x1 - view.x0)
+  const viewHeight = Math.max(1e-9, view.y1 - view.y0)
+  const occupied = new Set()
+  const dots = []
+  let selectedDot = null
+  const maxDots = 4000
+
+  for (const vessel of aisMonitorState.vessels) {
+    const world = lonLatToWorldPoint(vessel.longitude, vessel.latitude)
+    if (world.x < view.x0 || world.x > view.x1 || world.y < view.y0 || world.y > view.y1) continue
+    const x = (world.x - view.x0) / viewWidth * width
+    const y = (world.y - view.y0) / viewHeight * height
+    if (vessel.mmsi === aisMonitorState.selectedMmsi) {
+      selectedDot = { x, y }
+      continue
+    }
+    if (dots.length >= maxDots) continue
+    const key = `${Math.round(x / 3)}:${Math.round(y / 3)}`
+    if (occupied.has(key)) continue
+    occupied.add(key)
+    dots.push({ x, y })
+  }
+
+  ctx.save()
+  ctx.beginPath()
+  for (const dot of dots) {
+    ctx.moveTo(dot.x + 1.6, dot.y)
+    ctx.arc(dot.x, dot.y, 1.6, 0, Math.PI * 2)
+  }
+  ctx.fillStyle = '#f4fbff'
+  ctx.shadowColor = '#75dcff'
+  ctx.shadowBlur = 2
+  ctx.globalAlpha = 0.86
+  ctx.fill()
+  if (selectedDot) {
+    ctx.beginPath()
+    ctx.arc(selectedDot.x, selectedDot.y, 3.6, 0, Math.PI * 2)
+    ctx.fillStyle = '#ffd04c'
+    ctx.shadowColor = '#ffbd32'
+    ctx.shadowBlur = 8
+    ctx.globalAlpha = 1
+    ctx.fill()
+  }
+  ctx.restore()
 }
 
 function drawGraticule(ctx, width, height, view) {
@@ -437,6 +488,10 @@ onBeforeUnmount(() => {
   clearTimeout(bathyTimer)
   bathyToken++
 })
+
+watch(() => aisMonitorState.vessels, renderMap)
+watch(() => aisMonitorState.selectedMmsi, renderMap)
+watch(() => aisMonitorState.displayEnabled, renderMap)
 </script>
 
 <style scoped>

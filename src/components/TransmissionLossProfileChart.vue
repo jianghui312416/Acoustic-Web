@@ -53,7 +53,7 @@
           <span class="rp-readout-card">
             <span class="rp-readout-line">
               <svg class="rp-readout-pin" viewBox="0 0 24 32" aria-hidden="true">
-                <path d="M12 1C6.5 1 2 5.5 2 11c0 7.5 10 20 10 20s10-12.5 10-20C22 5.5 17.5 1 12 1Zm0 13.5A4.5 4.5 0 1 1 12 5.5a4.5 4.5 0 0 1 0 9Z" fill="currentColor" />
+                <path :d="READOUT_PIN_PATH" fill="currentColor" />
               </svg>
               <b>{{ marker.label }}</b>
               <strong>{{ marker.metricLabel }} {{ marker.valueText }} {{ marker.unit }}</strong>
@@ -72,8 +72,14 @@
           <i aria-hidden="true">↻</i>{{ zoomFactor.toFixed(1) }}X
         </button>
         <div v-if="receiverPlacementEnabled" class="rp-placement-tip">在剖面中单击接收阵中心</div>
+        <span
+          v-if="receiverHandlePos && !receiverPlacementEnabled && !receiverInteractive"
+          class="rp-readout-marker rp-receiver-reference"
+          :style="receiverHandlePos"
+          aria-label="接收水听器位置"
+        ><span class="rp-readout-cross" aria-hidden="true"></span></span>
         <button
-          v-if="receiverHandlePos && !receiverPlacementEnabled"
+          v-if="receiverHandlePos && !receiverPlacementEnabled && receiverInteractive"
           type="button"
           class="rp-receiver-handle"
           :class="{ dragging: receiverDragging }"
@@ -110,6 +116,8 @@ import {
   fmtDist,
   niceStep,
 } from '@/utils/soundProfileModel.js'
+
+const READOUT_PIN_PATH = 'M12 1C6.5 1 2 5.5 2 11c0 7.5 10 20 10 20s10-12.5 10-20C22 5.5 17.5 1 12 1Zm0 13.5A4.5 4.5 0 1 1 12 5.5a4.5 4.5 0 0 1 0 9Z'
 import {
   DEFAULT_BOTTOM_ACOUSTICS,
   DEFAULT_BOTTOM_LABEL,
@@ -149,6 +157,8 @@ const props = defineProps({
   height: { type: String, default: '240px' },
   /** 已标注的接收阵中心：{ rangeM, depthM } */
   receiverMarker: { type: Object, default: null },
+  /** 接收点是否允许在图内拖动；地形垂直切面仅显示水听器标注。 */
+  receiverInteractive: { type: Boolean, default: true },
   /** 海底地形线 + 底质掩膜（Display[1]）显隐；关闭时海底以下填入 dB 最大值颜色 */
   showSeabed: { type: Boolean, default: true },
   /** 海底底质掩膜（Display[2]）显隐；关闭后下方显示 dB 最大值颜色 */
@@ -1244,19 +1254,19 @@ async function renderChart() {
 
   const markerRangeM = Number(props.receiverMarker?.rangeM)
   const markerDepthM = Number(props.receiverMarker?.depthM)
-  if (Number.isFinite(markerRangeM) && Number.isFinite(markerDepthM) && p.dists.length && p.depths.length) {
+  if (props.receiverInteractive && Number.isFinite(markerRangeM) && Number.isFinite(markerDepthM) && p.dists.length && p.depths.length) {
     const distanceIndex = nearestIndex(p.dists, markerRangeM)
     const depthIndex = nearestIndex(p.depths, markerDepthM)
     series.push({
-      name: '接收阵中心',
+      name: '接收水听器',
       type: 'scatter',
       data: [[distanceIndex, depthIndex, markerRangeM, markerDepthM]],
-      symbol: 'pin',
+      symbol: `path://${READOUT_PIN_PATH}`,
       symbolSize: 34,
       symbolOffset: [0, '-35%'],
       z: 8,
       itemStyle: { color: '#20e0ff', borderColor: '#ffffff', borderWidth: 1.2 },
-      label: { show: true, formatter: '接收阵', position: 'right', color: '#d9fbff', fontSize: 10 },
+      label: { show: true, formatter: '接收水听器', position: 'right', color: '#d9fbff', fontSize: 10 },
       emphasis: { scale: 1.08 },
     })
   }
@@ -1287,8 +1297,8 @@ async function renderChart() {
             if (!segment) return ''
             return `${bottomMaskLabel(segment).replaceAll('\n', '<br/>')}<br/>距离 ${fmtNm(segment.startM)} ~ ${fmtNm(segment.endM)}`
           }
-          if (params?.seriesName === '接收阵中心') {
-            return `接收阵中心<br/>距离 ${fmtNm(Number(val?.[2]) || 0)}<br/>深度 ${Number(val?.[3] || 0).toFixed(1)} m`
+          if (params?.seriesName === '接收水听器') {
+            return `接收水听器<br/>距离 ${fmtNm(Number(val?.[2]) || 0)}<br/>深度 ${Number(val?.[3] || 0).toFixed(1)} m`
           }
           return ''
         },
@@ -1745,6 +1755,10 @@ onBeforeUnmount(() => {
 .rp-readout-marker.flip-left .rp-readout-card {
   left: auto;
   right: 20px;
+}
+
+.rp-receiver-reference {
+  z-index: 9;
 }
 
 .rp-readout-line {

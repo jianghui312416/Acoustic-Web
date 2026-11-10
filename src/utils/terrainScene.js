@@ -613,8 +613,37 @@ export function drawTerrainScene(canvas, grid, {
   }
   if (receiver && Number.isFinite(receiver.depthM) && receiver.lon >= b.west && receiver.lon <= b.east && receiver.lat >= b.south && receiver.lat <= b.north) {
     const p = project(receiver.lon, receiver.lat, -receiver.depthM)
-    ctx.fillStyle = '#49e68b'
-    ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill()
+    const nowMs = globalThis.performance?.now?.() ?? Date.now()
+    // 水波纹使用 4.2 s 周期慢速扩散；定位针尖端固定在接收坐标。
+    const pulse = (nowMs % 4200) / 4200
+    ctx.save()
+    for (let ring = 0; ring < 3; ring += 1) {
+      const progress = (pulse + ring / 3) % 1
+      const radius = 5 + progress * 19
+      ctx.strokeStyle = `rgba(73,230,139,${(0.58 * (1 - progress)).toFixed(3)})`
+      ctx.lineWidth = 1.8 - progress * 0.8
+      ctx.beginPath()
+      ctx.ellipse(p.x, p.y, radius, Math.max(2.5, radius * 0.42), 0, 0, Math.PI * 2)
+      ctx.stroke()
+    }
+    const pinCenterY = p.y - 12
+    ctx.fillStyle = '#41e6c0'
+    ctx.strokeStyle = '#e7fffb'
+    ctx.lineWidth = 1
+    ctx.shadowColor = '#49e68b'
+    ctx.shadowBlur = 9
+    ctx.beginPath()
+    ctx.moveTo(p.x, p.y)
+    ctx.bezierCurveTo(p.x - 2, p.y - 4, p.x - 7, p.y - 7, p.x - 7, pinCenterY)
+    ctx.arc(p.x, pinCenterY, 7, Math.PI, 0)
+    ctx.bezierCurveTo(p.x + 7, p.y - 7, p.x + 2, p.y - 4, p.x, p.y)
+    ctx.closePath()
+    ctx.fill()
+    ctx.stroke()
+    ctx.shadowBlur = 0
+    ctx.fillStyle = '#073d49'
+    ctx.beginPath(); ctx.arc(p.x, pinCenterY, 2.4, 0, Math.PI * 2); ctx.fill()
+    ctx.restore()
   }
   const selectedRayProjector = rayProjectorForSource(raySource)
   if (selectedRayProjector) rayProjector = selectedRayProjector

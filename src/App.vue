@@ -14,6 +14,8 @@
     @toggle-collapse="sidebarCollapsed = !sidebarCollapsed"
     @toggle-thumbnail="toggleThumbnail"
     @run="runActiveModule"
+    @run-signal="runSignalTransmission"
+    @stop-signal="stopSignalTransmission"
   >
     <KeepAlive>
       <component
@@ -24,6 +26,8 @@
         :submodule-selection-version="submoduleSelectionVersion"
         :view-mode="viewMode"
         :run-token="runToken"
+        :signal-run-token="signalRunToken"
+        :signal-stop-token="signalStopToken"
         :thumbnail-collapsed="thumbnailCollapsed"
         @update:view-mode="selectViewMode"
         @update:thumbnail-collapsed="thumbnailCollapsed = $event"
@@ -55,6 +59,8 @@ const sidebarCollapsed = ref(false)
 const thumbnailCollapsed = ref(false)
 const viewMode = ref('globe')
 const runToken = ref(0)
+const signalRunToken = ref(0)
+const signalStopToken = ref(0)
 const activeView = computed(
   () => viewRegistry[activeModule.value.viewKey] ?? viewRegistry['acoustic-field']
 )
@@ -97,6 +103,16 @@ function runActiveModule() {
     submoduleSelectionVersion.value += 1
   }
   runToken.value += 1
+}
+
+function runSignalTransmission() {
+  viewMode.value = 'terrain'
+  if (activeModuleId.value !== DEFAULT_MODULE_ID) activeModuleId.value = DEFAULT_MODULE_ID
+  signalRunToken.value += 1
+}
+
+function stopSignalTransmission() {
+  signalStopToken.value += 1
 }
 
 function toggleThumbnail() {

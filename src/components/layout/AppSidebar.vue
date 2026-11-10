@@ -201,6 +201,26 @@
           </div>
         </section>
 
+        <section class="module-group signal-transmission-module" :class="{ active: signalTransmissionOpen }">
+          <button
+            type="button"
+            class="module-entry"
+            :class="{ active: signalTransmissionOpen }"
+            title="信号传输"
+            aria-label="信号传输"
+            @click="signalTransmissionOpen = !signalTransmissionOpen"
+          >
+            <span class="module-icon signal-transmission-icon" aria-hidden="true">
+              <span class="module-icon-emoji">📶</span>
+            </span>
+            <span class="module-label">信号传输</span>
+            <span class="module-chevron" :class="{ open: signalTransmissionOpen }" aria-hidden="true">›</span>
+          </button>
+          <div v-if="signalTransmissionOpen" class="feature-controls signal-transmission-controls" @click.stop>
+            <SignalTransmissionControls @run="$emit('run-signal')" @stop="$emit('stop-signal')" />
+          </div>
+        </section>
+
         <section
           v-for="moduleItem in modules"
           :key="moduleItem.id"
@@ -446,6 +466,26 @@
           <p v-else-if="signalExcessOpen" class="module-mode-hint">进入地形模式并运行声场——声场体成为接收器。</p>
         </section>
 
+        <section class="module-group ais-monitor-module" :class="{ active: aisOpen }">
+          <button
+            ref="aisMenuEntryRef"
+            type="button"
+            class="module-entry"
+            :class="{ active: aisOpen }"
+            title="船舶监测"
+            aria-label="船舶监测"
+            :aria-expanded="aisOpen"
+            @click.stop="toggleAisMonitor"
+          >
+            <span class="module-icon ais-monitor-icon" aria-hidden="true">
+              <span class="module-icon-emoji">🚢</span>
+            </span>
+            <span class="module-label">船舶监测</span>
+            <span class="module-chevron" :class="{ open: aisOpen }" aria-hidden="true">›</span>
+          </button>
+          <AisMonitorSidebar v-if="aisOpen" :view-mode="viewMode" @navigate="$emit('select-view-mode', $event)" />
+        </section>
+
         <section class="module-group weather-noise-module" :class="{ active: weatherNoiseOpen }">
           <button type="button" class="module-entry" :class="{ active: weatherNoiseOpen }" title="预报天气（海面10米风速、降雨、海况）与环境噪声" aria-label="天气与环境噪声" @click="weatherNoiseOpen = !weatherNoiseOpen">
             <span class="module-icon weather-module-icon" aria-hidden="true">🌊</span>
@@ -468,7 +508,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   VOLUME_COLORMAPS,
   acousticSceneState,
@@ -490,6 +530,9 @@ import { deleteAcousticJob } from '@/api/jobWorkspaceApi.js'
 import { jobWorkspace, refreshJobWorkspace, requestCloseJob, requestOpenJob } from '@/modules/acoustic/jobWorkspace.js'
 import WeatherNoiseSidebar from '@/components/weather/WeatherNoiseSidebar.vue'
 import SignalExcessPanel from '@/components/acoustic/SignalExcessPanel.vue'
+import SignalTransmissionControls from '@/components/acoustic/SignalTransmissionControls.vue'
+import AisMonitorSidebar from '@/components/ais/AisMonitorSidebar.vue'
+import { aisMonitorState } from '@/modules/ais/aisMonitorStore.js'
 
 const props = defineProps({
   collapsed: { type: Boolean, default: false },
@@ -501,7 +544,7 @@ const props = defineProps({
   thumbnailCollapsed: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['select-module', 'select-submodule', 'select-view-mode', 'toggle-collapse', 'toggle-thumbnail', 'run'])
+const emit = defineEmits(['select-module', 'select-submodule', 'select-view-mode', 'toggle-collapse', 'toggle-thumbnail', 'run', 'run-signal', 'stop-signal'])
 
 const clockText = ref('')
 const rayTimeMs = ref(0)
@@ -513,6 +556,9 @@ const terrainControlsOpen = ref(false)
 const weatherNoiseOpen = ref(false)
 const sliceControlsOpen = ref(false)
 const signalExcessOpen = ref(false)
+const signalTransmissionOpen = ref(false)
+const aisOpen = ref(false)
+const aisMenuEntryRef = ref(null)
 // 刷新后侧边栏全部收起：不根据当前模块预展开任何下拉。
 const expandedModuleIds = ref(new Set())
 const visualControls = volumeRenderingControls
@@ -520,6 +566,21 @@ const sliceControls = verticalSliceControls
 const simulation = simulationControls
 const simulationModels = SIMULATION_MODELS
 const volumeColormaps = VOLUME_COLORMAPS
+
+function toggleAisMonitor() {
+  const opening = !aisOpen.value
+  aisOpen.value = opening
+  if (!opening) return
+  if (props.collapsed) emit('toggle-collapse')
+  nextTick(() => aisMenuEntryRef.value?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' }))
+}
+
+watch(() => aisMonitorState.panelRequested, (requested) => {
+  if (!requested) return
+  aisOpen.value = true
+  if (props.collapsed) emit('toggle-collapse')
+  aisMonitorState.panelRequested = false
+})
 const simulationTimeText = computed(() => {
   const raw = String(simulation.time || '').replace('T', ' ')
   const match = raw.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})/)
@@ -1113,6 +1174,9 @@ onBeforeUnmount(() => {
 .terrain-module-icon { color: #80cdb9; }
 .slice-module-icon { color: #7f9fe8; }
 .signal-excess-icon { color: #5ad7ea; }
+.signal-transmission-icon { color: #7ec8ff; }
+.ais-monitor-icon { color: #4fdaef; }
+.signal-transmission-controls { padding-top: 5px; }
 .feature-controls { margin: 5px 0 3px; padding: 9px 10px 11px; border: 1px solid #20384c; border-radius: 7px; background: #101f30; box-shadow: inset 0 1px #223b50; }
 .feature-controls, .feature-controls * { box-sizing: border-box; }
 .feature-unavailable { min-height: 45px; display: flex; align-items: center; gap: 8px; padding: 0 11px; color: #a9c5d3; border: 1px solid #29465d; border-radius: 6px; background: #182b40; font-size: 10px; }
@@ -1183,7 +1247,7 @@ onBeforeUnmount(() => {
 .app-sidebar.collapsed { width: 52px; }
 .collapsed .sidebar-scroll { padding: 4px 5px; overflow-x: hidden; }
 .collapsed .run-button span, .collapsed .brand-lockup, .collapsed .module-label, .collapsed .module-chevron,
-.collapsed .module-children, .collapsed .feature-controls, .collapsed .work-list, .collapsed .work-refresh, .collapsed .sidebar-footer, .collapsed .wn-panel { display: none; }
+.collapsed .module-children, .collapsed .feature-controls, .collapsed .work-list, .collapsed .work-refresh, .collapsed .sidebar-footer, .collapsed .wn-panel, .collapsed .ais-monitor { display: none; }
 .collapsed .brand-row { margin: 8px 0; padding: 8px 0; }
 .collapsed .view-switcher { flex-direction: column; width: 100%; gap: 7px; }
 .collapsed .module-entry { grid-template-columns: 1fr; padding: 0; min-height: 36px; }

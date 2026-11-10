@@ -78,6 +78,25 @@ test('vertical loss layers stay mounted and use visibility switching', async () 
   assert.match(source, /textureFilter:\s*'linear'/)
 })
 
+test('terrain vertical slice uses only a crosshair for the receive hydrophone', async () => {
+  const view = await readSource('../src/views/AcousticFieldView.vue')
+  const chart = await readSource('../src/components/TransmissionLossProfileChart.vue')
+  assert.match(view, /:receiver-marker="receiverArrayMarker" :receiver-interactive="false"/)
+  assert.match(chart, /class="rp-readout-marker rp-receiver-reference"/)
+  assert.match(chart, /props\.receiverInteractive && Number\.isFinite\(markerRangeM\)/)
+})
+
+test('terrain receiver marker uses a slow water ripple and locator pin', async () => {
+  const scene = await readSource('../src/utils/terrainScene.js')
+  const terrain = await readSource('../src/components/terrain/TerrainPreviewMode.vue')
+  assert.match(scene, /ctx\.ellipse\(p\.x, p\.y, radius, Math\.max\(2\.5, radius \* 0\.42\)/)
+  assert.match(scene, /const pulse = \(nowMs % 4200\) \/ 4200/)
+  assert.match(scene, /const pinCenterY = p\.y - 12/)
+  assert.match(scene, /ctx\.bezierCurveTo\(p\.x - 2, p\.y - 4/)
+  assert.match(terrain, /function receiverAnimating\(\)/)
+  assert.match(terrain, /weatherOn \|\| receiverOn/)
+})
+
 test('disabled seabed mask replaces the lower region with the maximum dB color', async () => {
   const source = await readSource('../src/components/TransmissionLossProfileChart.vue')
   assert.match(source, /!props\.showSeabed \|\| !props\.showSeabedMask \? createSeabedFillSeries\(p\)/)

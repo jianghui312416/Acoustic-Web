@@ -12,6 +12,12 @@
       @select="clearTerrainReturn"
     />
 
+    <AisGlobalOverlay
+      v-if="viewerReady && aisMonitorState.displayEnabled"
+      :active="viewMode === 'globe' && !terrainLeaving"
+      :viewer="activeViewer"
+    />
+
     <TerrainPreviewMode
       ref="terrainPreviewRef"
       v-show="viewMode === 'terrain'"
@@ -19,6 +25,7 @@
       :dataset="calcParams.dataset" :time="calcParams.time" :running="loading"
       @station-run="runAtTerrainStation" @station-parameters="loadTerrainStationParameters"
       @station-pick="syncSimulationLocationFromTerrain"
+      @receiver-pick="pickHydrophoneLocation"
       @load-terrain="syncSimulationSourceToBoundsCenter"
       :viewer="activeViewer"
       :initial-center="{ lon: calcParams.coordX, lat: calcParams.coordY }"
@@ -27,6 +34,7 @@
       :texture="terrainTexture"
       :source="terrainRunVisible ? terrainSource : null"
       :receiver="receiverArrayMarker"
+      :receiver-placed="hydrophoneReceiverReady"
       :radius-km="terrainRadiusKm"
       :ray-data="profileTerrainRayData"
       :ray-source="selectedProfileLayer ? selectedProfileLayer.source : null"
@@ -71,6 +79,7 @@
       :busy="loading"
       :has-run="stationPositionHasRun"
       @run="runStationPositionCard"
+      @signal-run="runSignalTransmission"
       @close="closeStationPositionCard"
       @settings="toggleTerrainSettings"
     />
@@ -99,6 +108,7 @@
         :bottom-type-segments="profileBottomTypeSegments" :bottom-type-state="profileBottomTypeState" :refresh-token="chartRefreshToken"
         :show-seabed="verticalSliceControls.seafloorLineAndMask" :show-seabed-mask="verticalSliceControls.seafloorMask"
         :readout-enabled="verticalSliceControls.cursorReadout" :click-markers="verticalSliceControls.cursorReadout"
+        :receiver-marker="receiverArrayMarker" :receiver-interactive="false"
         :db-min="profileDbRange.min" :db-max="profileDbRange.max"
         :signal-excess="signalExcessParams"
         height="280px" @update:azimuth-deg="onProfileAzimuthChange" />
@@ -122,10 +132,89 @@
     <AmbientNoiseProbe v-show="viewMode === 'terrain' && noiseProbeState.open && !terrainNoiseMinimized"
       @minimize="minimizeTerrainWindow('noise')" @close="closeTerrainWindow('noise')" />
 
+    <VesselNoisePlaybackPanel
+      :active="receiverPlaybackPanelActive"
+      :simulation-active="vesselPlaybackOpen"
+      :signal-mode="backendSignalPlotMode"
+      signal-channel="receiver"
+      window-role="receiver"
+      :audio-url="signalReceiverAudioUrl"
+      :waveform="signalReceiverWaveform"
+      :arrivals="signalCurrentArrivals"
+      :show-waveform="signalTransmissionControls.showWaveform"
+      :waveform-minimized="vesselWaveformMinimized"
+      :spectrogram="receiverDisplaySpectrogram"
+      :frequency-scale="signalTransmissionControls.spectrogramFrequencyScale"
+      :show-spectrogram="signalTransmissionControls.showTimeFrequency"
+      :spectrogram-minimized="vesselSpectrogramMinimized"
+      :current-time="vesselPlaybackTimeS"
+      :duration="hydrophoneDisplayDurationS"
+      :window-duration="vesselTimeFrequencyWindowS"
+      :pre-roll-duration="vesselPlaybackPreRollS"
+      :playing="vesselPlaybackPlaying"
+      :rate="vesselPlaybackRate"
+      :current-index="vesselPlaybackSampleIndex"
+      :total-samples="vesselRouteSamples.length"
+      :calculated-count="vesselCalculatedFieldCount"
+      :busy="vesselPlaybackBusy"
+      :status-text="vesselPlaybackStatus"
+      :error-text="vesselPlaybackError"
+      :receiver-metrics="signalTransmissionSession.result?.metrics"
+      :vessel="vesselPlaybackVessel"
+      :source-spectrum="vesselPlaybackSpectrum"
+      :propagation-model="vesselPlaybackModel"
+      @update:time="setVesselPlaybackTime"
+      @update:playing="setVesselPlaybackPlaying"
+      @update:rate="vesselPlaybackRate = $event"
+      @minimize-waveform="minimizeTerrainWindow('waveform')"
+      @close-waveform="closeTerrainWindow('waveform')"
+      @minimize-spectrogram="minimizeTerrainWindow('spectrogram')"
+      @close-spectrogram="closeTerrainWindow('spectrogram')"
+      @close="closeVesselPlayback"
+    />
+
+    <VesselNoisePlaybackPanel
+      :active="sourcePlaybackPanelActive"
+      :simulation-active="vesselPlaybackOpen"
+      :signal-mode="true"
+      signal-channel="source"
+      window-role="source"
+      :audio-url="signalSourceAudioUrl"
+      :waveform="signalSourceWaveform"
+      :show-waveform="signalTransmissionControls.showSourceWaveform"
+      :waveform-minimized="sourceWaveformMinimized"
+      :spectrogram="signalSourceSpectrogram"
+      :frequency-scale="signalTransmissionControls.spectrogramFrequencyScale"
+      :show-spectrogram="signalTransmissionControls.showSourceTimeFrequency"
+      :spectrogram-minimized="sourceSpectrogramMinimized"
+      :current-time="vesselPlaybackTimeS"
+      :duration="hydrophoneDisplayDurationS"
+      :window-duration="vesselTimeFrequencyWindowS"
+      :pre-roll-duration="vesselPlaybackPreRollS"
+      :playing="vesselPlaybackPlaying"
+      :rate="vesselPlaybackRate"
+      :current-index="vesselPlaybackSampleIndex"
+      :total-samples="vesselRouteSamples.length"
+      :calculated-count="vesselCalculatedFieldCount"
+      :busy="vesselPlaybackBusy"
+      :status-text="vesselPlaybackStatus"
+      :error-text="vesselPlaybackError"
+      :vessel="vesselPlaybackVessel"
+      :source-spectrum="liveSignalSourceProfile"
+      :propagation-model="vesselPlaybackModel"
+      @update:time="setVesselPlaybackTime"
+      @update:playing="setVesselPlaybackPlaying"
+      @update:rate="vesselPlaybackRate = $event"
+      @minimize-waveform="minimizeTerrainWindow('source-waveform')"
+      @close-waveform="closeTerrainWindow('source-waveform')"
+      @minimize-spectrogram="minimizeTerrainWindow('source-spectrogram')"
+      @close-spectrogram="closeTerrainWindow('source-spectrogram')"
+    />
+
     <nav v-if="viewMode === 'terrain' && minimizedTerrainWindows.length" class="terrain-window-dock" aria-label="已最小化窗口">
       <div v-for="windowId in minimizedTerrainWindows" :key="windowId" class="terrain-window-dock-item">
         <button type="button" class="terrain-window-dock-restore" :title="`恢复${terrainWindowTitle(windowId)}`" @click="restoreTerrainWindow(windowId)">
-          <span>{{ windowId === 'slice' ? '📐' : windowId === 'profile' ? '📈' : '♫' }}</span>
+          <span>{{ windowId === 'slice' ? '📐' : windowId === 'profile' ? '📈' : windowId.includes('waveform') ? '〰' : windowId.includes('spectrogram') ? '▥' : '♫' }}</span>
           <b>{{ terrainWindowTitle(windowId) }}</b>
           <i aria-hidden="true">▴</i>
         </button>
@@ -209,6 +298,11 @@
             <label><input v-model="calcParams.regionType" value="normal" type="radio" /> 非冰区</label>
             <label><input v-model="calcParams.regionType" value="ice" type="radio" /> 冰区</label>
           </div>
+        </div>
+
+        <div class="signal-transmission-card">
+          <div class="signal-transmission-title">信号传输</div>
+          <SignalTransmissionControls @run="runSignalTransmission" @stop="stopSignalTransmission" />
         </div>
 
         <div class="section-caption"><span>声源与接收</span></div>
@@ -1258,11 +1352,55 @@ import { profileAxisGeometry } from '@/sdk/ncFieldModel.js'
 import EnvironmentNoiseResult from '@/components/EnvironmentNoiseResult.vue'
 import TerrainPreviewMode from '@/components/terrain/TerrainPreviewMode.vue'
 import TerrainGlobeSelector from '@/components/terrain/TerrainGlobeSelector.vue'
+import AisGlobalOverlay from '@/components/ais/AisGlobalOverlay.vue'
 import AcousticRunPanel from '@/components/terrain/AcousticRunPanel.vue'
 import StationPositionCard from '@/components/terrain/StationPositionCard.vue'
 import SoundSpeedProfile from '@/components/terrain/SoundSpeedProfile.vue'
 import AmbientNoiseProbe from '@/components/terrain/AmbientNoiseProbe.vue'
-import { closeNoiseProbe, forecastNoiseSummary, noiseProbeState, openNoiseProbe, setWeatherNoisePoint } from '@/modules/weather/weatherNoiseStore.js'
+import SignalTransmissionControls from '@/components/acoustic/SignalTransmissionControls.vue'
+import VesselNoisePlaybackPanel from '@/components/acoustic/VesselNoisePlaybackPanel.vue'
+import { normalizeSignalTransmissionControls, signalTransmissionControls } from '@/modules/acoustic/signalTransmissionControls.js'
+import {
+  runSignalTransmissionSession,
+  signalTransmissionSession,
+  stopSignalTransmissionSession,
+} from '@/modules/acoustic/signalTransmissionSession.js'
+import {
+  backendWaveformSeries,
+  backendSpectrogramMatrix,
+  rollingBackendSpectrogramMatrix,
+  rollingBackendWaveformSeries,
+} from '@/modules/acoustic/signalTransmissionNoise.js'
+import {
+  clearTrackPoints,
+  resetTrackPoints,
+  trackPointDrawing,
+  trackPointState,
+} from '@/modules/acoustic/trackPointState.js'
+import {
+  closeNoiseProbe,
+  currentWeatherNoiseCurves,
+  forecastNoiseSummary,
+  noiseProbeState,
+  openNoiseProbe,
+  setWeatherNoisePoint,
+  weatherNoiseState,
+} from '@/modules/weather/weatherNoiseStore.js'
+import { aisMonitorState, selectedAisVessel } from '@/modules/ais/aisMonitorStore.js'
+import { estimateJomopansEchoSpectrum } from '@/utils/jomopansEcho.js'
+import {
+  buildVesselReceiveSpectrogram,
+  buildSelectedVesselRoute,
+  distancePerMinuteM,
+  greatCircleDistanceM,
+  initialBearingDeg,
+  resampleTrackByDistance,
+  resolveVesselSimulationProfile,
+  routeDurationSeconds,
+  routeSampleIndexAtTime,
+  sampleReceiverTlDb,
+  SELECTED_VESSEL_MAX_RANGE_NM,
+} from '@/utils/vesselNoiseSimulation.js'
 import { signalExcessState } from '@/modules/acoustic/signalExcessState.js'
 import { createSignalExcessField } from '@/utils/signalExcess.js'
 import { normalizeTerrainBounds } from '@/utils/terrainPreview.js'
@@ -1301,6 +1439,7 @@ import {
 // 声场计算接口：提交参数后直接调用后端 portal 同步计算（不再读取静态 JSON）
 import {
   analyse3dTLRDByModel,
+  analyseChannelImpulseResponse,
   analyse2dTLRDByModel,
   analyse2dRTRD,
   analyseIce2dRTRD,
@@ -1323,6 +1462,8 @@ const props = defineProps({
   submoduleSelectionVersion: { type: Number, default: 0 },
   viewMode: { type: String, default: 'globe' },
   runToken: { type: Number, default: 0 },
+  signalRunToken: { type: Number, default: 0 },
+  signalStopToken: { type: Number, default: 0 },
   thumbnailCollapsed: { type: Boolean, default: false },
 })
 
@@ -1364,6 +1505,10 @@ const terrainLossChartRef = ref(null)
 const terrainProfileOpen = ref(false)
 const terrainSliceMinimized = ref(false)
 const terrainProfileMinimized = ref(false)
+const vesselWaveformMinimized = ref(false)
+const vesselSpectrogramMinimized = ref(false)
+const sourceWaveformMinimized = ref(false)
+const sourceSpectrogramMinimized = ref(false)
 /** 按最小化发生的先后顺序排列；恢复后移出，再次最小化时追加到队尾。 */
 const terrainWindowDockOrder = ref([])
 const terrainNoiseMinimized = ref(false)
@@ -1788,11 +1933,19 @@ const terrainSliceAngleLabel = computed(() => {
 const minimizedTerrainWindows = computed(() => terrainWindowDockOrder.value.filter((id) => {
   if (id === 'slice') return terrainSliceOpen.value && terrainSliceMinimized.value
   if (id === 'profile') return terrainProfileOpen.value && terrainProfileMinimized.value
+  if (id === 'waveform') return signalTransmissionControls.showWaveform && vesselWaveformMinimized.value
+  if (id === 'spectrogram') return signalTransmissionControls.showTimeFrequency && vesselSpectrogramMinimized.value
+  if (id === 'source-waveform') return signalTransmissionControls.showSourceWaveform && sourceWaveformMinimized.value
+  if (id === 'source-spectrogram') return signalTransmissionControls.showSourceTimeFrequency && sourceSpectrogramMinimized.value
   return noiseProbeState.open && terrainNoiseMinimized.value
 }))
 function terrainWindowTitle(id) {
   if (id === 'slice') return `垂直切面 · ${terrainSliceAngleLabel.value}`
   if (id === 'profile') return '声速剖面'
+  if (id === 'waveform') return '水听器时域波形'
+  if (id === 'spectrogram') return '水听器时频图'
+  if (id === 'source-waveform') return '航迹声源时域波形'
+  if (id === 'source-spectrogram') return '航迹声源时频图'
   return '环境噪声'
 }
 function removeTerrainWindowFromDock(id) {
@@ -1805,6 +1958,14 @@ function minimizeTerrainWindow(id) {
   } else if (id === 'profile') {
     terrainProfileOpen.value = true
     terrainProfileMinimized.value = true
+  } else if (id === 'waveform') {
+    vesselWaveformMinimized.value = true
+  } else if (id === 'spectrogram') {
+    vesselSpectrogramMinimized.value = true
+  } else if (id === 'source-waveform') {
+    sourceWaveformMinimized.value = true
+  } else if (id === 'source-spectrogram') {
+    sourceSpectrogramMinimized.value = true
   } else {
     terrainNoiseMinimized.value = true
   }
@@ -1817,6 +1978,14 @@ function restoreTerrainWindow(id) {
     nextTick(() => terrainLossChartRef.value?.refreshLayout?.())
   } else if (id === 'profile') {
     terrainProfileMinimized.value = false
+  } else if (id === 'waveform') {
+    vesselWaveformMinimized.value = false
+  } else if (id === 'spectrogram') {
+    vesselSpectrogramMinimized.value = false
+  } else if (id === 'source-waveform') {
+    sourceWaveformMinimized.value = false
+  } else if (id === 'source-spectrogram') {
+    sourceSpectrogramMinimized.value = false
   } else {
     terrainNoiseMinimized.value = false
   }
@@ -1832,6 +2001,18 @@ function closeTerrainWindow(id) {
     terrainProfileOpen.value = false
     terrainProfileMinimized.value = false
     if (!terrainSliceOpen.value) selectedProfileLayerId.value = ''
+  } else if (id === 'waveform') {
+    signalTransmissionControls.showWaveform = false
+    vesselWaveformMinimized.value = false
+  } else if (id === 'spectrogram') {
+    signalTransmissionControls.showTimeFrequency = false
+    vesselSpectrogramMinimized.value = false
+  } else if (id === 'source-waveform') {
+    signalTransmissionControls.showSourceWaveform = false
+    sourceWaveformMinimized.value = false
+  } else if (id === 'source-spectrogram') {
+    signalTransmissionControls.showSourceTimeFrequency = false
+    sourceSpectrogramMinimized.value = false
   } else {
     closeNoiseProbe()
     terrainNoiseMinimized.value = false
@@ -2259,6 +2440,211 @@ const resultPanelOpen = ref(false)
 const activeMapPick = ref('')
 const receiverPlacementEnabled = ref(false)
 const receiverArrayMarker = ref(null)
+const hydrophonePlaced = ref(false)
+const hydrophoneReceiverReady = computed(() => {
+  const receiver = receiverArrayMarker.value
+  const lon = Number(receiver?.lon)
+  const lat = Number(receiver?.lat)
+  return Number.isFinite(lon) && Number.isFinite(lat)
+    && lon >= -180 && lon <= 180
+    && lat >= -90 && lat <= 90
+})
+const vesselPlaybackOpen = ref(false)
+const vesselPlaybackPlaying = ref(false)
+const vesselPlaybackRate = ref(1)
+const vesselPlaybackTimeS = ref(0)
+const vesselPlaybackDurationS = ref(30)
+const vesselRouteDurationS = ref(1)
+const vesselPlaybackPreRollS = ref(30)
+const vesselTimeFrequencyWindowS = ref(30)
+const vesselSpectrogramWindowStartS = ref(0)
+const vesselSpectrogramSeed = ref(20261106)
+const vesselPlaybackSampleIndex = ref(0)
+const vesselAppliedSampleIndex = ref(0)
+const vesselPlaybackBusy = ref(false)
+const vesselPlaybackStatus = ref('')
+const vesselPlaybackError = ref('')
+const vesselPlaybackVessel = shallowRef(null)
+const vesselPlaybackSpectrum = shallowRef(null)
+const vesselPlaybackModel = ref('bellhop')
+const routePlaybackKind = ref('preview')
+const vesselRouteSamples = ref([])
+const vesselReceiverTlDb = ref([])
+const vesselReceiverDistancesM = ref([])
+const vesselFieldCache = new Map()
+const vesselFieldRequests = new Map()
+const signalCurrentArrivals = shallowRef(null)
+const REALTIME_PREVIEW_DURATION_S = 24 * 60 * 60
+let vesselPlaybackGeneration = 0
+let vesselPlaybackRaf = 0
+let vesselPlaybackLastFrameAt = 0
+const signalPlaybackMode = computed(() => Boolean(
+  routePlaybackKind.value === 'signal'
+))
+const backendSignalPlotMode = computed(() => routePlaybackKind.value !== 'vessel')
+const selectedVesselRoute = computed(() => buildSelectedVesselRoute(
+  selectedAisVessel.value,
+  SELECTED_VESSEL_MAX_RANGE_NM,
+))
+const configuredSignalRoutePoints = computed(() => (
+  selectedAisVessel.value ? selectedVesselRoute.value : trackPointState.points
+))
+const configuredSignalRouteReady = computed(() => Boolean(
+  selectedAisVessel.value
+    ? selectedVesselRoute.value.length >= 2
+    : trackPointState.points.length > 0 && trackPointState.finished
+))
+const configuredSignalSpeedKn = computed(() => {
+  const speed = Number(selectedAisVessel.value?.sog_kn ?? signalTransmissionControls.vesselSpeedKn)
+  return Number.isFinite(speed) && speed > 0 ? speed : 0
+})
+const liveSignalSourceProfile = computed(() => {
+  if (selectedAisVessel.value) return estimateJomopansEchoSpectrum(selectedAisVessel.value)
+  const frequencies = [...signalTransmissionControls.frequenciesHz]
+    .map(Number)
+    .filter(value => Number.isFinite(value) && value > 0)
+    .sort((a, b) => a - b)
+  const safeFrequencies = frequencies.length ? frequencies : [84, 126]
+  const sourceLevelDb = Number(signalTransmissionControls.sourceLevelDb) || 105
+  const perFrequencyLevelDb = sourceLevelDb - 10 * Math.log10(Math.max(1, safeFrequencies.length))
+  return {
+    vesselClassLabel: '航迹信号源',
+    sourceDepthM: Math.max(0.01, Number(signalTransmissionControls.navigationDepthM) || 1),
+    broadbandSourceLevelDb: sourceLevelDb,
+    narrowband: true,
+    frequenciesHz: safeFrequencies,
+    bandLevelsDb: safeFrequencies.map(() => perFrequencyLevelDb),
+    spectralDensityDb: safeFrequencies.map(() => perFrequencyLevelDb),
+  }
+})
+const previewSignalRouteSamples = computed(() => {
+  if (!configuredSignalRouteReady.value || !(configuredSignalSpeedKn.value > 0)) return []
+  return resampleTrackByDistance(
+    configuredSignalRoutePoints.value,
+    distancePerMinuteM(configuredSignalSpeedKn.value),
+  )
+})
+const activeSignalSamples = computed(() => (
+  signalPlaybackMode.value && vesselRouteSamples.value.length
+    ? vesselRouteSamples.value
+    : previewSignalRouteSamples.value
+))
+const previewSignalRouteDurationS = computed(() => {
+  if (previewSignalRouteSamples.value.length < 2) return REALTIME_PREVIEW_DURATION_S
+  return Math.max(1, routeDurationSeconds(
+    previewSignalRouteSamples.value,
+    configuredSignalSpeedKn.value,
+  ))
+})
+const spectrogramFrequencyBounds = computed(() => ({
+  minimumHz: 20,
+  maximumHz: Math.max(20, Number(signalTransmissionControls.sampleRate) / 2 || 24000),
+}))
+// 完整传输链路的四个图只消费后端结果；前端负责格式转换和绘制。
+const signalSourceSpectrogramData = computed(() => rollingBackendSpectrogramMatrix(
+  backendSpectrogramMatrix(signalTransmissionSession.result?.spectrograms?.source_pressure),
+  vesselPlaybackTimeS.value,
+  vesselTimeFrequencyWindowS.value,
+))
+const adcCalibratedReceiverSpectrogramData = computed(() => rollingBackendSpectrogramMatrix(
+  backendSpectrogramMatrix(signalTransmissionSession.result?.spectrograms?.adc_calibrated_pressure),
+  vesselPlaybackTimeS.value,
+  vesselTimeFrequencyWindowS.value,
+))
+const signalSourceWaveform = computed(() => rollingBackendWaveformSeries(
+  backendWaveformSeries(signalTransmissionSession.result?.waveforms?.source_pressure_pa),
+  vesselPlaybackTimeS.value,
+  vesselTimeFrequencyWindowS.value,
+))
+const signalReceiverWaveform = computed(() => rollingBackendWaveformSeries(
+  backendWaveformSeries(signalTransmissionSession.result?.waveforms?.adc_calibrated_pressure_pa),
+  vesselPlaybackTimeS.value,
+  vesselTimeFrequencyWindowS.value,
+))
+const signalSourceAudioUrl = computed(() => '')
+const signalReceiverAudioUrl = computed(() => '')
+const receiverPlaybackPanelActive = computed(() => (
+  props.viewMode === 'terrain' && hydrophoneReceiverReady.value && (
+    vesselPlaybackOpen.value
+    || signalTransmissionControls.showTimeFrequency
+    || signalTransmissionControls.showWaveform
+  )
+))
+const sourcePlaybackPanelActive = computed(() => (
+  props.viewMode === 'terrain' && configuredSignalRouteReady.value && (
+    signalTransmissionControls.showSourceTimeFrequency
+    || signalTransmissionControls.showSourceWaveform
+  )
+))
+const hydrophonePlaybackPanelActive = computed(() => (
+  receiverPlaybackPanelActive.value || sourcePlaybackPanelActive.value || vesselPlaybackOpen.value
+))
+const hydrophoneDisplayDurationS = computed(() => (
+  vesselPlaybackOpen.value
+    ? vesselPlaybackDurationS.value
+    : sourcePlaybackPanelActive.value
+      ? previewSignalRouteDurationS.value
+      : REALTIME_PREVIEW_DURATION_S
+))
+const vesselCalculatedFieldCount = computed(() => vesselReceiverTlDb.value.filter(value => value != null && Number.isFinite(Number(value))).length)
+const vesselPlaybackReferenceFrequencyHz = computed(() => {
+  const frequencies = vesselPlaybackSpectrum.value?.frequenciesHz || []
+  const levels = vesselPlaybackSpectrum.value?.bandLevelsDb || []
+  if (!frequencies.length || frequencies.length !== levels.length) return 100
+  let bestIndex = 0
+  levels.forEach((level, index) => {
+    if (Number(level) > Number(levels[bestIndex])) bestIndex = index
+  })
+  return Math.max(20, Math.min(1000, Number(frequencies[bestIndex]) || 100))
+})
+const vesselPlaybackSpectrogramData = computed(() => buildVesselReceiveSpectrogram({
+  samples: vesselRouteSamples.value,
+  durationS: vesselPlaybackDurationS.value,
+  windowStartS: vesselSpectrogramWindowStartS.value,
+  windowDurationS: vesselTimeFrequencyWindowS.value,
+  routeDurationS: vesselRouteDurationS.value,
+  preRollS: vesselPlaybackPreRollS.value,
+  sourceSpectrum: vesselPlaybackSpectrum.value,
+  receiverTlDb: vesselReceiverTlDb.value,
+  receiverDistancesM: vesselReceiverDistancesM.value,
+  referenceFrequencyHz: vesselPlaybackReferenceFrequencyHz.value,
+  backgroundFrequencyHz: weatherNoiseState.result?.frequency_hz || [],
+  backgroundSpectrumDb: currentWeatherNoiseCurves.value.total || [],
+  minimumFrequencyHz: spectrogramFrequencyBounds.value.minimumHz,
+  maximumFrequencyHz: spectrogramFrequencyBounds.value.maximumHz,
+  timeCount: 301,
+  frequencyCount: 112,
+  textureSeed: vesselSpectrogramSeed.value,
+}))
+const receiverSpectrogramData = computed(() => (
+  routePlaybackKind.value === 'vessel' && vesselPlaybackOpen.value
+    ? vesselPlaybackSpectrogramData.value
+    : adcCalibratedReceiverSpectrogramData.value
+))
+// 声源/接收两个时频图（含运行前的实时预览）共用同一色标范围。
+const signalSpectrogramColorRange = computed(() => {
+  let minDb = Infinity
+  let maxDb = -Infinity
+  for (const matrix of [signalSourceSpectrogramData.value, receiverSpectrogramData.value]) {
+    if (!matrix?.data?.length) continue
+    const minimum = Number(matrix?.minDb)
+    const maximum = Number(matrix?.maxDb)
+    if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || maximum <= minimum) continue
+    minDb = Math.min(minDb, minimum)
+    maxDb = Math.max(maxDb, maximum)
+  }
+  return maxDb > minDb ? { minDb, maxDb } : null
+})
+function withSpectrogramColorRange(matrix, range) {
+  if (!matrix || !range) return matrix
+  return { ...matrix, minDb: range.minDb, maxDb: range.maxDb }
+}
+const signalSourceSpectrogram = computed(() => (
+  withSpectrogramColorRange(signalSourceSpectrogramData.value, signalSpectrogramColorRange.value)
+))
+const receiverDisplaySpectrogram = computed(() => (
+  withSpectrogramColorRange(receiverSpectrogramData.value, signalSpectrogramColorRange.value)
+))
 /** KeepAlive 恢复后让结果图重新布局/绘制（嵌套图表不一定收到 activated 钩子）。 */
 const chartRefreshToken = ref(0)
 
@@ -3129,6 +3515,20 @@ function portalUnitResponse(json) {
   return json?.Data?.Units?.[0]?.Response
 }
 
+function arrivalTransmissionLossDb(arrivals) {
+  const paths = Array.isArray(arrivals?.impulse_response) ? arrivals.impulse_response : []
+  const power = paths.reduce((sum, path) => {
+    const real = Number(path?.gain_real)
+    const imaginary = Number(path?.gain_imag)
+    const amplitude = Number(path?.amplitude)
+    const squared = Number.isFinite(real) && Number.isFinite(imaginary)
+      ? real * real + imaginary * imaginary
+      : Number.isFinite(amplitude) ? amplitude * amplitude : 0
+    return sum + Math.max(0, squared)
+  }, 0)
+  return power > 0 ? -10 * Math.log10(power) : null
+}
+
 async function loadDatasetTimes(target = calcParams) {
   try {
     const response = portalUnitResponse(await getDatasetTimeList(target.value.dataset)) ?? {}
@@ -3517,8 +3917,36 @@ watch(
   { immediate: true }
 )
 
+let pendingSignalRun = false
+function executeSignalRunRequest() {
+  if (!pendingSignalRun || !viewerReady.value) return
+  pendingSignalRun = false
+  nextTick(() => runSignalTransmission())
+}
+
+watch(
+  () => props.signalRunToken,
+  (token, previous) => {
+    if (!token || token === previous) return
+    pendingSignalRun = true
+    executeSignalRunRequest()
+  },
+  { immediate: true },
+)
+
+watch(
+  () => props.signalStopToken,
+  (token, previous) => {
+    if (!token || token === previous) return
+    stopSignalTransmission()
+  }
+)
+
 watch(viewerReady, (ready) => {
-  if (ready) executeRunRequest()
+  if (ready) {
+    executeRunRequest()
+    executeSignalRunRequest()
+  }
 })
 
 // 从地形预览返回全球视图时恢复画布尺寸并触发一次重绘。
@@ -3755,8 +4183,12 @@ function refreshPickMarkers() {
   if (!viewer?.features) return
   // 环境噪声只标注接收点，不显示声源点。
   if (isNoiseMode.value) {
-    const showNoise =
-      parameterPanelOpen.value || resultPanelOpen.value || activeMapPick.value === 'receiver'
+    const showNoise = hydrophonePlaced.value
+      ? !signalTransmissionControls.showReceiver
+      : (
+        signalTransmissionControls.showReceiver || parameterPanelOpen.value ||
+        resultPanelOpen.value || activeMapPick.value === 'receiver'
+      )
     const nx = Number(noiseParams.value.receiverX)
     const ny = Number(noiseParams.value.receiverY)
     removePickMarker('source')
@@ -3779,13 +4211,827 @@ function refreshPickMarkers() {
 
   const rx = Number(calcParams.value.receiverX)
   const ry = Number(calcParams.value.receiverY)
-  if (show && analysisMode.value === '2d' && Number.isFinite(rx) && Number.isFinite(ry)) {
+  const showReceiver = !has2dResult && (
+    hydrophonePlaced.value
+      ? !signalTransmissionControls.showReceiver
+      : (signalTransmissionControls.showReceiver || (show && analysisMode.value === '2d'))
+  )
+  if (showReceiver && Number.isFinite(rx) && Number.isFinite(ry)) {
     upsertPickMarker('receiver', rx, ry, '#49e68b')
   } else {
     removePickMarker('receiver')
   }
   viewer.scene?.requestRender?.()
 }
+
+function ensureDefaultHydrophoneMarker() {
+  if (hydrophonePlaced.value || receiverArrayMarker.value) return
+  const source = isNoiseMode.value ? noiseParams.value : calcParams.value
+  const lon = Number(source.receiverX)
+  const lat = Number(source.receiverY)
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return
+  const depth = Number(noiseParams.value.depth)
+  receiverArrayMarker.value = {
+    lon,
+    lat,
+    depthM: Number.isFinite(depth) ? Math.max(0, depth) : 30,
+    rangeM: Math.max(0, Number(routeDistanceNm.value) * 1852),
+    bearingDeg: Number(routeBearingDeg.value) || 0,
+  }
+}
+
+function applyHydrophoneLocation(lon, lat) {  const nextLon = Number(lon)
+  const nextLat = Number(lat)
+  if (!Number.isFinite(nextLon) || !Number.isFinite(nextLat)) return false
+  if (isNoiseMode.value) {
+    noiseParams.value.receiverX = Number(nextLon.toFixed(4))
+    noiseParams.value.receiverY = Number(nextLat.toFixed(4))
+    invalidateEnvironmentNoiseLink()
+  } else {
+    calcParams.value.receiverX = Number(nextLon.toFixed(4))
+    calcParams.value.receiverY = Number(nextLat.toFixed(4))
+  }
+  const depth = Number(noiseParams.value.depth)
+  receiverArrayMarker.value = {
+    lon: Number(nextLon.toFixed(6)),
+    lat: Number(nextLat.toFixed(6)),
+    depthM: Number.isFinite(depth) ? Math.max(0, depth) : 30,
+    rangeM: Math.max(0, Number(routeDistanceNm.value) * 1852),
+    bearingDeg: Number(routeBearingDeg.value) || 0,
+  }
+  hydrophonePlaced.value = true
+  refreshPickMarkers()
+  viewer?.scene?.requestRender?.()
+  return true
+}
+
+function pickHydrophoneLocation(point) {
+  if (!signalTransmissionControls.showReceiver || !point) return
+  if (Number(point.elevation) >= 0) return
+  if (applyHydrophoneLocation(point.lon ?? point.longitude, point.lat ?? point.latitude)) {
+    signalTransmissionControls.showReceiver = false
+  }
+}
+
+/* ── 航迹点选择：全球视图在海洋区域单击落点，双击结束 ── */
+const TRACK_POINT_ALTITUDE_M = 320
+let trackPointFeatures = []
+
+function clearTrackPointFeatures() {
+  if (viewer?.features) {
+    for (const feature of trackPointFeatures) {
+      try { viewer.features.remove(feature) } catch {}
+    }
+  }
+  trackPointFeatures = []
+}
+
+function addTrackPointFeature(feature) {
+  if (!feature || !viewer?.features) return
+  try { trackPointFeatures.push(feature.addTo(viewer.features) || feature) } catch {}
+}
+
+function renderTrackPointFeatures() {
+  if (!viewer?.features) return
+  clearTrackPointFeatures()
+  const points = configuredSignalRoutePoints.value
+  if (!points.length) {
+    viewer.scene?.requestRender?.()
+    return
+  }
+  const color = Cesium.Color.fromCssColorString('#38d6ff')
+  for (const point of points) {
+    addTrackPointFeature(new Cesium.Point(
+      [point.lon, point.lat, TRACK_POINT_ALTITUDE_M],
+      {
+        color,
+        pixelSize: 12,
+        outlineColor: Cesium.Color.WHITE,
+        outlineWidth: 2,
+      }
+    ))
+  }
+  if (points.length >= 2) {
+    addTrackPointFeature(new Cesium.Polyline(
+      points.map((point) => [point.lon, point.lat, TRACK_POINT_ALTITUDE_M]),
+      {
+        colors: [color.withAlpha(0.92)],
+        width: 3,
+        followSurface: false,
+        onTerrain: false,
+      }
+    ))
+  }
+  viewer.scene?.requestRender?.()
+}
+
+watch(
+  () => signalTransmissionControls.selectTrackPoints,
+  (enabled) => {
+    if (enabled && !selectedAisVessel.value) resetTrackPoints()
+    else if (!trackPointState.finished) clearTrackPoints()
+    renderTrackPointFeatures()
+  }
+)
+
+watch(
+  () => [selectedAisVessel.value?.mmsi, selectedAisVessel.value?.longitude, selectedAisVessel.value?.latitude,
+    selectedAisVessel.value?.cog_deg, selectedAisVessel.value?.heading_deg],
+  () => {
+    signalTransmissionControls.selectTrackPoints = false
+    renderTrackPointFeatures()
+    syncHydrophonePreviewPlayback()
+  },
+)
+
+watch(
+  () => signalTransmissionControls.showTimeFrequency,
+  (visible) => {
+    if (!visible) {
+      vesselSpectrogramMinimized.value = false
+      removeTerrainWindowFromDock('spectrogram')
+    }
+    syncHydrophonePreviewPlayback()
+  },
+)
+
+watch(
+  () => signalTransmissionControls.showWaveform,
+  (visible) => {
+    if (!visible) {
+      vesselWaveformMinimized.value = false
+      removeTerrainWindowFromDock('waveform')
+    }
+    syncHydrophonePreviewPlayback()
+  },
+)
+
+watch(
+  () => signalTransmissionControls.showSourceTimeFrequency,
+  (visible) => {
+    if (visible) {
+      sourceSpectrogramMinimized.value = false
+      removeTerrainWindowFromDock('source-spectrogram')
+    } else {
+      sourceSpectrogramMinimized.value = false
+      removeTerrainWindowFromDock('source-spectrogram')
+    }
+    syncHydrophonePreviewPlayback()
+  },
+)
+
+watch(
+  () => signalTransmissionControls.showSourceWaveform,
+  (visible) => {
+    if (visible) {
+      sourceWaveformMinimized.value = false
+      removeTerrainWindowFromDock('source-waveform')
+    } else {
+      sourceWaveformMinimized.value = false
+      removeTerrainWindowFromDock('source-waveform')
+    }
+    syncHydrophonePreviewPlayback()
+  },
+)
+
+watch(
+  () => signalTransmissionControls.simulationDurationS,
+  () => syncHydrophonePreviewPlayback(),
+)
+
+watch(hydrophoneReceiverReady, (ready) => {
+  signalTransmissionControls.receiverReady = Boolean(ready)
+  if (!ready) {
+    signalTransmissionControls.showTimeFrequency = false
+    signalTransmissionControls.showWaveform = false
+  }
+  syncHydrophonePreviewPlayback()
+}, { immediate: true })
+
+watch(() => trackPointState.revision, () => {
+  renderTrackPointFeatures()
+  if (!configuredSignalRouteReady.value) {
+    signalTransmissionControls.showSourceTimeFrequency = false
+    signalTransmissionControls.showSourceWaveform = false
+  }
+  syncHydrophonePreviewPlayback()
+})
+
+function vesselSimulationIntent() {
+  return Boolean(configuredSignalRoutePoints.value.length)
+}
+
+async function runSignalTransmission() {
+  normalizeSignalTransmissionControls(signalTransmissionControls)
+  if (!configuredSignalRouteReady.value) {
+    if (selectedAisVessel.value) {
+      errorText.value = '所选 AIS 船舶缺少有效位置或航向，无法生成 5 海里自动航迹。'
+      return false
+    }
+    errorText.value = '请在地形区域单击至少一个发射航迹点，并双击结束选择。双击位置不会计入航迹。'
+    return false
+  }
+  if (!hydrophoneReceiverReady.value) {
+    errorText.value = '请先打开“接收位置”，在海域选择水听器位置后再运行完整传输链路。'
+    return false
+  }
+  const receiver = receiverArrayMarker.value
+  const routePoints = configuredSignalRoutePoints.value
+  const sourceLon = Number(routePoints[0]?.lon)
+  const sourceLat = Number(routePoints[0]?.lat)
+  const receiverLon = Number(receiver.lon)
+  const receiverLat = Number(receiver.lat)
+  if (![sourceLon, sourceLat, receiverLon, receiverLat].every(Number.isFinite)) {
+    errorText.value = '发射位置或水听器位置无效。'
+    return false
+  }
+  const sourceProfile = liveSignalSourceProfile.value
+  const sourceDepth = Math.max(0.01, Number(sourceProfile.sourceDepthM) || Number(signalTransmissionControls.navigationDepthM) || Number(calcParams.value.srcDepth) || 1)
+  const speedKn = configuredSignalSpeedKn.value
+  if (!(speedKn > 0)) {
+    errorText.value = selectedAisVessel.value
+      ? '所选 AIS 船舶缺少有效航速，无法按原航速生成航迹。'
+      : '请填写有效的手动船舶航速。'
+    return false
+  }
+  const minuteStations = resampleTrackByDistance(
+    routePoints,
+    distancePerMinuteM(speedKn),
+  )
+  const sourceRoute = minuteStations.map((point) => ({
+    lon: Number(point.lon),
+    lat: Number(point.lat),
+    depth_m: sourceDepth,
+  }))
+  const receiverDepth = Math.max(0.01, Number(signalTransmissionControls.receiverDepthM) || Number(receiver.depthM) || 30)
+  const waterDepth = Math.max(1000, sourceDepth + 100, receiverDepth + 100)
+  const depression = Math.min(90, Math.abs(Number(calcParams.value.grazingAngleMin) || 45))
+  const elevation = Math.min(90, Math.abs(Number(calcParams.value.grazingAngleMax) || 45))
+  const requestId = `signal-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+  errorText.value = ''
+  parameterPanelOpen.value = false
+  receiverArrayMarker.value = { ...receiver, depthM: receiverDepth }
+  const sourceBands = [...sourceProfile.frequenciesHz]
+    .map((frequency, index) => ({
+      frequency: Number(frequency),
+      level: Number(sourceProfile.bandLevelsDb?.[index]),
+    }))
+    .filter(item => Number.isFinite(item.frequency) && item.frequency > 0
+      && item.frequency < signalTransmissionControls.sampleRate / 2
+      && Number.isFinite(item.level))
+  runSignalTransmissionSession({
+    request_id: requestId,
+    frequencies_hz: sourceBands.map(item => item.frequency),
+    source_band_levels_db: sourceBands.map(item => item.level),
+    source_level_db: sourceProfile.broadbandSourceLevelDb,
+    sample_rate: signalTransmissionControls.sampleRate,
+    // 后端只生成一个有界分析块；完整航迹时长由前端实时站位时间轴管理。
+    duration_s: Math.min(
+      signalTransmissionControls.simulationDurationS,
+      2400000 / signalTransmissionControls.sampleRate,
+    ),
+    source_lon: sourceLon,
+    source_lat: sourceLat,
+    source_depth_m: sourceDepth,
+    // WebSocket 只生成首站有界分析块；其余分钟站位由实时调度器逐站计算，避免启动前整线等待。
+    source_route: sourceRoute.slice(0, 1),
+    receiver_lon: receiverLon,
+    receiver_lat: receiverLat,
+    receiver_depth_m: receiverDepth,
+    water_depth_m: waterDepth,
+    depression_angle_deg: depression,
+    elevation_angle_deg: elevation,
+    // 到达结构固定使用 Bellhop；三维声场模型由 simulationControls.model 控制。
+    propagation_model: 'bellhop',
+    arrival_beam_count: signalTransmissionControls.arrivalBeamCount,
+    surface_echo: signalTransmissionControls.surfaceEcho,
+    bottom_echo: signalTransmissionControls.bottomEcho,
+    noise_enabled: true,
+    // AIS、气象和 Wenz 频谱均由链路后端获取并合成，前端只显示返回波形与时频图。
+    noise_model: 'wenz',
+    hydrophone: signalTransmissionControls.hydrophone,
+    preamp_gain_db: signalTransmissionControls.preampGainDb,
+    adc_bits: signalTransmissionControls.adcBits,
+    adc_full_scale_v: signalTransmissionControls.adcFullScaleV,
+    dataSource: calcParams.value.dataset || calcParams.value.dataSource || 'EnvReanalysis',
+    dataType: 'DT_ENV_SOUND',
+    time: calcParams.value.time,
+    timeRes: 0,
+  })
+  lastSignalFieldRequestId = requestId
+  void startSignalRouteFieldPlayback({ request_id: requestId })
+  return true
+}
+
+/** 停止完整传输链路：取消后续计算，并让船舶冻结在最后完成的声场站位。 */
+function stopSignalTransmission() {
+  stopSignalTransmissionSession({ preserveResult: true })
+  signalTransmissionSession.playbackActive = false
+  vesselPlaybackPlaying.value = false
+  vesselPlaybackBusy.value = false
+  vesselPlaybackGeneration += 1
+  vesselFieldRequests.clear()
+  if (vesselPlaybackRaf) cancelAnimationFrame(vesselPlaybackRaf)
+  vesselPlaybackRaf = 0
+  vesselPlaybackLastFrameAt = 0
+  if (vesselPlaybackOpen.value && vesselRouteSamples.value.length) {
+    const frozenIndex = Math.max(0, Math.min(
+      vesselRouteSamples.value.length - 1,
+      vesselAppliedSampleIndex.value,
+    ))
+    vesselPlaybackSampleIndex.value = frozenIndex
+    const sample = vesselRouteSamples.value[frozenIndex]
+    const totalDistance = Number(vesselRouteSamples.value.at(-1)?.distanceM) || 0
+    if (sample && totalDistance > 0) {
+      vesselPlaybackTimeS.value = vesselPlaybackPreRollS.value
+        + vesselRouteDurationS.value * (Number(sample.distanceM) || 0) / totalDistance
+    }
+    vesselPlaybackStatus.value = `已停止 · 船舶停在站位 ${frozenIndex + 1}/${vesselRouteSamples.value.length}`
+  }
+  errorText.value = ''
+}
+
+function validateVesselSimulationSelections() {
+  if (!hydrophoneReceiverReady.value) return '请先打开“接收位置”并在海域选择水听器位置。'
+  if (trackPointState.points.length < 2 || !trackPointState.finished) return '请至少选择两个航迹点，并双击结束航迹选择。'
+  if (!selectedAisVessel.value && !(Number(signalTransmissionControls.vesselSpeedKn) > 0)) {
+    return '未选择 AIS 船舶时，请先填写有效的手动船舶航速。'
+  }
+  if (selectedAisVessel.value && !(Number(selectedAisVessel.value.sog_kn) > 0)) {
+    return '所选 AIS 船舶缺少有效航速，请选择有航速数据的船舶，或取消选择后手动填写。'
+  }
+  return ''
+}
+
+function syncHydrophonePreviewPlayback() {
+  if (vesselPlaybackOpen.value) return
+  const receiverVisible = hydrophoneReceiverReady.value && (
+    signalTransmissionControls.showTimeFrequency || signalTransmissionControls.showWaveform
+  )
+  const sourceVisible = configuredSignalRouteReady.value && (
+    signalTransmissionControls.showSourceTimeFrequency || signalTransmissionControls.showSourceWaveform
+  )
+  const visible = receiverVisible || sourceVisible
+  const windowDurationS = Math.max(1, Number(signalTransmissionControls.simulationDurationS) || 30)
+  const playbackDurationS = sourceVisible
+    ? previewSignalRouteDurationS.value
+    : REALTIME_PREVIEW_DURATION_S
+  vesselTimeFrequencyWindowS.value = windowDurationS
+  vesselPlaybackDurationS.value = playbackDurationS
+  vesselRouteDurationS.value = playbackDurationS
+  vesselPlaybackPreRollS.value = 0
+  if (!visible) {
+    vesselPlaybackPlaying.value = false
+    if (vesselPlaybackRaf) cancelAnimationFrame(vesselPlaybackRaf)
+    vesselPlaybackRaf = 0
+    vesselPlaybackLastFrameAt = 0
+    return
+  }
+  if (vesselPlaybackTimeS.value >= playbackDurationS) vesselPlaybackTimeS.value = 0
+  vesselPlaybackPlaying.value = true
+  vesselPlaybackLastFrameAt = 0
+  ensureVesselPlaybackClock()
+}
+
+function setVesselPlaybackTime(value) {
+  const next = Math.max(0, Math.min(hydrophoneDisplayDurationS.value, Number(value) || 0))
+  vesselPlaybackTimeS.value = next
+  const nextWindowStart = next <= vesselTimeFrequencyWindowS.value
+    ? 0
+    : Math.floor((next - vesselTimeFrequencyWindowS.value) * 2) / 2
+  if (Math.abs(nextWindowStart - vesselSpectrogramWindowStartS.value) >= 0.49) {
+    vesselSpectrogramWindowStartS.value = nextWindowStart
+  }
+  if (!vesselPlaybackOpen.value) return
+  const routeTimeS = Math.max(0, next - vesselPlaybackPreRollS.value)
+  const index = routeSampleIndexAtTime(vesselRouteSamples.value, routeTimeS, vesselRouteDurationS.value)
+  if (index >= 0 && index !== vesselPlaybackSampleIndex.value) void activateVesselRouteSample(index)
+  if (!vesselPlaybackBusy.value && !vesselPlaybackError.value) {
+    vesselPlaybackStatus.value = next < vesselPlaybackPreRollS.value
+      ? `环境噪声预播放 · ${Math.ceil(vesselPlaybackPreRollS.value - next)} s 后船舶开始运动`
+      : `第 ${index + 1}/${vesselRouteSamples.value.length} 个分钟站位`
+  }
+}
+
+function vesselPlaybackFrame(timestamp) {
+  if (!hydrophonePlaybackPanelActive.value) {
+    vesselPlaybackRaf = 0
+    return
+  }
+  if (vesselPlaybackPlaying.value) {
+    if (!vesselPlaybackLastFrameAt) vesselPlaybackLastFrameAt = timestamp
+    const deltaS = Math.max(0, Math.min(0.25, (timestamp - vesselPlaybackLastFrameAt) / 1000))
+    const next = vesselPlaybackTimeS.value + deltaS * vesselPlaybackRate.value
+    if (next >= hydrophoneDisplayDurationS.value) {
+      if (vesselPlaybackOpen.value) {
+        setVesselPlaybackTime(hydrophoneDisplayDurationS.value)
+        vesselPlaybackPlaying.value = false
+      } else {
+        setVesselPlaybackTime(0)
+      }
+    } else {
+      setVesselPlaybackTime(next)
+    }
+  }
+  vesselPlaybackLastFrameAt = timestamp
+  vesselPlaybackRaf = requestAnimationFrame(vesselPlaybackFrame)
+}
+
+function ensureVesselPlaybackClock() {
+  if (!vesselPlaybackRaf && hydrophonePlaybackPanelActive.value) {
+    vesselPlaybackLastFrameAt = 0
+    vesselPlaybackRaf = requestAnimationFrame(vesselPlaybackFrame)
+  }
+}
+
+function setVesselPlaybackPlaying(value) {
+  if (!hydrophonePlaybackPanelActive.value) return
+  if (value && vesselPlaybackTimeS.value >= hydrophoneDisplayDurationS.value) setVesselPlaybackTime(0)
+  vesselPlaybackPlaying.value = Boolean(value)
+  vesselPlaybackLastFrameAt = 0
+  ensureVesselPlaybackClock()
+}
+
+function closeVesselPlayback(resumePreview = true) {
+  const wasOpen = vesselPlaybackOpen.value
+  vesselPlaybackPlaying.value = false
+  vesselPlaybackOpen.value = false
+  routePlaybackKind.value = 'preview'
+  signalTransmissionSession.playbackActive = false
+  vesselWaveformMinimized.value = false
+  vesselSpectrogramMinimized.value = false
+  sourceWaveformMinimized.value = false
+  sourceSpectrogramMinimized.value = false
+  removeTerrainWindowFromDock('waveform')
+  removeTerrainWindowFromDock('spectrogram')
+  removeTerrainWindowFromDock('source-waveform')
+  removeTerrainWindowFromDock('source-spectrogram')
+  vesselPlaybackStatus.value = ''
+  vesselPlaybackError.value = ''
+  vesselPlaybackGeneration += 1
+  if (vesselPlaybackRaf) cancelAnimationFrame(vesselPlaybackRaf)
+  vesselPlaybackRaf = 0
+  vesselPlaybackLastFrameAt = 0
+  if (wasOpen) terrainSliceOpen.value = false
+  if (resumePreview) syncHydrophonePreviewPlayback()
+}
+
+async function calculateVesselFieldSample(index, generation = vesselPlaybackGeneration) {
+  const sample = vesselRouteSamples.value[index]
+  const receiver = receiverArrayMarker.value
+  if (!sample || !receiver) throw new Error('航迹站位或接收位置不可用。')
+  const distanceM = greatCircleDistanceM(sample, receiver)
+  const bearingDeg = initialBearingDeg(sample, receiver)
+  const rangeNm = Math.max(Number(calcParams.value.range) || 1, distanceM / 1852 * 1.08 + 0.1)
+  const frequencyHz = vesselPlaybackReferenceFrequencyHz.value
+  const sourceParams = {
+    ...calcParams.value,
+    coordX: sample.lon,
+    coordY: sample.lat,
+    srcDepth: vesselPlaybackSpectrum.value?.sourceDepthM || 6,
+    minFreq: frequencyHz,
+    maxFreq: frequencyHz,
+  }
+  const payload = portalParamsFor(sourceParams, {
+    range: rangeNm,
+    sector: 24,
+  })
+  const ice = calcParams.value.regionType === 'ice'
+  const model = vesselPlaybackModel.value
+  const fieldRequest = analyse3dTLRDByModel(payload, model, ice)
+  const arrivalRequest = routePlaybackKind.value === 'signal'
+    ? analyseChannelImpulseResponse({
+      sourceLon: sample.lon,
+      sourceLat: sample.lat,
+      sourceDepth: vesselPlaybackSpectrum.value?.sourceDepthM || 6,
+      receiverLon: receiver.lon,
+      receiverLat: receiver.lat,
+      receiverDepth: receiver.depthM,
+      depressionAngleDeg: Math.min(90, Math.abs(Number(calcParams.value.grazingAngleMin) || 45)),
+      elevationAngleDeg: Math.min(90, Math.abs(Number(calcParams.value.grazingAngleMax) || 45)),
+      frequencyHz,
+      arrivalBeamCount: signalTransmissionControls.arrivalBeamCount,
+      dataSource: calcParams.value.dataset || calcParams.value.dataSource || 'EnvReanalysis',
+      dataType: 'DT_ENV_SOUND',
+      time: calcParams.value.time,
+      timeRes: 0,
+    }).then(value => ({ value, error: null })).catch(error => ({ value: null, error }))
+    : Promise.resolve({ value: null, error: null })
+  const [response, arrivalOutcome] = await Promise.all([fieldRequest, arrivalRequest])
+  if (generation !== vesselPlaybackGeneration) throw new Error('本次播放任务已取消。')
+  const parsed = parseAnalyse3DTlrd(response)
+  const texture = decodeTlrdPolarVolume(parsed, {
+    sourceLon: sample.lon,
+    sourceLat: sample.lat,
+    angleInterp: 1,
+    strictNearest: true,
+  })
+  try {
+    await maskVolumeByTerrain(texture, viewer?.scene?.terrainProvider)
+  } catch (error) {
+    console.warn('[船舶噪声声场] 地形掩膜不可用，保留接口海底掩膜：', error?.message ?? error)
+  }
+  const receiverTl = sampleReceiverTlDb(parsed, {
+    bearingDeg,
+    distanceM,
+    depthM: receiver.depthM,
+  })
+  const arrivals = portalUnitResponse(arrivalOutcome.value)
+  return {
+    index,
+    sample,
+    parsed,
+    texture,
+    receiverTl,
+    distanceM,
+    bearingDeg,
+    rangeNm,
+    frequencyHz,
+    model,
+    arrivals,
+    arrivalTlDb: arrivalTransmissionLossDb(arrivals),
+    arrivalError: arrivalOutcome.error?.message || '',
+  }
+}
+
+function rememberVesselReceiverResult(record) {
+  const losses = [...vesselReceiverTlDb.value]
+  const distances = [...vesselReceiverDistancesM.value]
+  losses[record.index] = routePlaybackKind.value === 'signal' && Number.isFinite(record.arrivalTlDb)
+    ? record.arrivalTlDb
+    : record.receiverTl
+  distances[record.index] = record.distanceM
+  vesselReceiverTlDb.value = losses
+  vesselReceiverDistancesM.value = distances
+}
+
+function requestVesselFieldSample(index) {
+  if (vesselFieldCache.has(index)) return Promise.resolve(vesselFieldCache.get(index))
+  if (vesselFieldRequests.has(index)) return vesselFieldRequests.get(index)
+  const generation = vesselPlaybackGeneration
+  const request = calculateVesselFieldSample(index, generation)
+    .then(record => {
+      if (generation !== vesselPlaybackGeneration) return null
+      vesselFieldCache.set(index, record)
+      rememberVesselReceiverResult(record)
+      return record
+    })
+    .finally(() => vesselFieldRequests.delete(index))
+  vesselFieldRequests.set(index, request)
+  return request
+}
+
+function applyVesselFieldRecord(record) {
+  if (!record || !viewer) return
+  vesselAppliedSampleIndex.value = record.index
+  if (soundField?.loaded) soundField.destroy()
+  soundField = new SoundField(viewer, { depthExaggeration: depthExaggeration.value })
+  soundField.displayAboveWater = false
+  soundField.setVolume(record.texture, raw => raw)
+  raySourceData.value = record.parsed
+  currentVolumeTexture = record.texture
+  terrainTexture.value = record.texture
+  volumeData.value = soundField.volume
+  availableAzimuths.value = tlrdSectorAzimuths(
+    record.parsed.grid.sector,
+    record.parsed.grid.compassBearings,
+  )
+  const directionAzimuth = compassBearingToInternalAzimuth(record.bearingDeg)
+  sliceAzimuthDeg.value = nearestAvailableAzimuth(directionAzimuth)
+  sourcePoint.value = {
+    lon: record.sample.lon,
+    lat: record.sample.lat,
+    depth_m: vesselPlaybackSpectrum.value?.sourceDepthM || 6,
+  }
+  sourceRadiusKm.value = record.rangeNm * 1.852
+  terrainSource.value = {
+    lon: record.sample.lon,
+    lat: record.sample.lat,
+    depth: vesselPlaybackSpectrum.value?.sourceDepthM || 6,
+  }
+  terrainRadiusKm.value = sourceRadiusKm.value
+  terrainRunVisible.value = true
+  receiverArrayMarker.value = {
+    ...receiverArrayMarker.value,
+    rangeM: record.distanceM,
+    bearingDeg: record.bearingDeg,
+  }
+  calcParams.value.coordX = Number(record.sample.lon.toFixed(6))
+  calcParams.value.coordY = Number(record.sample.lat.toFixed(6))
+  calcParams.value.srcDepth = vesselPlaybackSpectrum.value?.sourceDepthM || 6
+  calcParams.value.minFreq = record.frequencyHz
+  calcParams.value.maxFreq = record.frequencyHz
+  calcParams.value.model = record.model
+  calculatedSectorCount.value = record.parsed.grid.sector
+  texWidth.value = record.texture.width
+  texHeight.value = record.texture.height
+  texDepth.value = record.texture.depth
+  volumeVisible.value = true
+  volumeRenderingControls.volumeVisible = true
+  cleanGlobeView.value = false
+  resultPanelOpen.value = false
+  parameterPanelOpen.value = false
+  syncSoundField()
+  setupAzimuthPointer()
+  applyPointerVisibility()
+  soundField.requestRender()
+}
+
+async function activateVesselRouteSample(index) {
+  if (!vesselPlaybackOpen.value || index < 0 || index >= vesselRouteSamples.value.length) return
+  vesselPlaybackSampleIndex.value = index
+  vesselPlaybackBusy.value = !vesselFieldCache.has(index)
+  vesselPlaybackError.value = ''
+  vesselPlaybackStatus.value = vesselPlaybackBusy.value
+    ? `计算第 ${index + 1}/${vesselRouteSamples.value.length} 个分钟站位`
+    : `第 ${index + 1}/${vesselRouteSamples.value.length} 个分钟站位`
+  try {
+    const record = await requestVesselFieldSample(index)
+    if (!record || !vesselPlaybackOpen.value || vesselPlaybackSampleIndex.value !== index) return
+    applyVesselFieldRecord(record)
+    if (routePlaybackKind.value === 'signal') {
+      signalCurrentArrivals.value = record.arrivals
+      const arrivalText = record.arrivals
+        ? `Bellhop 到达 ${Number(record.arrivals.path_count) || 0} 条`
+        : `Bellhop 到达失败${record.arrivalError ? `：${record.arrivalError}` : ''}`
+      vesselPlaybackStatus.value = `站位 ${index + 1}/${vesselRouteSamples.value.length} · ${record.model.toUpperCase()} 声场 · ${arrivalText}`
+    } else {
+      vesselPlaybackStatus.value = `站位 ${index + 1}/${vesselRouteSamples.value.length} · ${record.frequencyHz.toFixed(0)} Hz 代表频率`
+    }
+    const nextIndex = index + 1
+    if (
+      routePlaybackKind.value !== 'signal'
+      && nextIndex < vesselRouteSamples.value.length
+      && !vesselFieldCache.has(nextIndex)
+    ) {
+      void requestVesselFieldSample(nextIndex).catch(error => {
+        console.warn(`[船舶噪声] 预取站位 ${nextIndex + 1} 失败：`, error?.message ?? error)
+      })
+    }
+  } catch (error) {
+    if (!vesselPlaybackOpen.value || error?.message === '本次播放任务已取消。') return
+    vesselPlaybackError.value = error?.message || String(error)
+    vesselPlaybackPlaying.value = false
+    if (routePlaybackKind.value === 'signal') {
+      signalTransmissionSession.error = `完整传输已完成，但航迹声场显示失败：${vesselPlaybackError.value}`
+      signalTransmissionSession.message = '航迹声场计算失败'
+    }
+  } finally {
+    if (vesselPlaybackSampleIndex.value === index) vesselPlaybackBusy.value = false
+  }
+}
+
+async function startVesselNoiseSimulation() {
+  const selectionError = validateVesselSimulationSelections()
+  if (selectionError) {
+    errorText.value = selectionError
+    return
+  }
+  const vessel = resolveVesselSimulationProfile(
+    selectedAisVessel.value,
+    signalTransmissionControls.vesselSpeedKn,
+  )
+  const speedKn = Number(vessel.sog_kn)
+  const selectedModel = ['bellhop', 'ram', 'kraken'].includes(String(simulationControls.model).toLowerCase())
+    ? String(simulationControls.model).toLowerCase()
+    : 'bellhop'
+  const oneMinuteDistanceM = distancePerMinuteM(speedKn)
+  const samples = resampleTrackByDistance(trackPointState.points, oneMinuteDistanceM)
+  if (samples.length < 2) {
+    errorText.value = '所选航迹长度不足，无法生成每分钟声场站位。'
+    return
+  }
+  closeVesselPlayback(false)
+  routePlaybackKind.value = 'vessel'
+  vesselPlaybackGeneration += 1
+  vesselSpectrogramSeed.value = Math.floor(Math.random() * 2_147_483_646) + 1
+  vesselFieldCache.clear()
+  vesselFieldRequests.clear()
+  vesselRouteSamples.value = samples
+  vesselPlaybackVessel.value = vessel
+  vesselPlaybackModel.value = selectedModel
+  vesselPlaybackSpectrum.value = estimateJomopansEchoSpectrum(vesselPlaybackVessel.value)
+  vesselReceiverTlDb.value = Array(samples.length).fill(null)
+  vesselReceiverDistancesM.value = samples.map(sample => greatCircleDistanceM(sample, receiverArrayMarker.value))
+  vesselTimeFrequencyWindowS.value = Math.max(1, Number(signalTransmissionControls.simulationDurationS) || 30)
+  vesselPlaybackPreRollS.value = 0
+  vesselRouteDurationS.value = Math.max(1, routeDurationSeconds(samples, speedKn))
+  vesselPlaybackDurationS.value = vesselRouteDurationS.value
+  vesselPlaybackTimeS.value = 0
+  vesselSpectrogramWindowStartS.value = 0
+  vesselPlaybackSampleIndex.value = 0
+  vesselAppliedSampleIndex.value = 0
+  vesselPlaybackRate.value = 1
+  vesselPlaybackOpen.value = true
+  vesselWaveformMinimized.value = false
+  vesselSpectrogramMinimized.value = false
+  sourceWaveformMinimized.value = false
+  sourceSpectrogramMinimized.value = false
+  vesselPlaybackPlaying.value = false
+  vesselPlaybackBusy.value = true
+  vesselPlaybackError.value = ''
+  signalTransmissionControls.showTimeFrequency = true
+  removeTerrainWindowFromDock('waveform')
+  removeTerrainWindowFromDock('spectrogram')
+  removeTerrainWindowFromDock('source-waveform')
+  removeTerrainWindowFromDock('source-spectrogram')
+  signalTransmissionControls.sourceLevelDb = Number(vesselPlaybackSpectrum.value.broadbandSourceLevelDb.toFixed(1))
+  volumeRenderingControls.colormap = 'jet'
+  terrainSliceOpen.value = true
+  terrainSliceMinimized.value = false
+  removeTerrainWindowFromDock('slice')
+  analysisMode.value = '3d'
+  calcParams.value.model = selectedModel
+  calcParams.value.sector = 24
+  calcParams.value.srcDepth = vesselPlaybackSpectrum.value.sourceDepthM
+  errorText.value = ''
+  runtimeError.value = ''
+  void setWeatherNoisePoint({
+    lon: receiverArrayMarker.value.lon,
+    lat: receiverArrayMarker.value.lat,
+    elevation: -Math.abs(Number(receiverArrayMarker.value.depthM) || 30),
+  })
+  ensureVesselPlaybackClock()
+  await activateVesselRouteSample(0)
+  if (vesselPlaybackOpen.value && !vesselPlaybackError.value) setVesselPlaybackPlaying(true)
+}
+
+async function startSignalRouteFieldPlayback(result) {
+  if (!configuredSignalRouteReady.value || !hydrophoneReceiverReady.value) return
+  const speedKn = configuredSignalSpeedKn.value
+  if (!(speedKn > 0)) return
+  const samples = resampleTrackByDistance(
+    configuredSignalRoutePoints.value,
+    distancePerMinuteM(speedKn),
+  )
+  if (!samples.length) {
+    vesselPlaybackError.value = '无法从当前航迹生成声场站位。'
+    return
+  }
+  const signalProfile = liveSignalSourceProfile.value
+  const selectedModel = ['bellhop', 'ram', 'kraken'].includes(String(simulationControls.model).toLowerCase())
+    ? String(simulationControls.model).toLowerCase()
+    : 'bellhop'
+  closeVesselPlayback(false)
+  routePlaybackKind.value = 'signal'
+  signalTransmissionSession.playbackActive = true
+  vesselPlaybackGeneration += 1
+  vesselFieldCache.clear()
+  vesselFieldRequests.clear()
+  signalCurrentArrivals.value = null
+  vesselRouteSamples.value = samples
+  vesselPlaybackVessel.value = resolveVesselSimulationProfile(selectedAisVessel.value, speedKn)
+  vesselPlaybackModel.value = selectedModel
+  vesselPlaybackSpectrum.value = signalProfile
+  vesselReceiverTlDb.value = Array(samples.length).fill(null)
+  vesselReceiverDistancesM.value = samples.map(sample => greatCircleDistanceM(sample, receiverArrayMarker.value))
+  vesselTimeFrequencyWindowS.value = Math.max(1, Number(signalTransmissionControls.simulationDurationS) || 30)
+  vesselPlaybackPreRollS.value = 0
+  const routeDuration = routeDurationSeconds(samples, speedKn)
+  vesselRouteDurationS.value = Math.max(1, routeDuration)
+  vesselPlaybackDurationS.value = samples.length > 1
+    ? vesselRouteDurationS.value
+    : REALTIME_PREVIEW_DURATION_S
+  vesselPlaybackTimeS.value = 0
+  vesselSpectrogramWindowStartS.value = 0
+  vesselPlaybackSampleIndex.value = 0
+  vesselAppliedSampleIndex.value = 0
+  vesselPlaybackRate.value = 1
+  vesselPlaybackOpen.value = true
+  vesselWaveformMinimized.value = false
+  vesselSpectrogramMinimized.value = false
+  vesselPlaybackPlaying.value = false
+  vesselPlaybackBusy.value = true
+  vesselPlaybackError.value = ''
+  vesselPlaybackStatus.value = `实时仿真已启动 · 正在准备第 1/${samples.length} 个分钟站位`
+  removeTerrainWindowFromDock('waveform')
+  removeTerrainWindowFromDock('spectrogram')
+  volumeRenderingControls.colormap = 'jet'
+  analysisMode.value = '3d'
+  calcParams.value.model = selectedModel
+  calcParams.value.sector = 24
+  calcParams.value.srcDepth = signalProfile.sourceDepthM
+  runtimeError.value = ''
+  ensureVesselPlaybackClock()
+  setVesselPlaybackPlaying(true)
+  await activateVesselRouteSample(0)
+  if (!vesselPlaybackError.value) {
+    signalTransmissionSession.error = ''
+    signalTransmissionSession.message = samples.length > 1
+      ? `实时传输中；${selectedModel.toUpperCase()} 声场与 Bellhop 到达结构每分钟更新`
+      : `固定发射位置实时传输中；${selectedModel.toUpperCase()} 声场与 Bellhop 到达结构持续更新`
+  }
+}
+
+let lastSignalFieldRequestId = ''
+watch(
+  () => signalTransmissionSession.result,
+  (result) => {
+    const requestId = String(result?.request_id || '')
+    if (!requestId || requestId !== lastSignalFieldRequestId) return
+    signalTransmissionSession.message = '链路后台结果已就绪；实时航迹播放继续运行'
+  },
+)
 
 /** 只清理剖面帘上的声线图元，保留传播带 / 端点 / 路径。 */
 function clearTwoDRayFeatures() {
@@ -5183,6 +6429,7 @@ function archiveCurrent3dRun() {
 
 function submitCalculation() {
   activeMapPick.value = ''
+  if (vesselSimulationIntent()) return startVesselNoiseSimulation()
   if (analysisMode.value === '3d') archiveCurrent3dRun()
   if (props.viewMode === 'terrain' && analysisMode.value === '3d') {
     terrainRunVisible.value = true
@@ -6201,22 +7448,28 @@ onMounted(() => {
     )
   }
 
-  // GeoVis.Earth 提供经纬度点击事件；只有点位按钮激活时才写回参数。
+  // GeoVis.Earth 提供经纬度点击事件；点位按钮或接收位置开关激活时写回参数。
   viewer.on?.('click', (event) => {
-    if (!activeMapPick.value || !Array.isArray(event?.lonlat)) return
+    if (trackPointDrawing.value) return
+    if (!Array.isArray(event?.lonlat)) return
     const lon = Number(event.lonlat[0])
     const lat = Number(event.lonlat[1])
+    const elevation = Number(event.lonlat[2])
     if (!Number.isFinite(lon) || !Number.isFinite(lat)) return
+    if (!activeMapPick.value) {
+      if (signalTransmissionControls.showReceiver) {
+        if (Number.isFinite(elevation) && elevation > 0) return
+        if (applyHydrophoneLocation(lon, lat)) signalTransmissionControls.showReceiver = false
+      }
+      return
+    }
     if (activeMapPick.value === 'source') {
       calcParams.value.coordX = Number(lon.toFixed(4))
       calcParams.value.coordY = Number(lat.toFixed(4))
-    } else if (isNoiseMode.value) {
-      noiseParams.value.receiverX = Number(lon.toFixed(4))
-      noiseParams.value.receiverY = Number(lat.toFixed(4))
-      invalidateEnvironmentNoiseLink()
     } else {
-      calcParams.value.receiverX = Number(lon.toFixed(4))
-      calcParams.value.receiverY = Number(lat.toFixed(4))
+      if (applyHydrophoneLocation(lon, lat) && signalTransmissionControls.showReceiver) {
+        signalTransmissionControls.showReceiver = false
+      }
     }
     activeMapPick.value = ''
     refreshPickMarkers()
@@ -6236,8 +7489,14 @@ onMounted(() => {
       resultPanelOpen.value,
       activeMapPick.value,
       analysisMode.value,
+      signalTransmissionControls.showReceiver,
     ],
-    () => refreshPickMarkers()
+    () => {
+      if (signalTransmissionControls.showReceiver && !hydrophonePlaced.value) {
+        ensureDefaultHydrophoneMarker()
+      }
+      refreshPickMarkers()
+    }
   )
 
   // 外层浮动窗口最大化 / 还原时容器尺寸变化，需显式同步 Cesium 画布尺寸
@@ -6271,10 +7530,12 @@ onActivated(async () => {
 onDeactivated(() => {
   twoDRayFlowRenderer?.setSuspended(true)
   stopVolumeRayAnimation()
+  vesselPlaybackPlaying.value = false
   if (viewer && !viewer.isDestroyed?.()) captureGlobeCamera(viewer)
 })
 
 onBeforeUnmount(() => {
+  closeVesselPlayback(false)
   for (const layer of runHistoryLayers.value) {
     if (layer.jobId) markJobClosed(layer.jobId)
     try { layer.renderer?.destroy?.() } catch {}
@@ -6322,6 +7583,8 @@ onBeforeUnmount(() => {
   }
   removePickMarker('source')
   removePickMarker('receiver')
+  clearTrackPointFeatures()
+  clearTrackPoints()
   soundField?.destroy()
   soundField = null
   if (viewer && !viewer.isDestroyed()) {
@@ -7575,6 +8838,27 @@ input[type='range']:disabled {
 .section-caption::before,
 .section-caption::after { content: ''; height: 1px; flex: 1; background: rgba(65, 153, 188, 0.35); }
 .section-caption span { padding: 0 10px; }
+
+.signal-transmission-card {
+  margin: 6px 0 4px;
+  padding: 9px 10px 10px;
+  border: 1px solid rgba(65, 153, 188, 0.35);
+  border-radius: 6px;
+  background: rgba(10, 44, 66, 0.55);
+}
+
+.signal-transmission-title {
+  margin-bottom: 7px;
+  color: #25c9f7;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.terrain-mode .parameter-window .signal-transmission-card {
+  margin: 6px 0 5px;
+  padding: 8px;
+}
 
 .position-control,
 .range-control { display: flex; align-items: center; gap: 5px; min-width: 0; }

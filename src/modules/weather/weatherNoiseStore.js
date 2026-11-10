@@ -263,7 +263,7 @@ export async function loadWeatherNoiseForecast(options = {}) {
   activePromise = (async () => {
     try {
       // 前端直接 GET 全球 AIS；快照在当前会话中固定，拖动 48 小时滑杆不会重复采集。
-      const ais = weatherNoiseState.ais || await getRealtimeAis({ durationSeconds: 5, maxVessels: 5000 })
+      const ais = weatherNoiseState.ais || await getRealtimeAis({ durationSeconds: 300 })
       if (generation !== requestGeneration) return null
       weatherNoiseState.ais = ais
       const result = await analyseForecastEnvironmentNoise({

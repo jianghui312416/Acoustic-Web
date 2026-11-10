@@ -205,6 +205,18 @@ export function analyse3dTLRD(params) {
   return analyse3dTLRDByModel(params, 'bellhop', false)
 }
 
+/**
+ * 指定收发位置的原生到达结构。到达结构始终由 Bellhop arrivals 计算，
+ * 与三维声场选择 Bellhop、RAM 或 KRAKEN 相互独立。
+ */
+export function analyseChannelImpulseResponse(params) {
+  const request = withCommonParams(params)
+  return callPortal(24, 'AnalyseChannelImpulseResponse', withoutFields(request, [
+    'rdataSource', 'rtime', 'rtimeRes', 'range', 'grazingAngle', 'beamWidth',
+    'isWaterChanged', 'sector', 'lineCount', 'row', 'col',
+  ]))
+}
+
 /** 冰区三维传播损失 (SN=16 → AnalyseIce3DTLRD)。 */
 export function analyseIce3dTLRD(params) {
   return analyse3dTLRDByModel(params, 'bellhop', true)
@@ -255,7 +267,8 @@ function directApiError(name, response, data) {
 }
 
 /**
- * 浏览器直接 GET 实时 AIS。参数留空时由后端订阅全球范围；密钥不会下发到浏览器。
+ * 浏览器直接 GET 实时 AIS。默认返回当前时刻向前五分钟的滚动船舶快照；
+ * 参数留空时查询全球范围，密钥不会下发到浏览器。
  */
 export async function getRealtimeAis(params = {}) {
   const url = new URL(directEndpoint('GetRealtimeAIS'))
