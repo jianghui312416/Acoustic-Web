@@ -7,7 +7,14 @@ import { apiTimeoutMs } from '../config/runtimeConfig.js'
 export async function postJson(url, payload, options = {}) {
   const controller = new AbortController()
   const timeoutMs = options.timeoutMs ?? apiTimeoutMs()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  let timedOut = false
+  const onExternalAbort = () => controller.abort(options.signal?.reason)
+  if (options.signal?.aborted) onExternalAbort()
+  else options.signal?.addEventListener('abort', onExternalAbort, { once: true })
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
 
   try {
     const response = await fetch(url, {
@@ -26,12 +33,13 @@ export async function postJson(url, payload, options = {}) {
 
     return { response, data }
   } catch (error) {
-    if (error?.name === 'AbortError') {
+    if (error?.name === 'AbortError' && timedOut) {
       throw new Error(`接口请求超时（${timeoutMs} ms）`, { cause: error })
     }
     throw error
   } finally {
     clearTimeout(timer)
+    options.signal?.removeEventListener('abort', onExternalAbort)
   }
 }
 
@@ -39,7 +47,14 @@ export async function postJson(url, payload, options = {}) {
 export async function getJson(url, options = {}) {
   const controller = new AbortController()
   const timeoutMs = options.timeoutMs ?? apiTimeoutMs()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  let timedOut = false
+  const onExternalAbort = () => controller.abort(options.signal?.reason)
+  if (options.signal?.aborted) onExternalAbort()
+  else options.signal?.addEventListener('abort', onExternalAbort, { once: true })
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
 
   try {
     const response = await fetch(url, {
@@ -55,11 +70,12 @@ export async function getJson(url, options = {}) {
     }
     return { response, data }
   } catch (error) {
-    if (error?.name === 'AbortError') {
+    if (error?.name === 'AbortError' && timedOut) {
       throw new Error(`接口请求超时（${timeoutMs} ms）`, { cause: error })
     }
     throw error
   } finally {
     clearTimeout(timer)
+    options.signal?.removeEventListener('abort', onExternalAbort)
   }
 }

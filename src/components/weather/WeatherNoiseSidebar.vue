@@ -72,6 +72,32 @@
         <div class="shipping-curve-range"><span>0艘 · s=0</span><span>{{ shippingCountCurve.maxCount }}艘 · s={{ formatActivity(shippingCountCurve.maxActivity) }}</span></div>
         <small>数量相同也会因距离、航速和船长不同而得到不同的 s。</small>
       </div>
+      <label class="toggle-row bottom"><span>区域预报噪声</span><input v-model="state.regionalNoiseOverlay" type="checkbox"><i></i></label>
+      <div v-if="state.regionalNoiseOverlay" class="overlay-control noise-overlay-control">
+        <div class="overlay-legend">
+          <div class="overlay-legend-title"><span>{{ regionalNoiseField.legendLabel }} · {{ summary?.band?.label }}</span><b>{{ num(regionalNoiseCenterValue, 1) }} {{ regionalNoiseField.unit }}</b></div>
+          <div class="overlay-gradient" :style="{ background: overlayGradient(regionalNoiseField) }"></div>
+          <div class="overlay-ticks"><span v-for="t in regionalNoiseTicks" :key="t">{{ tickLabel(t) }}</span></div>
+        </div>
+        <p v-if="state.regionalNoiseLoading" class="overlay-loading">正在加载区域环境噪声网格…</p>
+        <p v-else-if="state.regionalNoiseError" class="overlay-error">{{ state.regionalNoiseError }}</p>
+      </div>
+      <label class="toggle-row bottom"><span>海流</span><input v-model="state.oceanCurrentOverlay" type="checkbox"><i></i></label>
+      <div v-if="state.oceanCurrentOverlay" class="overlay-control current-overlay-control">
+        <label class="current-depth-row"><span>深度</span><select v-model="state.oceanCurrentDepth" aria-label="HYCOM海流深度">
+          <option value="all">全深度</option>
+          <option v-for="depth in oceanCurrentDepths" :key="depth" :value="String(depth)">{{ num(depth, depth < 10 ? 1 : 0) }} m</option>
+        </select></label>
+        <div v-if="oceanCurrentLayer" class="overlay-legend">
+          <div class="overlay-legend-title"><span>{{ oceanCurrentField.legendLabel }}</span><b>{{ num(oceanCurrentCenterValue, 2) }} {{ oceanCurrentField.unit }}</b></div>
+          <div class="overlay-gradient" :style="{ background: overlayGradient(oceanCurrentField) }"></div>
+          <div class="overlay-ticks"><span v-for="t in oceanCurrentTicks" :key="t">{{ tickLabel(t) }}</span></div>
+        </div>
+        <label class="toggle-row overlay-dynamic"><span>动态显示</span><input v-model="state.oceanCurrentDynamic" type="checkbox"><i></i></label>
+        <small class="current-note">全深度为各有效深度层的 u/v 矢量平均</small>
+        <p v-if="state.regionalOceanCurrentLoading" class="overlay-loading">正在加载HYCOM区域海流…</p>
+        <p v-else-if="state.regionalOceanCurrentError" class="overlay-error">{{ state.regionalOceanCurrentError }}</p>
+      </div>
       <label class="toggle-row bottom"><span>风/雨/海况覆盖层</span><input v-model="state.terrainOverlay" type="checkbox"><i></i></label>
       <div v-if="state.terrainOverlay" class="overlay-control">
         <div class="overlay-field-switch">
@@ -101,7 +127,10 @@ import {
   setWeatherNoiseFrame, setWeatherNoisePoint, weatherNoiseBands, weatherNoiseBandTrend, weatherNoiseState,
 } from '@/modules/weather/weatherNoiseStore.js'
 import { chartPoints, directionLabel, formatForecastTime, shippingActivityCountCurve } from '@/utils/weatherNoiseForecast.js'
-import { currentOverlayField, overlayFieldDataRange, overlayGradient } from '@/utils/weatherOverlay.js'
+import {
+  currentOverlayField, oceanCurrentRegional, overlayFieldDataRange, overlayGradient,
+  OCEAN_CURRENT_OVERLAY_FIELD, REGIONAL_NOISE_OVERLAY_FIELD,
+} from '@/utils/weatherOverlay.js'
 
 const emit = defineEmits(['pick-on-map'])
 
@@ -154,6 +183,38 @@ const overlayTicks = computed(() => {
   }
   return overlayField.value?.ticks || []
 })
+const regionalNoiseField = REGIONAL_NOISE_OVERLAY_FIELD
+const regionalNoiseRange = computed(() => overlayFieldDataRange(regionalNoiseField, state.regionalNoise))
+const regionalNoiseTicks = computed(() => {
+  const range = regionalNoiseRange.value
+  if (!range || !Number.isFinite(range.min) || !Number.isFinite(range.max)) return regionalNoiseField.ticks
+  if (range.max - range.min < 1e-9) return [range.min]
+  return [range.min, (range.min + range.max) / 2, range.max]
+})
+const regionalNoiseCenterValue = computed(() => {
+  const values = state.regionalNoise?.data?.noise_level_db
+  if (!Array.isArray(values) || !values.length) return null
+  const row = values[Math.floor(values.length / 2)]
+  return Array.isArray(row) ? row[Math.floor(row.length / 2)] : null
+})
+const oceanCurrentField = OCEAN_CURRENT_OVERLAY_FIELD
+const oceanCurrentDepths = computed(() => state.regionalOceanCurrent?.depths_m || [])
+const oceanCurrentLayer = computed(() => oceanCurrentRegional(
+  state.regionalOceanCurrent, state.oceanCurrentDepth
+))
+const oceanCurrentRange = computed(() => overlayFieldDataRange(oceanCurrentField, oceanCurrentLayer.value))
+const oceanCurrentTicks = computed(() => {
+  const range = oceanCurrentRange.value
+  if (!range || !Number.isFinite(range.min) || !Number.isFinite(range.max)) return oceanCurrentField.ticks
+  if (range.max - range.min < 1e-9) return [range.min]
+  return [range.min, (range.min + range.max) / 2, range.max]
+})
+const oceanCurrentCenterValue = computed(() => {
+  const values = oceanCurrentLayer.value?.data?.current_speed_mps
+  if (!Array.isArray(values) || !values.length) return null
+  const row = values[Math.floor(values.length / 2)]
+  return Array.isArray(row) ? row[Math.floor(row.length / 2)] : null
+})
 const tickLabel = value => {
   const number = Number(value)
   if (!Number.isFinite(number)) return '—'
@@ -192,5 +253,5 @@ button { color:#9fd9e9; border:1px solid #2e6078; border-radius:5px; background:
 .status-message,.error-message{margin:8px 0;padding:8px;border-radius:5px;background:#12283a;line-height:1.5}.error-message{color:#efb18c;border:1px solid #674b43}.error-message button{display:block;margin-top:6px;padding:3px 9px}.forecast-head{display:flex;justify-content:space-between;gap:8px;margin-top:7px}.forecast-head b{color:#c2d9e4;font-size:9px;text-align:right}.time-slider,.shipping-level input{width:100%;height:3px;margin:9px 0 5px;accent-color:#35d5e7}.weather-spark{display:block;width:100%;height:43px}.weather-spark path{stroke:#263d50}.weather-spark polyline{fill:none}.weather-spark .trend-context{stroke:#376d82;stroke-width:1}.weather-spark .trend-active{stroke:#65def8;stroke-width:1.6}.weather-spark line{stroke:#e4c55e;stroke-width:.7}.weather-spark .trend-level{stroke:#5aa8ff;stroke-width:.65;stroke-dasharray:2 2;opacity:.75}.weather-spark circle{fill:#65def8;stroke:#dffbff;stroke-width:.7}.forecast-range{display:flex;justify-content:space-between;color:#5e7e91;font-size:8px}.weather-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:7px 0}.weather-grid article{min-width:0;padding:7px;border:1px solid #223e55;border-radius:6px;background:#102033}.weather-grid small{display:block;color:#66899d}.weather-grid strong{display:block;margin:2px 0;color:#edf8fb;font-size:17px}.weather-grid strong em{margin-left:3px;color:#a7bfcb;font-size:8px;font-style:normal}.weather-grid p{margin:0;color:#718fa1;font-size:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.noise-title{display:flex;justify-content:space-between;margin:8px 0 4px}.noise-title b{color:#d7e8ef;font-size:9px}.noise-summary{padding:7px;border:1px solid #28617b;border-radius:6px;background:#0c2537}.noise-summary div{display:flex;align-items:baseline;gap:5px}.noise-summary div strong{color:#61e4f8;font:700 21px ui-monospace,monospace}.noise-summary div span{color:#87a7b7;font-size:8px}.noise-summary small{display:block;color:#7799ab}.noise-summary p{margin:4px 0 0;color:#58cfe8}.noise-summary p b{color:#e3eef2}.component-values{display:flex;flex-wrap:wrap;gap:2px 7px;margin:5px 1px;font:8px ui-monospace,monospace}.component-values span{white-space:nowrap}.component-values .wind{color:#59dff5}.component-values .rain{color:#5aa8ff}.component-values .shipping{color:#eebc58}.component-values .turbulence{color:#8ca0b3}.component-values .thermal{color:#b993ff}.noise-band-switch{display:flex;flex-wrap:wrap;gap:4px;margin:5px 0}.noise-band-switch button{height:18px;padding:0 6px;color:#a9cad9;border-color:#35617b;background:#102b40;font-size:8px}.noise-band-switch button.active{color:#eafaff;border-color:#62ccea;background:#174966;box-shadow:inset 0 0 0 1px #2b809f}.chart-note{margin:4px 0 8px;color:#5f8194;font-size:8px}.shipping-level{display:grid;grid-template-columns:1fr auto;align-items:center;color:#7899aa}.shipping-level b{color:#59dce8}.shipping-level input{grid-column:1/-1;cursor:pointer}
 .shipping-scale{grid-column:1/-1;display:flex;justify-content:space-between;color:#58798d;font-size:8px;font-style:normal}
 .shipping-count-curve{margin:7px 0 9px;padding-top:6px;border-top:1px solid #20384b}.shipping-curve-title,.shipping-curve-range{display:flex;justify-content:space-between;gap:8px}.shipping-curve-title{color:#7899aa}.shipping-curve-title b{color:#eebc58;font-family:ui-monospace,monospace}.shipping-count-curve svg{display:block;width:100%;height:36px;margin-top:4px}.shipping-count-curve path{fill:none;stroke:#263d50;stroke-width:.7}.shipping-count-curve polyline{fill:none;stroke:#eebc58;stroke-width:1.4}.shipping-count-curve line{stroke:#65def8;stroke-width:.7;stroke-dasharray:2 2}.shipping-count-curve circle{fill:#65def8;stroke:#dffbff;stroke-width:.7}.shipping-curve-range{color:#58798d;font:8px ui-monospace,monospace}.shipping-count-curve small{display:block;margin-top:3px;color:#5f8194;font-size:8px}
-.overlay-control{margin:2px 1px 0;padding:7px;border:1px solid #2a4b63;border-radius:6px;background:#0a2030}.overlay-field-switch{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}.overlay-field-switch button{height:24px;padding:0;color:#9fd9e9;border:1px solid #2e6078;border-radius:5px;background:#102b40;font-size:10px;cursor:pointer}.overlay-field-switch button.active{color:#04121f;background:#45c6e8;border-color:#7eeaff;font-weight:600}.overlay-legend{margin-top:7px}.overlay-legend-title{display:flex;justify-content:space-between;color:#86aac2;font-size:9px}.overlay-legend-title b{color:#e3f4ff;font-family:ui-monospace,monospace}.overlay-gradient{height:7px;margin:5px 0 3px;border-radius:3px}.overlay-ticks{display:flex;justify-content:space-between;color:#6b8ba0;font:8px ui-monospace,monospace}.overlay-dynamic{margin:8px 0 0;padding-top:7px;border-top:1px solid #20384b}.overlay-loading{margin:7px 0 0;color:#6ba3c0;font-size:9px}.overlay-error{margin:7px 0 0;color:#efb18c;font-size:9px}
+.overlay-control{margin:2px 1px 0;padding:7px;border:1px solid #2a4b63;border-radius:6px;background:#0a2030}.noise-overlay-control{border-color:#414d78}.noise-overlay-control .overlay-legend{margin-top:0}.current-overlay-control{border-color:#27626a}.current-depth-row{display:flex;align-items:center;justify-content:space-between;color:#91b8c8}.current-depth-row select{min-width:112px;height:24px;padding:0 5px;color:#d9f4f5;border:1px solid #34717b;border-radius:4px;background:#102b40;font-size:9px}.current-note{display:block;margin-top:5px;color:#5f8194;font-size:8px}.overlay-field-switch{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}.overlay-field-switch button{height:24px;padding:0;color:#9fd9e9;border:1px solid #2e6078;border-radius:5px;background:#102b40;font-size:10px;cursor:pointer}.overlay-field-switch button.active{color:#04121f;background:#45c6e8;border-color:#7eeaff;font-weight:600}.overlay-legend{margin-top:7px}.overlay-legend-title{display:flex;justify-content:space-between;gap:5px;color:#86aac2;font-size:9px}.overlay-legend-title span{min-width:0}.overlay-legend-title b{flex:none;color:#e3f4ff;font-family:ui-monospace,monospace}.overlay-gradient{height:7px;margin:5px 0 3px;border-radius:3px}.overlay-ticks{display:flex;justify-content:space-between;color:#6b8ba0;font:8px ui-monospace,monospace}.overlay-dynamic{margin:8px 0 0;padding-top:7px;border-top:1px solid #20384b}.overlay-loading{margin:7px 0 0;color:#6ba3c0;font-size:9px}.overlay-error{margin:7px 0 0;color:#efb18c;font-size:9px}
 </style>

@@ -88,10 +88,15 @@ import { parseAnalyse2DRtrd } from '@/sdk'
 import { resolveRayFlow, sampleRayMotion } from '@/utils/rayFlow.js'
 import { rayFlowClockElapsedMs } from '@/utils/rayFlowClock.js'
 import {
-  loadRegionalWeatherForecast, noiseProbeState, setNoiseProbePicking,
+  loadRegionalNoiseForecast, loadRegionalOceanCurrent, loadRegionalWeatherForecast,
+  noiseProbeState, setNoiseProbePicking,
   setTerrainBounds, setTerrainCenter, setWeatherNoisePoint, weatherNoiseState,
 } from '@/modules/weather/weatherNoiseStore.js'
-import { currentOverlayField, drawWeatherOverlay, weatherOverlayActive } from '@/utils/weatherOverlay.js'
+import {
+  currentOverlayField, drawRegionalNoiseOverlay, drawWeatherOverlay,
+  oceanCurrentOverlayActive, oceanCurrentRegional, OCEAN_CURRENT_OVERLAY_FIELD,
+  regionalNoiseOverlayActive, weatherOverlayActive,
+} from '@/utils/weatherOverlay.js'
 import { SIGNAL_EXCESS_COLOR_STOPS } from '@/utils/signalExcess.js'
 import { signalExcessState } from '@/modules/acoustic/signalExcessState.js'
 import {
@@ -263,6 +268,50 @@ const leavingForGlobe = ref(false)
 const terrainRayFlow = shallowRef(null)
 const overlayClockStart = performance.now()
 const weatherOverlayOn = computed(() => weatherOverlayActive(weatherNoiseState))
+const regionalNoiseOverlayOn = computed(() => regionalNoiseOverlayActive(weatherNoiseState))
+const oceanCurrentOverlayOn = computed(() => oceanCurrentOverlayActive(weatherNoiseState))
+const oceanCurrentLayer = computed(() => oceanCurrentRegional(
+  weatherNoiseState.regionalOceanCurrent, weatherNoiseState.oceanCurrentDepth
+))
+let regionalWeatherLoadTimer = 0
+let regionalNoiseLoadTimer = 0
+let oceanCurrentLoadTimer = 0
+
+function queueRegionalWeatherLoad() {
+  if (regionalWeatherLoadTimer) clearTimeout(regionalWeatherLoadTimer)
+  regionalWeatherLoadTimer = 0
+  if (!weatherNoiseState.terrainOverlay) return
+  regionalWeatherLoadTimer = window.setTimeout(() => {
+    regionalWeatherLoadTimer = 0
+    loadRegionalWeatherForecast().then(() => scheduleDraw())
+  }, 120)
+}
+
+function queueRegionalNoiseLoad() {
+  if (regionalNoiseLoadTimer) clearTimeout(regionalNoiseLoadTimer)
+  regionalNoiseLoadTimer = 0
+  if (!weatherNoiseState.regionalNoiseOverlay) return
+  regionalNoiseLoadTimer = window.setTimeout(() => {
+    regionalNoiseLoadTimer = 0
+    ;(async () => {
+      // 两层同时开启时先完成区域天气；噪声接口随后可直接复用后端的同网格缓存。
+      if (weatherNoiseState.terrainOverlay) await loadRegionalWeatherForecast()
+      await loadRegionalNoiseForecast()
+      scheduleDraw()
+    })()
+  }, 120)
+}
+
+function queueOceanCurrentLoad() {
+  if (oceanCurrentLoadTimer) clearTimeout(oceanCurrentLoadTimer)
+  oceanCurrentLoadTimer = 0
+  if (!weatherNoiseState.oceanCurrentOverlay) return
+  oceanCurrentLoadTimer = window.setTimeout(() => {
+    oceanCurrentLoadTimer = 0
+    loadRegionalOceanCurrent().then(() => scheduleDraw())
+  // HYCOM 全深度原生网格体积较大；等滑杆停稳后再请求，避免拖动时堆积多个时次。
+  }, 600)
+}
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
 
@@ -356,6 +405,16 @@ function draw() {
         performance.now() - overlayClockStart,
       )
     }
+  }
+  if (oceanCurrentOverlayOn.value && lastScene?.project && oceanCurrentLayer.value) {
+    drawWeatherOverlay(
+      canvasEl.value, lastScene, grid.value, OCEAN_CURRENT_OVERLAY_FIELD,
+      oceanCurrentLayer.value, weatherNoiseState.oceanCurrentDynamic,
+      performance.now() - overlayClockStart,
+    )
+  }
+  if (regionalNoiseOverlayOn.value && lastScene?.project && weatherNoiseState.regionalNoise) {
+    drawRegionalNoiseOverlay(canvasEl.value, lastScene, grid.value, weatherNoiseState.regionalNoise)
   }
   drawAisVessels()
   drawRays()
@@ -604,11 +663,14 @@ function raysAnimating() {
 function weatherDynamic() {
   return weatherOverlayOn.value && weatherNoiseState.overlayDynamic
 }
+function oceanCurrentDynamic() {
+  return oceanCurrentOverlayOn.value && weatherNoiseState.oceanCurrentDynamic
+}
 function receiverAnimating() {
   return !!terrainReceiver.value
 }
 function terrainAnimating() {
-  return raysAnimating() || weatherDynamic() || receiverAnimating()
+  return raysAnimating() || weatherDynamic() || oceanCurrentDynamic() || receiverAnimating()
 }
 
 function syncRayAnimation() {
@@ -624,15 +686,16 @@ function syncRayAnimation() {
     }
     const rayOn = raysAnimating()
     const weatherOn = weatherDynamic()
+    const currentOn = oceanCurrentDynamic()
     const receiverOn = receiverAnimating()
-    if (!rayOn && !weatherOn && !receiverOn) {
+    if (!rayOn && !weatherOn && !currentOn && !receiverOn) {
       stopRayAnimation()
       return
     }
     if (!rayAnimationLastAt || now - rayAnimationLastAt >= 16) {
       rayAnimationLastAt = now
       if (rayOn) drawRays()
-      if (weatherOn || receiverOn) scheduleDraw()
+      if (weatherOn || currentOn || receiverOn) scheduleDraw()
     }
     rayAnimationRaf = requestAnimationFrame(tick)
   }
@@ -1131,7 +1194,9 @@ watch(bounds, (value) => {
   const next = { ...value }
   setTerrainCenter({ lon: (next.west + next.east) / 2, lat: (next.south + next.north) / 2 })
   setTerrainBounds(next)
-  if (weatherNoiseState.terrainOverlay) loadRegionalWeatherForecast().then(() => scheduleDraw())
+  queueRegionalWeatherLoad()
+  queueRegionalNoiseLoad()
+  queueOceanCurrentLoad()
   emit('bounds-change', next)
 }, { immediate: true })
 watch(() => props.field, () => scheduleDraw())
@@ -1163,13 +1228,33 @@ watch(() => [props.source?.lon, props.source?.lat, props.source?.depth, props.ra
 watch(visualControls, () => scheduleDraw(), { deep: true })
 watch(() => [
   weatherNoiseState.terrainOverlay,
-  weatherNoiseState.overlayField,
-  weatherNoiseState.overlayDynamic,
   weatherNoiseState.frameIndex,
 ], () => {
-  if (weatherNoiseState.terrainOverlay) {
-    loadRegionalWeatherForecast().then(() => scheduleDraw())
-  }
+  queueRegionalWeatherLoad()
+  scheduleDraw()
+  syncRayAnimation()
+})
+watch(() => [weatherNoiseState.overlayField, weatherNoiseState.overlayDynamic], () => {
+  scheduleDraw()
+  syncRayAnimation()
+})
+watch(() => [
+  weatherNoiseState.regionalNoiseOverlay,
+  weatherNoiseState.frameIndex,
+  weatherNoiseState.selectedBandId,
+], () => {
+  queueRegionalNoiseLoad()
+  scheduleDraw()
+})
+watch(() => [
+  weatherNoiseState.oceanCurrentOverlay,
+  weatherNoiseState.frameIndex,
+], () => {
+  queueOceanCurrentLoad()
+  scheduleDraw()
+  syncRayAnimation()
+})
+watch(() => [weatherNoiseState.oceanCurrentDepth, weatherNoiseState.oceanCurrentDynamic], () => {
   scheduleDraw()
   syncRayAnimation()
 })
@@ -1181,6 +1266,9 @@ onBeforeUnmount(() => {
   stopRayAnimation()
   if (hoverRaf) cancelAnimationFrame(hoverRaf)
   if (globeTransitionRaf) cancelAnimationFrame(globeTransitionRaf)
+  if (regionalWeatherLoadTimer) clearTimeout(regionalWeatherLoadTimer)
+  if (regionalNoiseLoadTimer) clearTimeout(regionalNoiseLoadTimer)
+  if (oceanCurrentLoadTimer) clearTimeout(oceanCurrentLoadTimer)
   globeTransitionRaf = 0
   resizeObserver?.disconnect()
   document.removeEventListener('visibilitychange', syncRayAnimation)

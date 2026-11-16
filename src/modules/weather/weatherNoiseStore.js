@@ -1,5 +1,8 @@
 import { computed, reactive } from 'vue'
-import { analyseForecastEnvironmentNoise, getRealtimeAis, getRegionalWeatherForecast } from '@/api/soundFieldApi.js'
+import {
+  analyseForecastEnvironmentNoise, analyseRegionalForecastEnvironmentNoise,
+  getRealtimeAis, getRegionalOceanCurrent, getRegionalWeatherForecast,
+} from '@/api/soundFieldApi.js'
 import {
   bandNoiseMetricsDb,
   clampFrameIndex, clampShippingActivity, coatesStojanovicShippingCurve,
@@ -28,6 +31,18 @@ export const weatherNoiseState = reactive({
   regionalWeatherLoading: false,
   regionalWeatherError: '',
   regionalWeatherKey: '',
+  regionalNoiseOverlay: false,
+  regionalNoise: null,
+  regionalNoiseLoading: false,
+  regionalNoiseError: '',
+  regionalNoiseKey: '',
+  oceanCurrentOverlay: false,
+  oceanCurrentDynamic: false,
+  oceanCurrentDepth: 'all',
+  regionalOceanCurrent: null,
+  regionalOceanCurrentLoading: false,
+  regionalOceanCurrentError: '',
+  regionalOceanCurrentKey: '',
   terrainBounds: { west: 115.4, east: 116.6, south: 15.4, north: 16.6 },
   selectedBandId: DEFAULT_NOISE_BANDS[0].id,
   shippingActivity: 0.5,
@@ -183,8 +198,9 @@ export const overlayForecastTimeIso = computed(() => frameForecastTimeIso(curren
 
 let regionalRequestGeneration = 0
 let regionalActivePromise = null
+let regionalActiveKey = ''
 
-/** 请求指定地形范围与当前帧整点的 3×3 区域风 / 雨 / 海况网格。 */
+/** 请求指定地形范围与当前帧整点的0.25°原生区域风 / 雨 / 海况网格。 */
 export async function loadRegionalWeatherForecast(options = {}) {
   const bounds = weatherNoiseState.terrainBounds
   const forecastTime = overlayForecastTimeIso.value
@@ -193,9 +209,16 @@ export async function loadRegionalWeatherForecast(options = {}) {
   if (!options.force && weatherNoiseState.regionalWeather && weatherNoiseState.regionalWeatherKey === key) {
     return weatherNoiseState.regionalWeather
   }
-  if (!options.force && regionalActivePromise) return regionalActivePromise
-
+  if (!options.force && regionalActivePromise && regionalActiveKey === key) {
+    return regionalActivePromise
+  }
   const generation = ++regionalRequestGeneration
+  regionalActiveKey = key
+  if (weatherNoiseState.regionalWeatherKey !== key) {
+    // 时间或区域变化后撤下旧帧，避免拉杆已更新但覆盖层仍显示上一时次。
+    weatherNoiseState.regionalWeather = null
+    weatherNoiseState.regionalWeatherKey = ''
+  }
   weatherNoiseState.regionalWeatherLoading = true
   weatherNoiseState.regionalWeatherError = ''
   regionalActivePromise = (async () => {
@@ -222,10 +245,123 @@ export async function loadRegionalWeatherForecast(options = {}) {
       if (generation === regionalRequestGeneration) {
         weatherNoiseState.regionalWeatherLoading = false
         regionalActivePromise = null
+        regionalActiveKey = ''
       }
     }
   })()
   return regionalActivePromise
+}
+
+let regionalNoiseRequestGeneration = 0
+
+/** 请求地形范围、当前预报整点和当前频带对应的0.25°原生区域环境噪声网格。 */
+export async function loadRegionalNoiseForecast(options = {}) {
+  const bounds = weatherNoiseState.terrainBounds
+  const forecastTime = overlayForecastTimeIso.value
+  const band = activeWeatherNoiseBand.value
+  const ais = weatherNoiseState.ais
+  if (!bounds || !forecastTime || !band || !ais) return weatherNoiseState.regionalNoise
+  const key = [
+    bounds.west, bounds.south, bounds.east, bounds.north, forecastTime,
+    band.id, band.low_hz, band.high_hz,
+    ais.collection_ended_at_utc || ais.vessel_count || ais.vessels?.length || 0,
+  ].join('|')
+  if (!options.force && weatherNoiseState.regionalNoise && weatherNoiseState.regionalNoiseKey === key) {
+    return weatherNoiseState.regionalNoise
+  }
+
+  const generation = ++regionalNoiseRequestGeneration
+  if (weatherNoiseState.regionalNoiseKey !== key) {
+    // 时间或频带变化后不继续展示上一帧，避免加载期间伪彩图与滑杆错位。
+    weatherNoiseState.regionalNoise = null
+    weatherNoiseState.regionalNoiseKey = ''
+  }
+  weatherNoiseState.regionalNoiseLoading = true
+  weatherNoiseState.regionalNoiseError = ''
+  try {
+    const result = await analyseRegionalForecastEnvironmentNoise({
+      bottomLeftX: bounds.west,
+      bottomLeftY: bounds.south,
+      topRightX: bounds.east,
+      topRightY: bounds.north,
+      forecastTime,
+      minFreq: band.low_hz,
+      maxFreq: band.high_hz,
+      numPoints: 128,
+      ais,
+    })
+    if (generation !== regionalNoiseRequestGeneration) return null
+    weatherNoiseState.regionalNoise = result
+    weatherNoiseState.regionalNoiseKey = key
+    return result
+  } catch (error) {
+    if (generation === regionalNoiseRequestGeneration) {
+      weatherNoiseState.regionalNoiseError = error?.message || '区域环境噪声预报请求失败'
+    }
+    console.error('[区域环境噪声覆盖层] 请求失败：', error)
+    return null
+  } finally {
+    if (generation === regionalNoiseRequestGeneration) {
+      weatherNoiseState.regionalNoiseLoading = false
+    }
+  }
+}
+
+let oceanCurrentRequestGeneration = 0
+let oceanCurrentAbortController = null
+
+/** 请求当前地形范围与滑杆时次最近的HYCOM原生三维海流u/v网格。 */
+export async function loadRegionalOceanCurrent(options = {}) {
+  const bounds = weatherNoiseState.terrainBounds
+  const forecastTime = overlayForecastTimeIso.value
+  if (!bounds || !forecastTime) return weatherNoiseState.regionalOceanCurrent
+  const key = `${bounds.west},${bounds.south},${bounds.east},${bounds.north}|${forecastTime}`
+  if (!options.force && weatherNoiseState.regionalOceanCurrent &&
+      weatherNoiseState.regionalOceanCurrentKey === key) {
+    return weatherNoiseState.regionalOceanCurrent
+  }
+  const generation = ++oceanCurrentRequestGeneration
+  oceanCurrentAbortController?.abort()
+  const requestController = new AbortController()
+  oceanCurrentAbortController = requestController
+  if (weatherNoiseState.regionalOceanCurrentKey !== key) {
+    weatherNoiseState.regionalOceanCurrent = null
+    weatherNoiseState.regionalOceanCurrentKey = ''
+  }
+  weatherNoiseState.regionalOceanCurrentLoading = true
+  weatherNoiseState.regionalOceanCurrentError = ''
+  try {
+    const result = await getRegionalOceanCurrent({
+      bottomLeftX: bounds.west,
+      bottomLeftY: bounds.south,
+      topRightX: bounds.east,
+      topRightY: bounds.north,
+      forecastTime,
+    }, { signal: requestController.signal })
+    if (generation !== oceanCurrentRequestGeneration) return null
+    weatherNoiseState.regionalOceanCurrent = result
+    weatherNoiseState.regionalOceanCurrentKey = key
+    const depths = result.depths_m || []
+    if (weatherNoiseState.oceanCurrentDepth !== 'all' &&
+        !depths.some(depth => Math.abs(Number(depth) - Number(weatherNoiseState.oceanCurrentDepth)) < 1e-6)) {
+      weatherNoiseState.oceanCurrentDepth = 'all'
+    }
+    return result
+  } catch (error) {
+    if (error?.name === 'AbortError') return null
+    if (generation === oceanCurrentRequestGeneration) {
+      weatherNoiseState.regionalOceanCurrentError = error?.message || 'HYCOM区域海流请求失败'
+    }
+    console.error('[HYCOM海流覆盖层] 请求失败：', error)
+    return null
+  } finally {
+    if (oceanCurrentAbortController === requestController) {
+      oceanCurrentAbortController = null
+    }
+    if (generation === oceanCurrentRequestGeneration) {
+      weatherNoiseState.regionalOceanCurrentLoading = false
+    }
+  }
 }
 
 export function openNoiseProbe(options = {}) {

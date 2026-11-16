@@ -296,15 +296,42 @@ export async function analyseForecastEnvironmentNoise(params) {
   return data
 }
 
-/** 获取一个预报整点的 3×3 区域风、雨与海况网格。 */
+/** 获取一个预报整点、按天气模型0.25°原生分辨率对齐的区域风、雨与海况网格。 */
 export async function getRegionalWeatherForecast(params) {
   const { response, data } = await postJson(
     directEndpoint('GetRegionalWeatherForecast'),
     params,
-    { timeoutMs: 180_000 }
+    { timeoutMs: 600_000 }
   )
   if (!response.ok || !data || !data.grid || !data.data) {
     throw directApiError('区域天气预报', response, data)
+  }
+  return data
+}
+
+/** 获取一个预报整点、指定频带并按0.25°原生分辨率对齐的区域环境噪声网格。 */
+export async function analyseRegionalForecastEnvironmentNoise(params) {
+  const { response, data } = await postJson(
+    directEndpoint('AnalyseRegionalForecastEnvironmentNoise'),
+    params,
+    { timeoutMs: 600_000 }
+  )
+  if (!response.ok || !data || !data.grid || !Array.isArray(data.data?.noise_level_db)) {
+    throw directApiError('区域环境噪声预报', response, data)
+  }
+  return data
+}
+
+/** 获取HYCOM原生网格的区域三维海流u/v及全深度平均。 */
+export async function getRegionalOceanCurrent(params, options = {}) {
+  const { response, data } = await postJson(
+    directEndpoint('GetRegionalOceanCurrent'),
+    params,
+    { timeoutMs: 600_000, signal: options.signal }
+  )
+  if (!response.ok || !data || !data.grid || !Array.isArray(data.depths_m) ||
+      !Array.isArray(data.data?.u_mps) || !Array.isArray(data.data?.v_mps)) {
+    throw directApiError('HYCOM区域海流预报', response, data)
   }
   return data
 }

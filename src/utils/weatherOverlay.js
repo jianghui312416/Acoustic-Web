@@ -5,12 +5,12 @@
  * 每个 frame.weather 里是单点的风（wind10_mps / wind_direction_deg）、
  * 雨（precipitation_mmh）、海况（wave_hs_m / wave_direction_deg）等标量。
  *
- * 覆盖层使用区域风 / 雨 / 海况网格（GetRegionalWeatherForecast 的 3×3 场），
- * 按网格位置双向线性插值：
- *  - 静态贴纸（海面 0 m）：把插值出的场值按色标着色，半透明铺在海面（0 m 深度）；
+ * 覆盖层使用区域风 / 雨 / 海况网格（按上游天气模型0.25°原生分辨率对齐），
+ * 按原生网格单元直接着色，不做空间插值：
+ *  - 静态贴纸（海面 0 m）：每个0.25°单元保持一个固定值与固定颜色；
  *  - 动态网格线（可选，需开启「动态显示」）：风为真实平流 + 渐隐拖尾轨迹、
  *    海况为浪峰线（法线沿浪向）；雨只显示静态色层，
- *    同样贴在海面（0 m 深度）。
+ *    动态取值同样使用最近邻原生网格值，并贴在海面（0 m 深度）。
  * 图例（范围、单位、色带）随选中字段切换，颜色取同一套色标。
  */
 
@@ -79,9 +79,93 @@ export const WEATHER_OVERLAY_FIELDS = Object.freeze({
   }),
 })
 
+/** 区域环境噪声伪彩图配置；数值范围按每次返回的区域网格自适应。 */
+export const REGIONAL_NOISE_OVERLAY_FIELD = Object.freeze({
+  key: 'noise',
+  label: '区域预报噪声',
+  unit: 'dB',
+  legendLabel: '环境噪声频带级 (dB re 1 μPa²)',
+  range: [40, 120],
+  ticks: [40, 60, 80, 100, 120],
+  regionValue: 'noise_level_db',
+  regionDirection: null,
+  colorStops: Object.freeze([
+    [0, [40, 20, 110]],
+    [0.2, [30, 70, 190]],
+    [0.4, [15, 165, 210]],
+    [0.6, [55, 205, 110]],
+    [0.78, [245, 220, 55]],
+    [0.9, [245, 115, 35]],
+    [1, [175, 25, 55]],
+  ]),
+})
+
+export const OCEAN_CURRENT_OVERLAY_FIELD = Object.freeze({
+  key: 'ocean-current',
+  label: '海流',
+  unit: 'm/s',
+  legendLabel: 'HYCOM 海流速度 (m/s)',
+  range: [0, 2],
+  ticks: [0, 0.5, 1, 1.5, 2],
+  regionValue: 'current_speed_mps',
+  regionDirection: 'current_direction_deg',
+  colorStops: Object.freeze([
+    [0, [20, 40, 120]],
+    [0.25, [15, 115, 195]],
+    [0.5, [20, 190, 180]],
+    [0.7, [95, 210, 95]],
+    [0.85, [245, 205, 55]],
+    [1, [220, 75, 45]],
+  ]),
+})
+
 /** 覆盖层是否应参与渲染：主开关打开且选中了某个物理字段。 */
 export function weatherOverlayActive(state) {
   return !!(state?.terrainOverlay && state?.overlayField && state.overlayField !== 'off')
+}
+
+export function regionalNoiseOverlayActive(state) {
+  return !!state?.regionalNoiseOverlay
+}
+
+export function oceanCurrentOverlayActive(state) {
+  return !!state?.oceanCurrentOverlay
+}
+
+/** 从HYCOM u/v三维响应构造当前所选深度的速度与流向原生网格。 */
+export function oceanCurrentRegional(current, depthSelection = 'all') {
+  const data = current?.data
+  const depths = current?.depths_m
+  if (!current?.grid || !data || !Array.isArray(depths)) return null
+  let u = data.depth_mean_u_mps
+  let v = data.depth_mean_v_mps
+  if (depthSelection !== 'all') {
+    const requested = Number(depthSelection)
+    const index = depths.findIndex(depth => Math.abs(Number(depth) - requested) < 1e-6)
+    if (index < 0) return null
+    u = data.u_mps?.[index]
+    v = data.v_mps?.[index]
+  }
+  if (!Array.isArray(u) || !Array.isArray(v)) return null
+  const speed = u.map((row, rowIndex) => row.map((value, column) => {
+    const east = Number(value)
+    const north = Number(v[rowIndex]?.[column])
+    return Number.isFinite(east) && Number.isFinite(north) ? Math.hypot(east, north) : null
+  }))
+  const direction = u.map((row, rowIndex) => row.map((value, column) => {
+    const east = Number(value)
+    const north = Number(v[rowIndex]?.[column])
+    if (!Number.isFinite(east) || !Number.isFinite(north)) return null
+    return (Math.atan2(east, north) * 180 / Math.PI + 360) % 360
+  }))
+  return {
+    ...current,
+    data: {
+      ...data,
+      current_speed_mps: speed,
+      current_direction_deg: direction,
+    },
+  }
 }
 
 /** 当前选中的物理字段配置；off / 未选择时返回 null。 */
@@ -151,13 +235,13 @@ const ADVECT_PARTICLE_COUNT = 120
 const MAX_TRAIL_POINTS = 24
 const MIN_PARTICLE_AGE_MS = 5000
 const MAX_PARTICLE_AGE_MS = 11000
-// 视觉时间加速：把真实 m/s 风速映射成可见的经纬度/秒漂移（约 2400×）。
+// 视觉时间加速：只影响粒子在屏幕上的运动速度，不改变色标与HYCOM数值。
+// 海流量级通常比风速低一到两个数量级，使用风的倍率会近似静止。
 const METERS_PER_DEGREE = 110574
 const ADVECTION_TIME_WARP = 3000
+const OCEAN_CURRENT_TIME_WARP = 60000
 
-let advectParticles = []
-let advectBoundsKey = ''
-let advectLastMs = 0
+const advectStates = new Map()
 
 function spawnAdvectParticle(bounds, rand) {
   const maxAgeMs = MIN_PARTICLE_AGE_MS + rand() * (MAX_PARTICLE_AGE_MS - MIN_PARTICLE_AGE_MS)
@@ -172,18 +256,23 @@ function spawnAdvectParticle(bounds, rand) {
   }
 }
 
-function ensureAdvectParticles(bounds, nowMs) {
-  const key = `${bounds.west},${bounds.east},${bounds.south},${bounds.north}`
-  if (advectParticles.length && advectBoundsKey === key) return advectParticles
-  const rand = mulberry32(24680)
-  advectParticles = Array.from({ length: ADVECT_PARTICLE_COUNT }, () => spawnAdvectParticle(bounds, rand))
-  advectBoundsKey = key
-  advectLastMs = nowMs
-  return advectParticles
+function ensureAdvectState(bounds, nowMs, layerKey) {
+  const boundsKey = `${bounds.west},${bounds.east},${bounds.south},${bounds.north}`
+  const cached = advectStates.get(layerKey)
+  if (cached?.particles?.length && cached.boundsKey === boundsKey) return cached
+  const seed = layerKey === 'ocean-current' ? 97531 : layerKey === 'sea' ? 86420 : 24680
+  const rand = mulberry32(seed)
+  const state = {
+    particles: Array.from({ length: ADVECT_PARTICLE_COUNT }, () => spawnAdvectParticle(bounds, rand)),
+    boundsKey,
+    lastMs: nowMs,
+  }
+  advectStates.set(layerKey, state)
+  return state
 }
 
 /** 在当前流场采样风速（m/s）与风向（°），返回经纬度/秒漂移向量。 */
-function sampleFlowVelocity(sampler, lon, lat) {
+function sampleFlowVelocity(sampler, lon, lat, timeWarp = ADVECTION_TIME_WARP) {
   const speed = sampleGridValue(sampler.values, sampler.longitudes, sampler.latitudes, lon, lat)
   if (!Number.isFinite(speed) || speed < 0) return null
   let direction = NaN
@@ -192,13 +281,13 @@ function sampleFlowVelocity(sampler, lon, lat) {
   }
   if (!Number.isFinite(direction)) return { dLon: 0, dLat: 0, speed, direction: NaN }
   const { kLon, kLat } = bearingUnit(direction)
-  const degPerSec = speed * ADVECTION_TIME_WARP / METERS_PER_DEGREE
+  const degPerSec = speed * timeWarp / METERS_PER_DEGREE
   return { dLon: kLon * degPerSec, dLat: kLat * degPerSec, speed, direction }
 }
 
-function stepAdvection(particles, sampler, bounds, dtSec) {
+function stepAdvection(particles, sampler, bounds, dtSec, timeWarp = ADVECTION_TIME_WARP) {
   for (const particle of particles) {
-    const velocity = sampleFlowVelocity(sampler, particle.lon, particle.lat)
+    const velocity = sampleFlowVelocity(sampler, particle.lon, particle.lat, timeWarp)
     if (velocity) {
       particle.speed = velocity.speed
       particle.direction = velocity.direction
@@ -273,7 +362,7 @@ function lighten(rgb, amount) {
   return rgb.map(channel => Math.round(channel + (255 - channel) * amount))
 }
 
-/** 从区域天气响应中取出当前字段的插值样本源（值 + 可选方向）。 */
+/** 从区域天气响应中取出当前字段的原生网格样本（值 + 可选方向）。 */
 function regionalSampler(regional, field) {
   const grid = regional?.grid
   const data = regional?.data
@@ -295,96 +384,80 @@ export function overlayFieldDataRange(field, regional) {
   return fieldDataRange(sampler.values)
 }
 
-// 找到经纬度在轴上的区间下标；latitudes 北→南递减，longitudes 西→东递增。
-function gridIndices(longitudes, latitudes, lon, lat) {
-  const cols = longitudes.length
-  const rows = latitudes.length
-  let colIndex = 0
-  while (colIndex < cols - 2 && lon > longitudes[colIndex + 1]) colIndex++
-  let rowIndex = 0
-  while (rowIndex < rows - 2 && lat < latitudes[rowIndex + 1]) rowIndex++
-  const lon0 = longitudes[colIndex]
-  const lon1 = longitudes[colIndex + 1]
-  const lat0 = latitudes[rowIndex]
-  const lat1 = latitudes[rowIndex + 1]
-  return {
-    colIndex,
-    rowIndex,
-    tx: clamp((lon - lon0) / Math.max(1e-9, lon1 - lon0), 0, 1),
-    ty: clamp((lat - lat0) / Math.max(1e-9, lat1 - lat0), 0, 1),
+function nearestAxisIndex(axis, target) {
+  let nearest = 0
+  let distance = Infinity
+  for (let index = 0; index < axis.length; index++) {
+    const nextDistance = Math.abs(Number(axis[index]) - target)
+    if (nextDistance < distance) {
+      distance = nextDistance
+      nearest = index
+    }
   }
+  return nearest
 }
 
-/** 双向线性插值标量场；缺测角用可用角的加权均值回退。 */
+/** 最近邻读取原生网格值，不在相邻0.25°网格点之间插值。 */
 function sampleGridValue(values, longitudes, latitudes, lon, lat) {
-  const { colIndex, rowIndex, tx, ty } = gridIndices(longitudes, latitudes, lon, lat)
-  const corners = [
-    { w: (1 - tx) * (1 - ty), v: num(values[rowIndex]?.[colIndex]) },
-    { w: tx * (1 - ty), v: num(values[rowIndex]?.[colIndex + 1]) },
-    { w: (1 - tx) * ty, v: num(values[rowIndex + 1]?.[colIndex]) },
-    { w: tx * ty, v: num(values[rowIndex + 1]?.[colIndex + 1]) },
-  ].filter(corner => Number.isFinite(corner.v))
-  if (!corners.length) return NaN
-  const weightSum = corners.reduce((sum, corner) => sum + corner.w, 0)
-  if (weightSum <= 0) return corners.reduce((sum, corner) => sum + corner.v, 0) / corners.length
-  return corners.reduce((sum, corner) => sum + corner.v * corner.w, 0) / weightSum
+  const column = nearestAxisIndex(longitudes, lon)
+  const row = nearestAxisIndex(latitudes, lat)
+  return num(values[row]?.[column])
 }
 
-/** 风向 / 浪向按单位向量插值，避免跨 0°/360° 的线性跳变。 */
+/** 风向 / 浪向同样使用最近邻原生网格值。 */
 function sampleGridDirection(values, longitudes, latitudes, lon, lat) {
-  const { colIndex, rowIndex, tx, ty } = gridIndices(longitudes, latitudes, lon, lat)
-  const corners = [
-    { w: (1 - tx) * (1 - ty), v: num(values[rowIndex]?.[colIndex]) },
-    { w: tx * (1 - ty), v: num(values[rowIndex]?.[colIndex + 1]) },
-    { w: (1 - tx) * ty, v: num(values[rowIndex + 1]?.[colIndex]) },
-    { w: tx * ty, v: num(values[rowIndex + 1]?.[colIndex + 1]) },
-  ].filter(corner => Number.isFinite(corner.v))
-  if (!corners.length) return NaN
-  const weightSum = corners.reduce((sum, corner) => sum + corner.w, 0)
-  if (weightSum <= 0) return NaN
-  let sinSum = 0
-  let cosSum = 0
-  for (const corner of corners) {
-    const rad = corner.v * Math.PI / 180
-    sinSum += Math.sin(rad) * corner.w
-    cosSum += Math.cos(rad) * corner.w
-  }
-  const angle = Math.atan2(sinSum / weightSum, cosSum / weightSum) * 180 / Math.PI
-  return (angle + 360) % 360
+  return sampleGridValue(values, longitudes, latitudes, lon, lat)
 }
 
-/** 静态贴纸（海面 0 m）：把区域场插值后，用半透明色标铺在海面（0 m 深度）。 */
-function drawRegionalFill(ctx, scene, width, height, field, sampler) {
-  const faces = scene?.faces
-  if (!Array.isArray(faces) || !faces.length) return
+function axisCellEdges(axis) {
+  const edges = [Number(axis[0]) + (Number(axis[0]) - Number(axis[1])) / 2]
+  for (let index = 1; index < axis.length; index++) {
+    edges.push((Number(axis[index - 1]) + Number(axis[index])) / 2)
+  }
+  const last = axis.length - 1
+  edges.push(Number(axis[last]) + (Number(axis[last]) - Number(axis[last - 1])) / 2)
+  return edges
+}
+
+/** 静态贴纸：每个0.25°原生网格单元使用一个固定值和固定颜色，不做插值。 */
+function drawRegionalFill(ctx, scene, width, height, grid, field, sampler) {
+  const bounds = grid?.bounds
+  if (!bounds) return
   const dataRange = fieldDataRange(sampler.values)
   if (!dataRange) return
-  for (const face of faces) {
-    const sourcePoints = face?.p
-    if (!Array.isArray(sourcePoints) || sourcePoints.length < 3) continue
-    const points = sourcePoints.map(point => scene.project(point.lon, point.lat, 0))
-    if (!points.every(point => point && Number.isFinite(point.x) && Number.isFinite(point.y))) continue
-    if (points.every(point => point.x < 0) || points.every(point => point.x > width) ||
-        points.every(point => point.y < 0) || points.every(point => point.y > height)) continue
-    let sum = 0
-    let count = 0
-    for (const point of sourcePoints) {
-      const value = sampleGridValue(sampler.values, sampler.longitudes, sampler.latitudes, point.lon, point.lat)
-      if (Number.isFinite(value)) { sum += value; count++ }
+  const longitudeEdges = axisCellEdges(sampler.longitudes)
+  const latitudeEdges = axisCellEdges(sampler.latitudes)
+  for (let row = 0; row < sampler.latitudes.length; row++) {
+    const north = Math.min(Number(bounds.north), latitudeEdges[row])
+    const south = Math.max(Number(bounds.south), latitudeEdges[row + 1])
+    if (!(north > south)) continue
+    for (let column = 0; column < sampler.longitudes.length; column++) {
+      const west = Math.max(Number(bounds.west), longitudeEdges[column])
+      const east = Math.min(Number(bounds.east), longitudeEdges[column + 1])
+      if (!(east > west)) continue
+      const value = num(sampler.values[row]?.[column])
+      if (!Number.isFinite(value)) continue
+      const points = [
+        scene.project(west, north, 0), scene.project(east, north, 0),
+        scene.project(east, south, 0), scene.project(west, south, 0),
+      ]
+      if (!points.every(point => point && Number.isFinite(point.x) && Number.isFinite(point.y))) continue
+      if (points.every(point => point.x < 0) || points.every(point => point.x > width) ||
+          points.every(point => point.y < 0) || points.every(point => point.y > height)) continue
+      const ratio = normalizeRange(value, dataRange)
+      const rgb = lighten(colorAt(field, ratio), 0.55)
+      const color = `rgba(${rgb.join(',')},${(0.3 + 0.45 * ratio).toFixed(3)})`
+      ctx.fillStyle = color
+      ctx.beginPath()
+      points.forEach((point, index) => index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y))
+      ctx.closePath()
+      ctx.fill()
     }
-    if (!count) continue
-    const ratio = normalizeRange(sum / count, dataRange)
-    const rgb = lighten(colorAt(field, ratio), 0.55)
-    ctx.fillStyle = `rgba(${rgb.join(',')},${(0.3 + 0.45 * ratio).toFixed(3)})`
-    ctx.beginPath()
-    points.forEach((point, index) => index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y))
-    ctx.closePath()
-    ctx.fill()
   }
 }
 
 /** 雨：无流场方向，用相位驱动垂直下落短竖线。 */
-function drawRainDrops(ctx, scene, width, height, grid, sampler, dataRange, white, rgba, elapsedMs) {
+function drawRainDrops(ctx, scene, width, height, grid, field, sampler, dataRange, rgba, elapsedMs) {
   const bounds = grid.bounds
   const span = Math.max(bounds.east - bounds.west, bounds.north - bounds.south)
   const particles = particlesFor(bounds)
@@ -407,7 +480,7 @@ function drawRainDrops(ctx, scene, width, height, grid, sampler, dataRange, whit
     if (head.x < -30 || head.x > width + 30 || head.y < -30 || head.y > height + 30) continue
     const tail = projectAt(particle.lon, wrap(lat - 0.012 * span, bounds.south, bounds.north))
     if (!tail || ![tail.x, tail.y].every(Number.isFinite)) continue
-    ctx.strokeStyle = rgba(white, alpha)
+    ctx.strokeStyle = rgba(lighten(colorAt(field, intensity), 0.25), alpha)
     ctx.lineWidth = 1.2
     ctx.beginPath()
     ctx.moveTo(tail.x, tail.y)
@@ -416,17 +489,19 @@ function drawRainDrops(ctx, scene, width, height, grid, sampler, dataRange, whit
   }
 }
 
-/** 风 / 海况：粒子按流场真实平流，风绘制渐隐拖尾轨迹、海况绘制浪峰线。 */
-function drawAdvectedFlow(ctx, scene, width, height, grid, field, sampler, dataRange, white, rgba, elapsedMs) {
+/** 风 / 海流 / 海况：粒子按流场真实平流；风和海流绘制拖尾，海况绘制浪峰线。 */
+function drawAdvectedFlow(ctx, scene, width, height, grid, field, sampler, dataRange, rgba, elapsedMs) {
   const bounds = grid.bounds
   const span = Math.max(bounds.east - bounds.west, bounds.north - bounds.south)
   const isSea = field.key === 'sea'
   const nowMs = elapsedMs || 0
-  const particles = ensureAdvectParticles(bounds, nowMs)
-  const dtSec = clamp((nowMs - advectLastMs) / 1000, 0, 0.05)
-  advectLastMs = nowMs
+  const advectState = ensureAdvectState(bounds, nowMs, field.key)
+  const particles = advectState.particles
+  const dtSec = clamp((nowMs - advectState.lastMs) / 1000, 0, 0.05)
+  advectState.lastMs = nowMs
 
-  if (dtSec > 0) stepAdvection(particles, sampler, bounds, dtSec)
+  const timeWarp = field.key === 'ocean-current' ? OCEAN_CURRENT_TIME_WARP : ADVECTION_TIME_WARP
+  if (dtSec > 0) stepAdvection(particles, sampler, bounds, dtSec, timeWarp)
 
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
@@ -437,6 +512,7 @@ function drawAdvectedFlow(ctx, scene, width, height, grid, field, sampler, dataR
     const intensity = normalizeRange(particle.speed, dataRange)
     if (intensity <= 0.005) continue
     const alpha = 0.22 + 0.78 * intensity
+    const lineRgb = lighten(colorAt(field, intensity), 0.25)
 
     const head = projectAt(particle.lon, particle.lat)
     if (!head || ![head.x, head.y].every(Number.isFinite)) continue
@@ -457,9 +533,9 @@ function drawAdvectedFlow(ctx, scene, width, height, grid, field, sampler, dataR
       const b = projectAt(particle.lon - perpLon * crestHalf, particle.lat - perpLat * crestHalf)
       if (!a || !b || ![a.x, a.y, b.x, b.y].every(Number.isFinite)) continue
       const grad = ctx.createLinearGradient(a.x, a.y, b.x, b.y)
-      grad.addColorStop(0, rgba(white, waveAlpha * 0.22))
-      grad.addColorStop(0.5, rgba(white, waveAlpha))
-      grad.addColorStop(1, rgba(white, waveAlpha * 0.22))
+      grad.addColorStop(0, rgba(lineRgb, waveAlpha * 0.22))
+      grad.addColorStop(0.5, rgba(lineRgb, waveAlpha))
+      grad.addColorStop(1, rgba(lineRgb, waveAlpha * 0.22))
       ctx.strokeStyle = grad
       ctx.lineWidth = 0.8 + intensity * 1.1
       ctx.beginPath()
@@ -500,9 +576,9 @@ function drawAdvectedFlow(ctx, scene, width, height, grid, field, sampler, dataR
       const tailPoint = points[0]
       const headPoint = points[points.length - 1]
       const grad = ctx.createLinearGradient(tailPoint.x, tailPoint.y, headPoint.x, headPoint.y)
-      grad.addColorStop(0, rgba(white, 0))
-      grad.addColorStop(0.6, rgba(white, alpha * 0.45))
-      grad.addColorStop(1, rgba(white, alpha))
+      grad.addColorStop(0, rgba(lineRgb, 0))
+      grad.addColorStop(0.6, rgba(lineRgb, alpha * 0.45))
+      grad.addColorStop(1, rgba(lineRgb, alpha))
       ctx.strokeStyle = grad
       ctx.lineWidth = 1.4
       ctx.beginPath()
@@ -517,11 +593,10 @@ function drawRegionalFlow(ctx, scene, width, height, grid, field, sampler, elaps
   const dataRange = fieldDataRange(sampler.values)
   if (!dataRange) return
   const rgba = (rgb, alpha) => `rgba(${rgb.join(',')},${alpha.toFixed(3)})`
-  const white = [255, 255, 255]
   if (field.key === 'rain') {
-    drawRainDrops(ctx, scene, width, height, grid, sampler, dataRange, white, rgba, elapsedMs)
+    drawRainDrops(ctx, scene, width, height, grid, field, sampler, dataRange, rgba, elapsedMs)
   } else {
-    drawAdvectedFlow(ctx, scene, width, height, grid, field, sampler, dataRange, white, rgba, elapsedMs)
+    drawAdvectedFlow(ctx, scene, width, height, grid, field, sampler, dataRange, rgba, elapsedMs)
   }
 }
 
@@ -550,8 +625,13 @@ export function drawWeatherOverlay(canvas, scene, grid, field, regional, dynamic
   const dpr = Math.min(2, globalThis.devicePixelRatio || 1)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
-  drawRegionalFill(ctx, scene, width, height, field, sampler)
+  drawRegionalFill(ctx, scene, width, height, grid, field, sampler)
   if (dynamic && field.key !== 'rain') {
     drawRegionalFlow(ctx, scene, width, height, grid, field, sampler, elapsedMs)
   }
+}
+
+/** 在海面 0 m 绘制区域环境噪声频带级伪彩图。 */
+export function drawRegionalNoiseOverlay(canvas, scene, grid, regional) {
+  drawWeatherOverlay(canvas, scene, grid, REGIONAL_NOISE_OVERLAY_FIELD, regional, false, 0)
 }
