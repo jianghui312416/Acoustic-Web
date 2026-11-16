@@ -24,6 +24,7 @@ export const signalTransmissionControls = reactive({
   showSourceWaveform: false,
   showTimeFrequency: false,
   showWaveform: false,
+  sliceReceiverPlacement: false,
   spectrogramFrequencyScale: 'linear',
   simulationDurationS: 30,
 })
@@ -120,6 +121,7 @@ export function normalizeSignalTransmissionControls(controls = signalTransmissio
   controls.showSourceWaveform = Boolean(controls.showSourceWaveform)
   controls.showTimeFrequency = Boolean(controls.showTimeFrequency)
   controls.showWaveform = Boolean(controls.showWaveform)
+  controls.sliceReceiverPlacement = Boolean(controls.sliceReceiverPlacement)
   controls.spectrogramFrequencyScale = controls.spectrogramFrequencyScale === 'log' ? 'log' : 'linear'
   return controls
 }

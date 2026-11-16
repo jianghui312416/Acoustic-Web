@@ -169,7 +169,7 @@
       <span class="st-label">航迹点选择</span>
     </label>
     <p v-if="selectedVessel" class="st-track-help">
-      航迹从 AIS 当前位置出发，按原航向和原航速前进，最大航程 5 海里。
+      航迹从 AIS 当前位置出发，按原航向和原航速前进，最大航程 1 海里。
     </p>
     <p v-if="state.selectTrackPoints" class="st-track-help">
       在地形区域单击添加发射点，双击仅结束选择且不计入航迹；一个点表示固定发射位置。
@@ -229,6 +229,16 @@
       />
       <span class="st-track"><i></i></span>
       <span class="st-label st-readout-label"><span aria-hidden="true">🔎</span><span>光标读取</span></span>
+    </label>
+
+    <label class="st-switch" :title="staticChannelReady ? '在垂直切面点击修改水听器位置和深度' : '仅完成单个航迹点选择后可用'">
+      <input
+        v-model="state.sliceReceiverPlacement"
+        type="checkbox"
+        :disabled="!staticChannelReady"
+      />
+      <span class="st-track"><i></i></span>
+      <span class="st-label st-readout-label"><span aria-hidden="true">⌖</span><span>切面接收位置</span></span>
     </label>
 
     <p v-if="!state.receiverReady" class="st-receiver-required">请先选择接收位置，再打开时频图或时域图</p>
@@ -331,6 +341,9 @@ const vessels = computed(() => {
 const trackPoints = computed(() => trackPointState.points)
 const trackSelectionReady = computed(() => Boolean(
   selectedVessel.value || (trackPointState.points.length > 0 && trackPointState.finished),
+))
+const staticChannelReady = computed(() => Boolean(
+  !selectedVessel.value && trackPointState.finished && trackPointState.points.length === 1,
 ))
 const selectedVessel = computed(() => selectedAisVessel.value)
 const selectedVesselSpeed = computed(() => {

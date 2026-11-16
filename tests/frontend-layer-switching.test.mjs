@@ -78,12 +78,21 @@ test('vertical loss layers stay mounted and use visibility switching', async () 
   assert.match(source, /textureFilter:\s*'linear'/)
 })
 
-test('terrain vertical slice uses only a crosshair for the receive hydrophone', async () => {
+test('terrain vertical slice enables receiver picking only for static signal placement', async () => {
   const view = await readSource('../src/views/AcousticFieldView.vue')
   const chart = await readSource('../src/components/TransmissionLossProfileChart.vue')
-  assert.match(view, /:receiver-marker="receiverArrayMarker" :receiver-interactive="false"/)
+  assert.match(view, /:receiver-interactive="sliceReceiverPlacementActive"/)
+  assert.match(view, /:receiver-placement-enabled="sliceReceiverPlacementActive"/)
+  assert.match(view, /@select-receiver="onSignalSliceReceiverSelected"/)
+  assert.match(view, /const sliceReceiverPlacementActive = computed\(\(\) => Boolean\([\s\S]*?staticSignalChannelReady\.value && signalTransmissionControls\.sliceReceiverPlacement/)
+  assert.match(view, /watch\(sliceReceiverPlacementActive,[\s\S]*?verticalSliceControls\.showSlice = true/)
+  assert.match(view, /signalTransmissionControls\.receiverDepthM = receiver\.depthM/)
+  assert.match(view, /destinationLonLat\(sourceLon, sourceLat, bearingDeg, rangeM\)/)
+  assert.match(view, /const receiver = receiverArrayMarker\.value[\s\S]*?receiver_lon: receiverLon[\s\S]*?receiver_depth_m: receiverDepth/)
   assert.match(chart, /class="rp-readout-marker rp-receiver-reference"/)
-  assert.match(chart, /props\.receiverInteractive && Number\.isFinite\(markerRangeM\)/)
+  assert.match(chart, /v-if="receiverHandlePos && receiverInteractive"[\s\S]*?class="rp-receiver-handle"/)
+  assert.match(chart, /class="rp-readout-cross" aria-hidden="true"/)
+  assert.doesNotMatch(chart, /name:\s*'接收水听器'/)
 })
 
 test('terrain receiver marker uses a slow water ripple and locator pin', async () => {
@@ -171,12 +180,17 @@ test('drawing additional sound fields never auto-expands an already loaded terra
   assert.match(terrain, /if \(inside \|\| grid\.value\) scheduleDraw\(\)/)
 })
 
-test('bathymetry reads bounded subsets from the configured local GEBCO NetCDF', async () => {
+test('bathymetry supports local GEBCO and switchable online tiles', async () => {
   const config = await readSource('../vite.config.js')
   const bathymetry = await readSource('../src/utils/bathymetry.js')
+  const source = await readSource('../src/modules/terrain/bathymetrySource.js')
+  const terrain = await readSource('../src/components/terrain/TerrainPreviewMode.vue')
   assert.match(config, /GEBCO_NC_PATH/)
   assert.match(config, /gebco_subset_server\.py/)
+  assert.match(config, /elevation-tiles-prod\/terrarium/)
   assert.match(bathymetry, /\/api\/gebco/)
-  assert.doesNotMatch(config, /elevation-tiles-prod|terrarium/i)
-  assert.doesNotMatch(bathymetry, /elevation-tiles-prod|terrarium/i)
+  assert.match(bathymetry, /Terrarium/)
+  assert.match(bathymetry, /BATHYMETRY_SOURCES/)
+  assert.match(source, /source: initialSource\(\)/)
+  assert.match(terrain, /switchBathymetrySource/)
 })

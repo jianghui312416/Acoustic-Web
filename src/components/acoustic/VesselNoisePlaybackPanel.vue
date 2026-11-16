@@ -26,7 +26,7 @@
       <footer>
         <template v-if="signalMode">
           <span><i class="weather-dot"></i>{{ signalChannel === 'source' ? '船舶发射信号＋声源位置环境噪声' : '传播信号＋固定接收点环境噪声' }}</span>
-          <b>随航迹分钟站位更新</b>
+          <b>Waypoint时变信道 · 连续接收</b>
         </template>
         <template v-else>
           <span><i class="weather-dot"></i>{{ vesselActive ? '环境噪声 + 船舶接收信号' : '环境噪声' }}</span>
@@ -145,7 +145,7 @@
           type="button"
           class="audio-generate audio-preview"
           :class="{ generating: clipBusy }"
-          :disabled="clipBusy"
+          :disabled="clipBusy || (signalMode && !backendClipPath)"
           :title="clipBusy ? '正在生成试听音频…' : '试听此前音频'"
           aria-label="试听此前音频"
           @click="prepareClip(true)"
@@ -160,12 +160,12 @@
           <input v-model.number="clipVolume" type="range" min="0" max="1" step="0.2" aria-label="播放音量" />
           <b>{{ volumePercent }}%</b>
         </label>
-        <button type="button" class="audio-download" title="下载此前音频的 WAV 文件" @click="downloadClip">下载 WAV</button>
+        <button type="button" class="audio-download" :disabled="signalMode && !backendClipPath" title="连续链路完成后下载后端音频" @click="downloadClip">下载 WAV</button>
       </div>
       <footer>
         <template v-if="signalMode">
           <span><i class="model-dot"></i>{{ signalChannel === 'source' ? '后端发射声压（含声源位置环境噪声）' : 'ADC数字码反标定声压（含接收点环境噪声）' }}</span>
-          <b>{{ signalChannel === 'source' ? `站位 ${Math.min(currentIndex + 1, Math.max(1, totalSamples))}/${Math.max(1, totalSamples)} · 每分钟更新` : receiverAdcStatus }}</b>
+          <b>{{ signalChannel === 'source' ? `Waypoint ${Math.min(currentIndex + 1, Math.max(1, totalSamples))}/${Math.max(1, totalSamples)} · 50 m间距` : receiverAdcStatus }}</b>
         </template>
         <template v-else>
           <span v-if="simulationActive" :class="{ inactive: !vesselActive }"><i class="model-dot"></i>{{ vesselActive ? (sourceClassLabel || '船舶噪声') : '船舶噪声尚未加入' }}</span>
@@ -182,6 +182,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { spectrogramPressureSeries } from '@/utils/vesselNoiseSimulation.js'
 import { encodeWavBlob } from '@/utils/wavAudio.js'
+import { absolutePortalFileUrl } from '@/api/signalTransmissionSocket.js'
 import {
   addSpectrogramReadoutMarker,
   spectrogramReadout,
@@ -196,8 +197,8 @@ const props = defineProps({
   signalChannel: { type: String, default: 'receiver' },
   windowRole: { type: String, default: 'receiver' },
   audioUrl: { type: String, default: '' },
+  backendClipPath: { type: String, default: '' },
   waveform: { type: Object, default: null },
-  arrivals: { type: Object, default: null },
   showWaveform: { type: Boolean, default: true },
   waveformMinimized: Boolean,
   showSpectrogram: { type: Boolean, default: true },
@@ -336,18 +337,6 @@ const receiverAdcStatus = computed(() => {
 })
 const vesselActive = computed(() => props.simulationActive && props.currentTime >= props.preRollDuration)
 const receivedPressure = computed(() => spectrogramPressureSeries(props.spectrogram))
-const multipathArrivals = computed(() => (
-  Array.isArray(props.arrivals?.impulse_response)
-    ? props.arrivals.impulse_response.map(path => ({
-      delayS: Math.max(0, Number(path?.delay_s) || 0),
-      amplitude: Math.max(0, Number(path?.amplitude) || Math.hypot(
-        Number(path?.gain_real) || 0,
-        Number(path?.gain_imag) || 0,
-      )),
-      phaseRad: (Number(path?.phase_deg) || 0) * Math.PI / 180,
-    })).filter(path => path.amplitude > 0)
-    : []
-))
 const pressureAxis = computed(() => {
   const limitPa = Math.max(1e-12, Number(waveformPressureLimitPa.value) || 1e-6)
   const unit = limitPa >= 1 ? 'Pa' : limitPa >= 1e-3 ? 'mPa' : 'µPa'
@@ -597,6 +586,18 @@ function revokeClipUrl() {
 
 async function prepareClip(play = false) {
   if (clipBusy.value) return
+  if (props.signalMode) {
+    if (!props.backendClipPath) return
+    emit('update:playing', false)
+    revokeClipUrl()
+    clipUrl.value = absolutePortalFileUrl(props.backendClipPath)
+    await nextTick()
+    if (clipAudioEl.value) {
+      clipAudioEl.value.volume = clipVolume.value
+      if (play) void clipAudioEl.value.play().catch(() => {})
+    }
+    return
+  }
   // 先暂停主播放，保证“此前音频”截止到当前暂停位置。
   emit('update:playing', false)
   clipBusy.value = true
@@ -617,6 +618,14 @@ async function prepareClip(play = false) {
 }
 
 function downloadClip() {
+  if (props.signalMode) {
+    if (!props.backendClipPath) return
+    const anchor = document.createElement('a')
+    anchor.href = absolutePortalFileUrl(props.backendClipPath)
+    anchor.download = `${props.signalChannel}.wav`
+    anchor.click()
+    return
+  }
   const { samples, sampleRate, startS, durationS } = buildClipSamples()
   const url = URL.createObjectURL(encodeWavBlob(samples, sampleRate))
   const label = props.signalChannel === 'source' ? '航迹声源' : '固定接收位置'
@@ -764,21 +773,9 @@ function receivedWaveformValue(timeS) {
       .filter(value => Number.isFinite(value) && value > 0)
       .slice(0, 12)
     if (!frequencies.length) return environmentalUnit
-    const paths = props.signalChannel === 'receiver' ? multipathArrivals.value : []
-    const signalUnit = paths.length
-      ? (() => {
-        const raw = paths.reduce((sum, path, index) => {
-          const frequencyHz = frequencies[index % frequencies.length]
-          return sum + path.amplitude * Math.sin(
-            2 * Math.PI * frequencyHz * (timeS - path.delayS) + path.phaseRad,
-          )
-        }, 0)
-        const rmsScale = Math.sqrt(paths.reduce((sum, path) => sum + path.amplitude ** 2, 0) / 2)
-        return raw / Math.max(1e-12, rmsScale)
-      })()
-      : frequencies.reduce((sum, frequencyHz, index) => (
-        sum + Math.sin(2 * Math.PI * frequencyHz * timeS + index * 0.71)
-      ), 0) / Math.sqrt(frequencies.length)
+    const signalUnit = frequencies.reduce((sum, frequencyHz, index) => (
+      sum + Math.sin(2 * Math.PI * frequencyHz * timeS + index * 0.71)
+    ), 0) / Math.sqrt(frequencies.length)
     return 0.82 * signalUnit + 0.18 * environmentalUnit
   }
   if (timeS < props.preRollDuration) return environmentalUnit
@@ -936,7 +933,7 @@ watch(() => props.audioUrl, () => { audioCurrentTime.value = 0 })
 watch(() => props.playing, value => {
   if (!value && generatedAudioActive.value) stopGeneratedAudio(false)
 })
-watch(() => [props.currentTime, props.showWaveform, props.waveformMinimized, props.vessel, props.waveform, props.signalChannel, props.arrivals], () => nextTick(renderWaveform), { deep: false })
+watch(() => [props.currentTime, props.showWaveform, props.waveformMinimized, props.vessel, props.waveform, props.signalChannel], () => nextTick(renderWaveform), { deep: false })
 watch(() => props.active, active => {
   if (active) nextTick(() => {
     renderSpectrogram()

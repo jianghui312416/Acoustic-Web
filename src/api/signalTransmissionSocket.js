@@ -16,6 +16,8 @@ export function createSignalTransmissionSocket({
   onReady,
   onProgress,
   onResult,
+  onChunk,
+  onComplete,
   onError,
   onStatus,
 } = {}) {
@@ -37,6 +39,8 @@ export function createSignalTransmissionSocket({
         if (payload?.type === 'config_ack') onReady?.(payload)
         else if (payload?.type === 'progress') onProgress?.(payload)
         else if (payload?.type === 'result') onResult?.(payload)
+        else if (payload?.type === 'chunk') onChunk?.(payload)
+        else if (payload?.type === 'stream_complete') onComplete?.(payload)
         else if (payload?.type === 'error') onError?.(new Error(payload.message || '信号传输计算失败'))
       } catch (error) {
         onError?.(new Error(`无法解析信号传输响应：${error.message}`))
@@ -62,5 +66,7 @@ export function createSignalTransmissionSocket({
   }
 
   connect()
-  return { simulate, close }
+  return { simulate, close, continueStream() {
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'continue' }))
+  } }
 }

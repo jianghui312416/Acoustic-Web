@@ -36,8 +36,32 @@
     <p class="section-title"><span aria-hidden="true">◆</span> POSITION</p>
 
     <div class="rows">
-      <span>Lat:</span><b>{{ latText }}°</b>
-      <span>Lon:</span><b>{{ lonText }}°</b>
+      <span>Lat:</span>
+      <label class="inline-field">
+        <input
+          v-model.number="simulation.coordY"
+          type="number"
+          min="-90"
+          max="90"
+          step="0.000001"
+          aria-label="纬度"
+          @change="normalize"
+        />
+        <em>°</em>
+      </label>
+      <span>Lon:</span>
+      <label class="inline-field">
+        <input
+          v-model.number="simulation.coordX"
+          type="number"
+          min="-180"
+          max="180"
+          step="0.000001"
+          aria-label="经度"
+          @change="normalize"
+        />
+        <em>°</em>
+      </label>
       <span>Bathy:</span><b>{{ bathyText }}</b>
       <span>Src Depth:</span>
       <label class="inline-field">
@@ -128,11 +152,6 @@
       </label>
     </div>
 
-    <div class="signal-transmission-box">
-      <p class="signal-transmission-title">信号传输</p>
-      <SignalTransmissionControls @run="$emit('signal-run')" />
-    </div>
-
     <nav>
       <button type="button" class="run-action" :disabled="busy" @click="$emit('run')">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7Z" fill="currentColor" /></svg>
@@ -143,9 +162,8 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { clampSimulationControls, simulationControls } from '@/modules/acoustic/simulationControls.js'
-import SignalTransmissionControls from '@/components/acoustic/SignalTransmissionControls.vue'
 import { formatCoordPair, nextCoordFormat, parseCoordPair } from '@/utils/coordinateFormat.js'
 
 const props = defineProps({
@@ -154,30 +172,19 @@ const props = defineProps({
   busy: { type: Boolean, default: false },
   hasRun: { type: Boolean, default: false },
 })
-const emit = defineEmits(['run', 'signal-run', 'close', 'settings'])
+const emit = defineEmits(['run', 'close', 'settings'])
 
 const simulation = simulationControls
 const coordInputEl = ref(null)
 const coordEditing = ref(false)
 const coordDraft = ref('')
-const coordLon = ref(0)
-const coordLat = ref(0)
-const coordText = computed(() => formatCoordPair(coordLat.value, coordLon.value, simulation.coordFormat))
+const coordText = computed(() => formatCoordPair(simulation.coordY, simulation.coordX, simulation.coordFormat))
 const depthM = computed(() => Math.max(0, -Number(props.point?.elevation || 0)))
-watch(
-  () => [props.point?.lon, props.point?.lat],
-  ([lon, lat]) => {
-    if (coordEditing.value) return
-    if (Number.isFinite(Number(lon))) coordLon.value = Number(lon)
-    if (Number.isFinite(Number(lat))) coordLat.value = Number(lat)
-  },
-  { immediate: true }
-)
 function cycleCoordFormat() {
   simulation.coordFormat = nextCoordFormat(simulation.coordFormat)
 }
 function beginCoordEdit() {
-  coordDraft.value = formatCoordPair(coordLat.value, coordLon.value, simulation.coordFormat)
+  coordDraft.value = formatCoordPair(simulation.coordY, simulation.coordX, simulation.coordFormat)
   coordEditing.value = true
   nextTick(() => {
     coordInputEl.value?.focus?.()
@@ -191,8 +198,6 @@ function cancelCoordEdit() {
 function applyCoordEdit() {
   const coords = parseCoordPair(coordDraft.value)
   if (!coords) return
-  coordLat.value = coords.lat
-  coordLon.value = coords.lon
   simulation.coordX = coords.lon
   simulation.coordY = coords.lat
   normalize()
@@ -207,11 +212,19 @@ const position = computed(() => {
   const x = Number(props.point?.x)
   const y = Number(props.point?.y)
   if (!Number.isFinite(x) || !Number.isFinite(y)) {
-    return { left: '50%', top: '24%', transform: 'translateX(-50%)' }
+    return {
+      left: '50%',
+      top: '24%',
+      transform: 'translateX(-50%)',
+      maxHeight: 'calc(76% - 42px)',
+    }
   }
+  const top = `clamp(70px, ${y - 40}px, calc(100% - 460px))`
   return {
     left: `clamp(8px, ${x + 18}px, calc(100% - 192px))`,
-    top: `clamp(70px, ${y - 40}px, calc(100% - 460px))`,
+    top,
+    // 卡片顶部可能被点位推到下方，必须按实际 top 限制高度，否则底部会被容器裁掉。
+    maxHeight: `calc(100% - ${top} - 42px)`,
   }
 })
 
@@ -228,6 +241,7 @@ function normalize() {
   max-width: calc(100% - 16px);
   max-height: calc(100% - 42px);
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 8px 9px 9px;
   border: 1px solid #00e6a5;
   border-radius: 9px;
@@ -271,20 +285,6 @@ header > span { flex: 1; color: #d3eaf4; font-size: 10px; white-space: nowrap; o
 .inline-field input:focus { border-color: #3fa5c3; }
 .inline-field em { color: #7d9bae; font-style: normal; font-size: 8px; }
 .inline-field small { display: none; }
-.signal-transmission-box { margin-top: 8px; padding: 7px; border: 1px solid #21445a; border-radius: 6px; background: #0a2334; }
-.signal-transmission-title { margin: 0 0 6px; color: #7897ad; font-size: 8px; letter-spacing: 0.8px; }
-.signal-transmission-box :deep(.signal-transmission-controls) { gap: 6px; font-size: 9px; }
-.signal-transmission-box :deep(.st-select) { grid-template-columns: 1fr 82px; gap: 5px; }
-.signal-transmission-box :deep(.st-select select) { height: 23px; padding: 0 5px; font-size: 9px; }
-.signal-transmission-box :deep(.st-number) { gap: 3px; }
-.signal-transmission-box :deep(.st-number input) { height: 23px; padding: 0 5px; font-size: 9px; }
-.signal-transmission-box :deep(.st-number em) { font-size: 8px; }
-.signal-transmission-box :deep(.st-switch) { min-height: 20px; }
-.signal-transmission-box :deep(.st-run) { height: 25px; font-size: 9px; }
-.signal-transmission-box :deep(.st-run svg) { width: 12px; height: 12px; }
-.signal-transmission-box :deep(.st-track) { width: 32px; height: 17px; }
-.signal-transmission-box :deep(.st-track i) { top: 2px; left: 2px; width: 11px; height: 11px; }
-.signal-transmission-box :deep(.st-switch input:checked + .st-track i) { transform: translateX(15px); }
 nav { display: flex; margin-top: 8px; }
 .run-action { width: 100%; height: 27px; display: flex; align-items: center; justify-content: center; gap: 5px; color: #00e9aa; border: 1px solid #00a987; border-radius: 5px; background: #10433d; cursor: pointer; font-size: 9px; }
 .run-action svg { width: 14px; height: 14px; }

@@ -78,6 +78,14 @@ test('backend waveform keeps aligned finite time and pressure samples', () => {
   assert.deepEqual(backendWaveformSeries(null), { times: [], values: [] })
 })
 
+test('continuous backend samples are never repeated beyond their recorded time', () => {
+  const wave = rollingBackendWaveformSeries({continuous: true, times: [0, 1, 2], values: [10, 20, 30]}, 5, 2)
+  assert.deepEqual(wave.values, [])
+  const matrix = rollingBackendSpectrogramMatrix({continuous: true, times: [0, 1, 2], frequencies: [0, 100],
+    data: [[0, 0, 1], [1, 0, 2], [2, 0, 3]], minDb: 0, maxDb: 3}, 5, 2)
+  assert.deepEqual(matrix.data, [])
+})
+
 test('backend plots advance through a rolling window without synthesizing samples', () => {
   const waveform = rollingBackendWaveformSeries({
     times: [0, 1, 2], values: [10, 20, 30],

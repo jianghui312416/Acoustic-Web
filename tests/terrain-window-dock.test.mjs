@@ -64,6 +64,26 @@ test('vessel run opens a synchronized hydrophone waveform with environmental pre
   assert.match(source, /if \(id === 'waveform'\) return '水听器时域波形'/)
 })
 
+test('signal arrivals stay at 50 m while the displayed sound field moves every 500 m', async () => {
+  assert.match(source, /const SIGNAL_ARRIVAL_WAYPOINT_SPACING_M = 50/)
+  assert.match(source, /const SIGNAL_FIELD_WAYPOINT_SPACING_M = 500/)
+  assert.match(source, /waypoint_spacing_m: SIGNAL_ARRIVAL_WAYPOINT_SPACING_M/)
+  assert.match(source, /resampleTrackByDistance\([\s\S]*?configuredSignalRoutePoints\.value,[\s\S]*?SIGNAL_FIELD_WAYPOINT_SPACING_M/)
+  assert.match(source, /function setVesselPlaybackTime\([\s\S]*?routeSampleIndexAtTime[\s\S]*?activateVesselRouteSample\(index\)/)
+  assert.match(source, /function applyVesselFieldRecord\([\s\S]*?sourcePoint\.value = \{[\s\S]*?record\.sample\.lon[\s\S]*?terrainSource\.value = \{[\s\S]*?record\.sample\.lon[\s\S]*?syncSoundField\(\)/)
+  assert.match(source, /nextIndex < vesselRouteSamples\.value\.length[\s\S]*?requestVesselFieldSample\(nextIndex\)/)
+  assert.doesNotMatch(source, /vesselRouteSamples\.value = result\.waypoints\.map/)
+})
+
+test('signal playback invalidates old-depth rays and requests one dynamic 2d slice', async () => {
+  assert.match(source, /function invalidateMovingSourceRayData\(\)[\s\S]*?rayLoadToken \+= 1[\s\S]*?rayDataByAzimuth\.clear\(\)[\s\S]*?staticRayData\.value = null/)
+  assert.match(source, /const use3dRays = computed\([\s\S]*?!signalPlaybackMode\.value/)
+  assert.match(source, /function applyVesselFieldRecord\(record\)[\s\S]*?invalidateMovingSourceRayData\(\)[\s\S]*?calcParams\.value\.srcDepth = vesselPlaybackSpectrum\.value\?\.sourceDepthM[\s\S]*?calcParams\.value\.rayInterface = 'dynamic'/)
+  assert.match(source, /routePlaybackKind\.value === 'signal'[\s\S]*?scheduleRayDataForAzimuth\(sliceAzimuthDeg\.value, 0\)/)
+  assert.match(source, /function request2dRay\([\s\S]*?analyse2dDynamicRTRD/)
+  assert.match(source, /if \(requestToken !== rayLoadToken\) return null[\s\S]*?rememberRayData\(key, result\)/)
+})
+
 test('compact playback controller is embedded inside the spectrogram and both plots use sidebar visibility controls', () => {
   assert.match(playbackPanel, /class="spectrogram-plot"[\s\S]*class="spectrogram-playback"[\s\S]*<footer>/)
   assert.match(playbackPanel, /\.spectrogram-playback \{ height: 36px;/)
@@ -188,16 +208,15 @@ test('signal result opens independent source and receiver plot windows instead o
   assert.match(playbackPanel, /minimum \+ \(maximum - minimum\) \* ratio/)
 })
 
-test('realtime signal route separates Bellhop arrivals from the configured field model', () => {
+test('realtime signal route reuses backend arrivals instead of re-requesting them', () => {
   assert.match(signalControls, /到达结构[\s\S]*Bellhop arrivals/)
-  assert.match(source, /analyseChannelImpulseResponse\(/)
-  assert.match(source, /arrivalTransmissionLossDb\(arrivals\)/)
-  assert.match(source, /:arrivals="signalCurrentArrivals"/)
-  assert.match(playbackPanel, /multipathArrivals/)
-  assert.match(playbackPanel, /timeS - path\.delayS/)
+  assert.doesNotMatch(source, /analyseChannelImpulseResponse\(/)
+  assert.doesNotMatch(source, /arrivalTransmissionLossDb\(arrivals\)/)
+  assert.doesNotMatch(source, /:arrivals="signalCurrentArrivals"/)
+  assert.doesNotMatch(playbackPanel, /multipathArrivals/)
   assert.match(source, /vesselPlaybackModel\.value = selectedModel/)
   assert.match(source, /calcParams\.value\.model = selectedModel/)
-  assert.match(source, /实时仿真已启动/)
+  assert.match(source, /连续仿真已启动/)
   assert.doesNotMatch(source, /applySignalStationNoise\(/)
   assert.doesNotMatch(source, /loadPositionNoiseSpectra\(/)
   assert.match(source, /routePlaybackKind\.value !== 'signal'/)

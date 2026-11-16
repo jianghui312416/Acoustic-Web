@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 const {
+  SOUND_FIELD_TIMEOUT_MS,
+  portalTimeoutMs,
   portalPluginForModel,
   analyse2dTLRDByModel,
   analyse3dTLRDByModel,
@@ -15,6 +17,15 @@ const {
   getDatasetList,
   getDatasetTimeList,
 } = await import('../src/api/soundFieldApi.js')
+
+test('uses a dedicated ten-minute timeout only for acoustic calculations', () => {
+  assert.equal(SOUND_FIELD_TIMEOUT_MS, 600_000)
+  assert.equal(portalTimeoutMs('AnalyseRam3DTLRD'), 600_000)
+  assert.equal(portalTimeoutMs('Analyse2DRTRDDynamic'), 600_000)
+  assert.equal(portalTimeoutMs('AnalyseChannelImpulseResponse'), 600_000)
+  assert.equal(portalTimeoutMs('GetEnvDataRegion'), undefined)
+  assert.equal(portalTimeoutMs('AnalyseEnvironmentNoise'), undefined)
+})
 
 test('routes every model, dimension and region to the api_endpoints registry contract', () => {
   const expected = {

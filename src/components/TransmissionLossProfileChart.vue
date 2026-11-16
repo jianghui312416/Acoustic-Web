@@ -21,13 +21,13 @@
   <div class="ray-profile">
     <header class="rp-head">
       <span class="rp-title">{{ chartTitle }}</span>
-      <span class="rp-tag">{{ Math.round(displayAzimuth(selectedAzimuth)) }}°</span>
       <span
         v-if="showSeabedMask"
         class="rp-bottom-status"
         :class="bottomStatusClass"
         :title="bottomStatusTitle"
       >{{ bottomStatusText }}</span>
+      <span class="rp-tag">{{ Math.round(displayAzimuth(selectedAzimuth)) }}°</span>
       <!-- <button
         type="button"
         class="rp-toggle"
@@ -73,23 +73,23 @@
         </button>
         <div v-if="receiverPlacementEnabled" class="rp-placement-tip">在剖面中单击接收阵中心</div>
         <span
-          v-if="receiverHandlePos && !receiverPlacementEnabled && !receiverInteractive"
+          v-if="receiverHandlePos && !receiverInteractive"
           class="rp-readout-marker rp-receiver-reference"
           :style="receiverHandlePos"
           aria-label="接收水听器位置"
         ><span class="rp-readout-cross" aria-hidden="true"></span></span>
         <button
-          v-if="receiverHandlePos && !receiverPlacementEnabled && receiverInteractive"
+          v-if="receiverHandlePos && receiverInteractive"
           type="button"
           class="rp-receiver-handle"
           :class="{ dragging: receiverDragging }"
           :style="receiverHandlePos"
-          title="拖动调整接收阵中心"
+          title="拖动调整接收水听器位置"
           @pointerdown="onReceiverPointerDown"
           @pointermove="onReceiverPointerMove"
           @pointerup="onReceiverPointerUp"
           @pointercancel="onReceiverPointerCancel"
-        ><i></i></button>
+        ><span class="rp-readout-cross" aria-hidden="true"></span></button>
         <div v-if="!profile.colCount" class="rp-empty">
           {{ data ? '当前方位无有效剖面数据' : '尚未加载声场数据' }}
         </div>
@@ -710,6 +710,7 @@ function bottomMaskLabel(segment) {
     `Alpha_p=${fmtBottomValue(p.alphaP, 3)} dB/λ`,
     `density=${fmtBottomValue(p.density, 1)} kg/m³`,
     `porosity=${fmtBottomValue(porosityPct, 1)} %`,
+    `thickness=${fmtBottomValue(p.thickness, 1)} m`,
   ].join('\n')
 }
 
@@ -969,7 +970,7 @@ function axisIndexFromPixel(value, list) {
 function updateReceiverHandlePos() {
   const p = profile.value
   const marker = props.receiverMarker
-  if (!chart || !p.colCount || !marker || props.receiverPlacementEnabled) {
+  if (!chart || !p.colCount || !marker) {
     receiverHandlePos.value = null
     return
   }
@@ -1252,25 +1253,6 @@ async function renderChart() {
   }
 
 
-  const markerRangeM = Number(props.receiverMarker?.rangeM)
-  const markerDepthM = Number(props.receiverMarker?.depthM)
-  if (props.receiverInteractive && Number.isFinite(markerRangeM) && Number.isFinite(markerDepthM) && p.dists.length && p.depths.length) {
-    const distanceIndex = nearestIndex(p.dists, markerRangeM)
-    const depthIndex = nearestIndex(p.depths, markerDepthM)
-    series.push({
-      name: '接收水听器',
-      type: 'scatter',
-      data: [[distanceIndex, depthIndex, markerRangeM, markerDepthM]],
-      symbol: `path://${READOUT_PIN_PATH}`,
-      symbolSize: 34,
-      symbolOffset: [0, '-35%'],
-      z: 8,
-      itemStyle: { color: '#20e0ff', borderColor: '#ffffff', borderWidth: 1.2 },
-      label: { show: true, formatter: '接收水听器', position: 'right', color: '#d9fbff', fontSize: 10 },
-      emphasis: { scale: 1.08 },
-    })
-  }
-
   chart.setOption(
     {
       backgroundColor: '#0b2545',
@@ -1296,9 +1278,6 @@ async function renderChart() {
             const segment = params?.data?.segment
             if (!segment) return ''
             return `${bottomMaskLabel(segment).replaceAll('\n', '<br/>')}<br/>距离 ${fmtNm(segment.startM)} ~ ${fmtNm(segment.endM)}`
-          }
-          if (params?.seriesName === '接收水听器') {
-            return `接收水听器<br/>距离 ${fmtNm(Number(val?.[2]) || 0)}<br/>深度 ${Number(val?.[3] || 0).toFixed(1)} m`
           }
           return ''
         },
@@ -1505,6 +1484,7 @@ onBeforeUnmount(() => {
 }
 
 .rp-tag {
+  flex: none;
   margin-left: auto;
   font-size: 10px;
   color: #93c5fd;
@@ -1606,8 +1586,9 @@ onBeforeUnmount(() => {
 }
 
 .rp-bottom-status {
+  flex: 1;
   min-width: 0;
-  max-width: 62%;
+  max-width: none;
   overflow: hidden;
   color: #67e8f9;
   font-size: 9px;
@@ -1784,7 +1765,7 @@ onBeforeUnmount(() => {
   color: #7f9fb1;
 }
 
-/* 接收阵拖动热区：与图表内的 pin 标记重合，拖动后实时回传新的距离/深度 */
+/* 接收点拖动热区：沿用切面点击读数的十字准星，拖动后实时回传距离/深度。 */
 .rp-receiver-handle {
   position: absolute;
   z-index: 8;
@@ -1799,40 +1780,15 @@ onBeforeUnmount(() => {
   touch-action: none;
 }
 
-.rp-receiver-handle::before {
-  content: '';
-  position: absolute;
-  inset: 9px;
-  border: 2px solid rgba(32, 224, 255, 0.9);
-  border-radius: 50%;
-  background: rgba(32, 224, 255, 0.12);
-  box-shadow: 0 0 10px rgba(32, 224, 255, 0.55);
-}
-
-.rp-receiver-handle::after {
-  content: '';
-  position: absolute;
-  top: 16px;
-  left: 3px;
-  width: 28px;
-  height: 1px;
-  background: rgba(32, 224, 255, 0.8);
-}
-
-.rp-receiver-handle i {
-  position: absolute;
-  top: 3px;
-  left: 16px;
-  width: 1px;
-  height: 28px;
-  background: rgba(32, 224, 255, 0.8);
+.rp-receiver-handle .rp-readout-cross {
+  inset: 7px;
 }
 
 .rp-receiver-handle.dragging {
   cursor: grabbing;
 }
 
-.rp-receiver-handle.dragging::before {
+.rp-receiver-handle.dragging .rp-readout-cross {
   background: rgba(32, 224, 255, 0.28);
   box-shadow: 0 0 16px rgba(32, 224, 255, 0.85);
 }

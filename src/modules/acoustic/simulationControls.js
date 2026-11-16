@@ -5,7 +5,6 @@ import { normalizeCoordFormat } from '@/utils/coordinateFormat.js'
 export const SIMULATION_MODELS = Object.freeze([
   Object.freeze({ id: 'bellhop', label: '射线模型' }),
   Object.freeze({ id: 'ram', label: 'RAM 模型' }),
-  Object.freeze({ id: 'kraken', label: 'KRAKEN 模型' }),
 ])
 
 /**
@@ -13,7 +12,7 @@ export const SIMULATION_MODELS = Object.freeze([
  * AcousticFieldView 会把这些字段与 calcParams 双向同步。
  *
  * 字段语义：
- *  - model            仿真模型（bellhop / ram / kraken）
+ *  - model            仿真模型（bellhop / ram）
  *  - time             仿真时间（UTC，ISO 字符串）
  *  - coordX / coordY  声源经度 / 纬度
  *  - srcDepth         声源深度（米）

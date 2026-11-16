@@ -22,8 +22,6 @@ const BASE_MAP_URL = '/tiles/img/{z}/{x}/{y}.png'
 // 需要时用 VITE_DETAIL_MAP_URL 指向可达的**同源 / 内网**影像服务
 // （例如内网瓦片服务，或经 vite.config.js 代理后的 '/gmap/...'）。
 const DETAIL_MAP_URL = import.meta.env.VITE_DETAIL_MAP_URL || ''
-// 全球地形瓦片（内网 GeoVis 地形服务，带高程起伏）
-const TERRAIN_URL = 'http://192.168.14.57:9000/tilesets/bjjd'
 
 let earth = null
 
@@ -140,20 +138,8 @@ export function createCesiumViewer(container, options = {}) {
   if (e.scene?.globe) e.scene.globe.maximumScreenSpaceError = 3
   if (e.scene && 'fxaa' in e.scene) e.scene.fxaa = false
 
-  // 先用椭球保证离线/内网地形不可达时地球仍可见；地形服务就绪后再无缝切换。
+  // 暂时不接入内网 GeoVis 地形服务，统一使用椭球地形。
   e.scene.terrainProvider = new Cesium.EllipsoidTerrainProvider()
-  try {
-    const terrain = new Cesium.GeoVisTerrainProvider({ url: TERRAIN_URL })
-    if (terrain?.ready === true) {
-      e.scene.terrainProvider = terrain
-    } else if (terrain?.readyPromise?.then) {
-      terrain.readyPromise
-        .then(() => {
-          if (!e.isDestroyed?.()) e.scene.terrainProvider = terrain
-        })
-        .catch(() => {})
-    }
-  } catch {}
 
   // 初始以更远的北极俯视视角展示完整数字地球。
   if (options.initialView !== false) {

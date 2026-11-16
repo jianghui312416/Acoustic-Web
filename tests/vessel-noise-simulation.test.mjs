@@ -15,7 +15,7 @@ import {
   SELECTED_VESSEL_MAX_RANGE_NM,
 } from '../src/utils/vesselNoiseSimulation.js'
 
-test('builds a selected AIS vessel route along COG with a five nautical mile limit', () => {
+test('builds a selected AIS vessel route along COG with a one nautical mile limit', () => {
   const route = buildSelectedVesselRoute({
     longitude: 114,
     latitude: 22,

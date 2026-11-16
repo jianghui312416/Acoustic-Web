@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { acousticTerrainBounds, buildLocalGebcoUrl, loadBathymetry } from '../src/utils/bathymetry.js'
+import { acousticTerrainBounds, buildLocalGebcoUrl, decodeTerrarium, loadBathymetry, terrainTilePoint } from '../src/utils/bathymetry.js'
 import { bathymetryColor, createTerrainProjection } from '../src/utils/terrainScene.js'
 
 test('local GEBCO request carries normalized bounds and a bounded resolution', () => {
@@ -43,6 +43,70 @@ test('local GEBCO reader retries transient errors and rejects invalid grids', as
   await assert.rejects(loadBathymetry(bounds, 9, {
     baseUrl: '/invalid-gebco', fetchJson: async () => ({ width: 2, height: 2, values: [0] }),
   }), /本地 GEBCO_2026_sub_ice/)
+})
+
+test('Terrarium decoding preserves negative seafloor elevations and fractional metres', () => {
+  assert.equal(decodeTerrarium(128, 0, 0), 0)
+  assert.equal(decodeTerrarium(108, 120, 0), -5000)
+  assert.equal(decodeTerrarium(128, 100, 128), 100.5)
+  assert.equal(decodeTerrarium(127, 255, 128), -.5)
+})
+
+test('geographic tile coordinates cover poles and antimeridian without requesting an invalid tile', () => {
+  assert.deepEqual(terrainTilePoint(0, 0, 1), { x: 1, y: 1, px: 0, py: 0 })
+  for (const [lon, lat] of [[180,85],[-180,-85],[116,16]]) {
+    const p = terrainTilePoint(lon, lat, 8)
+    assert.ok(p.x >= 0 && p.x < 256 && p.y >= 0 && p.y < 256)
+    assert.ok(p.px >= 0 && p.px < 256 && p.py >= 0 && p.py < 256)
+  }
+})
+
+function oceanPixels() {
+  const pixels = new Uint8ClampedArray(256 * 256 * 4)
+  for (let i = 0; i < pixels.length; i += 4) pixels.set([108,120,0,255],i)
+  return pixels
+}
+
+test('online Terrarium source falls back to a coarser level with real negative elevation', async () => {
+  const bounds = acousticTerrainBounds({ lon: -60, lat: 70.8 }, 73.34)
+  const attempted = []
+  let firstZoom
+  const grid = await loadBathymetry(bounds, 8, { source: 'online', readTile: async z => {
+    attempted.push(z)
+    firstZoom ??= z
+    if (z === firstZoom) throw new Error('TLS disconnected')
+    return oceanPixels()
+  } })
+  assert.equal(grid.dataSource, 'online')
+  assert.equal(grid.reducedResolution, true)
+  assert.equal(grid.zoom, firstZoom - 1)
+  assert.deepEqual(grid.bounds, bounds)
+  assert.equal(grid.min, -5000)
+  assert.equal(grid.count, 64)
+  assert.ok(attempted.includes(firstZoom - 1))
+})
+
+test('online Terrarium tile failures are bounded and never produce fake depth', async () => {
+  const levels = new Set()
+  await assert.rejects(loadBathymetry({west:-61,east:-59,south:70,north:71},4,{ source: 'online', readTile: async z => {
+    levels.add(z)
+    throw new Error('offline')
+  }}), /在线海底高程服务/)
+  assert.equal(levels.size, 3)
+})
+
+test('local and online sources stay selectable and keep the local reader intact', async () => {
+  const bounds = { west: 115, east: 119, south: 15, north: 19 }
+  const local = await loadBathymetry(bounds, 4, {
+    source: 'local',
+    baseUrl: '/switch-gebco',
+    fetchJson: async () => ({ width: 2, height: 2, values: [-800, -900, -1000, -1100], bounds }),
+  })
+  const online = await loadBathymetry(bounds, 4, { source: 'online', readTile: async () => oceanPixels() })
+  assert.equal(local.dataSource, 'local')
+  assert.equal(local.source, 'GEBCO_2026_sub_ice')
+  assert.equal(online.dataSource, 'online')
+  assert.equal(online.source, 'Terrarium')
 })
 
 test('terrain and acoustic source share a geographic projection with depth below sea level', () => {

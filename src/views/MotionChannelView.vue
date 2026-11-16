@@ -567,11 +567,11 @@ async function calculateWaypointField(config, waypointIndex) {
   const response = await analyse3dTLRD({
       coordX: Number(source.lon),
       coordY: Number(source.lat),
-      dataSource: 'EnvReanalysis',
+      dataSource: 'HYCOM',
       dataType: 'DT_ENV_SOUND',
       time: environmentTime,
       timeRes: 0,
-      rdataSource: 'EnvReanalysis',
+      rdataSource: 'HYCOM',
       rtime: environmentTime,
       rtimeRes: 0,
       srcDepth: Number(config.targetDepthM),

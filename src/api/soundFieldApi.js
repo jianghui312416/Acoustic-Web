@@ -23,18 +23,30 @@ import { getJson, postJson } from './httpClient.js'
 import { portalApiUrl } from '../config/runtimeConfig.js'
 
 /**
+ * 声场/声线求解可能明显长于普通数据接口，单独给 10 分钟等待时间。
+ * 其他门户接口仍使用全局 120 秒配置，避免普通请求长期无响应。
+ */
+export const SOUND_FIELD_TIMEOUT_MS = 600_000
+
+export function portalTimeoutMs(plugin) {
+  return /TLRD|RTRD|ImpulseResponse/.test(String(plugin || ''))
+    ? SOUND_FIELD_TIMEOUT_MS
+    : undefined
+}
+
+/**
  * 与后端 `_PORTAL_COMMON_EXAMPLE` 对齐的通用缺省参数。
- * rdataSource 固定 EnvReanalysis，rtime 需与 time 一致，rtimeRes 固定 0。
+ * 水体环境固定由后端 HYCOM 服务读取；rtime 需与 time 一致，rtimeRes 固定 0。
  */
 export function defaultCommonParams() {
   return {
     coordX: 116,
     coordY: 16,
-    dataSource: 'EnvReanalysis',
+    dataSource: 'HYCOM',
     dataType: 'DT_ENV_SOUND',
     time: '2025-01-04 12:00:00',
     timeRes: 0,
-    rdataSource: 'EnvReanalysis',
+    rdataSource: 'HYCOM',
     rtime: '2025-01-04 12:00:00',
     srcDepth: 150,
     range: 10,
@@ -80,7 +92,8 @@ const PORTAL_RETRYABLE = /WinError\s*32|另一个程序正在使用此文件|bei
 async function callPortalOnce(sn, plugin, requestPayload) {
   const { response: res, data: wrapped } = await postJson(
     portalApiUrl(),
-    buildPortalRequest(sn, plugin, requestPayload)
+    buildPortalRequest(sn, plugin, requestPayload),
+    { timeoutMs: portalTimeoutMs(plugin) }
   )
 
   // 门户在业务校验失败时也可能返回 HTTP 500，但响应体仍是完整门户格式，
@@ -242,19 +255,9 @@ export const analyseIceRam2dTLRD = (params) => analyse2dTLRDByModel(params, 'ram
 export const analyseIceRam3dTLRD = (params) => analyse3dTLRDByModel(params, 'ram', true)
 
 /** 二维声线轨迹 (SN=19 → Analyse2DRTRD)。params 覆盖 / 补充通用缺省字段。 */
-const NOISE_PORTALS = Object.freeze({
-  normal: Object.freeze([16, 'AnalyseEnvironmentNoise']),
-  ice: Object.freeze([16, 'AnalyseIceEnvironmentNoise']),
-})
-
-/**
- * 环境噪声计算。
- * 非冰区手动模式只接受航运 / 海况 / 降雨等级与频率参数；
- * 冰区还接受接收点、工作深度、数据集与查询时间等环境场字段。
- */
-export function analyseEnvironmentNoise(params, ice = false) {
-  const [sn, plugin] = NOISE_PORTALS[ice ? 'ice' : 'normal']
-  return callPortal(sn, plugin, params)
+/** 当前前端只保留非冰区环境噪声。 */
+export function analyseEnvironmentNoise(params) {
+  return callPortal(16, 'AnalyseEnvironmentNoise', params)
 }
 
 function directEndpoint(path) {
@@ -382,11 +385,6 @@ export function getEnvDataStation(params) {
 
 export function getDataTypeMetaInfo() {
   return callPortal(1, 'GetDataTypeMetaInfo', {})
-}
-
-/** 环境数据集目录 (SN=1)。 */
-export function getDatasetList() {
-  return callPortal(1, 'GetEnvDataSourceList', {})
 }
 
 /** 指定数据集的可用时次 (SN=2)。 */

@@ -1,5 +1,5 @@
 const EARTH_RADIUS_M = 6_371_008.8
-export const SELECTED_VESSEL_MAX_RANGE_NM = 5
+export const SELECTED_VESSEL_MAX_RANGE_NM = 1
 
 const radians = value => Number(value) * Math.PI / 180
 const degrees = value => Number(value) * 180 / Math.PI

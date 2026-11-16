@@ -79,7 +79,6 @@
       :busy="loading"
       :has-run="stationPositionHasRun"
       @run="runStationPositionCard"
-      @signal-run="runSignalTransmission"
       @close="closeStationPositionCard"
       @settings="toggleTerrainSettings"
     />
@@ -108,10 +107,11 @@
         :bottom-type-segments="profileBottomTypeSegments" :bottom-type-state="profileBottomTypeState" :refresh-token="chartRefreshToken"
         :show-seabed="verticalSliceControls.seafloorLineAndMask" :show-seabed-mask="verticalSliceControls.seafloorMask"
         :readout-enabled="verticalSliceControls.cursorReadout" :click-markers="verticalSliceControls.cursorReadout"
-        :receiver-marker="receiverArrayMarker" :receiver-interactive="false"
+        :receiver-marker="receiverArrayMarker" :receiver-interactive="sliceReceiverPlacementActive"
+        :receiver-placement-enabled="sliceReceiverPlacementActive"
         :db-min="profileDbRange.min" :db-max="profileDbRange.max"
         :signal-excess="signalExcessParams"
-        height="280px" @update:azimuth-deg="onProfileAzimuthChange" />
+        height="280px" @update:azimuth-deg="onProfileAzimuthChange" @select-receiver="onSignalSliceReceiverSelected" />
     </section>
     <section v-show="viewMode === 'terrain' && terrainProfileOpen && !terrainProfileMinimized" ref="terrainProfileRef" class="terrain-profile-window" :style="terrainProfileStyle" aria-label="声速剖面">
       <header class="terrain-window-title" @pointerdown="startTerrainProfileDrag">
@@ -139,8 +139,8 @@
       signal-channel="receiver"
       window-role="receiver"
       :audio-url="signalReceiverAudioUrl"
+      :backend-clip-path="signalTransmissionSession.result?.files?.receiver_monitor_wav || ''"
       :waveform="signalReceiverWaveform"
-      :arrivals="signalCurrentArrivals"
       :show-waveform="signalTransmissionControls.showWaveform"
       :waveform-minimized="vesselWaveformMinimized"
       :spectrogram="receiverDisplaySpectrogram"
@@ -180,6 +180,7 @@
       signal-channel="source"
       window-role="source"
       :audio-url="signalSourceAudioUrl"
+      :backend-clip-path="signalTransmissionSession.result?.files?.source_monitor_wav || ''"
       :waveform="signalSourceWaveform"
       :show-waveform="signalTransmissionControls.showSourceWaveform"
       :waveform-minimized="sourceWaveformMinimized"
@@ -244,8 +245,7 @@
             v-else
             type="button"
             class="cal-cell"
-            :class="{ active: cell.iso === pickerDate, disabled: !cell.hasData }"
-            :disabled="!cell.hasData"
+            :class="{ active: cell.iso === pickerDate, available: cell.hasData }"
             @click="selectPickerDate(cell.iso)"
           >
             {{ cell.day }}
@@ -279,12 +279,6 @@
       </header>
 
       <div class="parameter-scroll">
-        <div class="form-row">
-          <label>数据集</label>
-          <select v-model="calcParams.dataset" @change="loadDatasetTimes(calcParams)">
-            <option v-for="item in datasetOptions" :key="item.id" :value="item.id">{{ item.name }}</option>
-          </select>
-        </div>
         <div class="form-row">
           <label>查询时间</label>
           <button ref="timeTriggerEl" type="button" class="time-trigger" @click.stop="openTimePicker('calc')">
@@ -425,24 +419,11 @@
 
       <div class="parameter-scroll">
         <div class="form-row">
-          <label>数据集</label>
-          <select v-model="noiseParams.dataset" @change="loadDatasetTimes(noiseParams)">
-            <option v-for="item in datasetOptions" :key="item.id" :value="item.id">{{ item.name }}</option>
-          </select>
-        </div>
-        <div class="form-row">
           <label>查询时间</label>
           <button ref="noiseTimeTriggerEl" type="button" class="time-trigger" @click.stop="openTimePicker('noise')">
             <span>{{ displayNoiseQueryTime }}</span>
             <i aria-hidden="true">▾</i>
           </button>
-        </div>
-        <div class="form-row radio-row">
-          <label>数据类型</label>
-          <div class="radio-group">
-            <label><input v-model="noiseParams.regionType" value="normal" type="radio" @change="onNoiseRegionChange" /> 非冰区</label>
-            <label><input v-model="noiseParams.regionType" value="ice" type="radio" @change="onNoiseRegionChange" /> 冰区</label>
-          </div>
         </div>
 
         <div class="section-caption"><span>接收点</span></div>
@@ -577,34 +558,11 @@
           <p v-if="!noiseParams.timeFrequencyScenario.shipEvents.length" class="scenario-empty">没有船舶经过事件</p>
         </div>
 
-        <div v-if="noiseParams.regionType === 'ice'" class="scenario-editor">
-          <div class="scenario-editor-head">
-            <span>冰裂事件</span>
-            <button type="button" @click="addIceCrackEvent">＋ 添加</button>
-          </div>
-          <div class="scenario-grid scenario-grid-crack scenario-grid-labels">
-            <span>时刻(s)</span><span>持续(s)</span><span>强度</span><span></span>
-          </div>
-          <div
-            v-for="(event, index) in noiseParams.timeFrequencyScenario.iceCrackEvents"
-            :key="`crack-${index}`"
-            class="scenario-grid scenario-grid-crack"
-          >
-            <input v-model.number="event.timeS" type="number" min="0" :max="noiseParams.timeFrequencyScenario.durationS" step="0.5" />
-            <input v-model.number="event.durationS" type="number" min="0.05" :max="noiseParams.timeFrequencyScenario.durationS" step="0.1" />
-            <input v-model.number="event.level" type="number" min="1" max="5" step="1" />
-            <button type="button" class="scenario-remove" title="删除冰裂事件" @click="removeScenarioItem('iceCrackEvents', index)">×</button>
-          </div>
-          <p v-if="!noiseParams.timeFrequencyScenario.iceCrackEvents.length" class="scenario-empty">没有冰裂事件</p>
-        </div>
-
         <div class="scenario-actions">
           <button type="button" @click="resetNoiseScenario">恢复默认场景</button>
           <button type="button" @click="clearNoiseScenarioEvents">清空事件</button>
         </div>
-        <p v-if="noiseParams.regionType !== 'ice'" class="noise-hint">
-          非冰区接口采用手动等级模式，接收点与查询时间仅在冰区环境中参与计算。
-        </p>
+        <p class="noise-hint">环境噪声接口采用航运、海况和降雨等级模型。</p>
         <p class="noise-hint">时频图由以上前端场景合成，不代表连续环境预报；后端谱图仍对应所选查询时次。</p>
       </div>
 
@@ -766,7 +724,7 @@
           <span class="noise-result-tag">{{ noiseResultLabel }}</span>
         </div>
         <p class="result-meta">{{ noiseResultMeta }}</p>
-        <EnvironmentNoiseResult :data="noiseResult" :variant="noiseResultParams?.regionType || noiseParams.regionType" :params="noiseResultParams || noiseParams" />
+        <EnvironmentNoiseResult :data="noiseResult" variant="normal" :params="noiseResultParams || noiseParams" />
       </div>
     </aside>
 
@@ -1439,7 +1397,6 @@ import {
 // 声场计算接口：提交参数后直接调用后端 portal 同步计算（不再读取静态 JSON）
 import {
   analyse3dTLRDByModel,
-  analyseChannelImpulseResponse,
   analyse2dTLRDByModel,
   analyse2dRTRD,
   analyseIce2dRTRD,
@@ -1448,7 +1405,6 @@ import {
   analyse3dDynamicRTRD,
   analyseIce3dDynamicRTRD,
   portalPluginForModel,
-  getDatasetList,
   getDatasetTimeList,
   getEnvDataRoute,
   getEnvDataRegion,
@@ -1515,6 +1471,9 @@ const terrainNoiseMinimized = ref(false)
 const terrainSource = ref({ lon: 116, lat: 16, depth: 150 })
 /** 默认地形框边长 100 km×100 km；acousticTerrainBounds 按 6× 半径展开。 */
 const DEFAULT_TERRAIN_SPAN_KM = 100
+/** 到达结构保持 50 m 精度；三维声场体每 500 m 更新一次，避免重复重算。 */
+const SIGNAL_ARRIVAL_WAYPOINT_SPACING_M = 50
+const SIGNAL_FIELD_WAYPOINT_SPACING_M = 500
 const terrainRadiusKm = ref(DEFAULT_TERRAIN_SPAN_KM / 6)
 /** 历史声场与工作区声场共用同一套胶囊 / 垂直切面 / 动态声线数据。 */
 const runHistoryLayers = shallowRef([])
@@ -1824,7 +1783,7 @@ function jobCalculationParams(job = {}, field = null) {
   const depth = Number(source.depth_m ?? portal.srcDepth ?? stored.source_depth_m ?? params.srcDepth)
   return {
     ...params,
-    dataset: String(portal.dataSource || stored.data_source || params.dataset || 'EnvReanalysis'),
+    dataset: 'HYCOM',
     time: rawTime,
     regionType: stored.region_type || (/ice|冰/i.test(String(job.model_label || '') + String(portal.dataType || stored.data_type || '')) ? 'ice' : 'normal'),
     coordX: Number.isFinite(lon) ? lon : Number(params.coordX),
@@ -2287,10 +2246,25 @@ function runTerrainField() {
   executeRunRequest()
 }
 /** 地形上单击取点后，同步侧边栏「仿真配置」的经纬度。 */
+function dismissSignalPlaybackForFieldRun() {
+  const hasOpenPlayback = vesselPlaybackOpen.value
+    || routePlaybackKind.value === 'signal'
+    || signalTransmissionSession.playbackActive
+  if (hasOpenPlayback) {
+    closeVesselPlayback(false)
+    signalTransmissionControls.showTimeFrequency = false
+    signalTransmissionControls.showWaveform = false
+    signalTransmissionControls.showSourceTimeFrequency = false
+    signalTransmissionControls.showSourceWaveform = false
+  }
+  // 只要本次会话跑过完整链路，航迹点就不能把下一次普通地形计算劫持成航迹仿真。
+  if (hasOpenPlayback || signalTransmissionSession.result) skipVesselSimulationOnce = true
+}
 function syncSimulationLocationFromTerrain(point) {
   const lon = Number(point?.lon)
   const lat = Number(point?.lat)
   if (!Number.isFinite(lon) || !Number.isFinite(lat)) return
+  dismissSignalPlaybackForFieldRun()
   calcParams.value.coordX = Number(lon.toFixed(6))
   calcParams.value.coordY = Number(lat.toFixed(6))
 }
@@ -2473,11 +2447,12 @@ const vesselReceiverTlDb = ref([])
 const vesselReceiverDistancesM = ref([])
 const vesselFieldCache = new Map()
 const vesselFieldRequests = new Map()
-const signalCurrentArrivals = shallowRef(null)
 const REALTIME_PREVIEW_DURATION_S = 24 * 60 * 60
 let vesselPlaybackGeneration = 0
 let vesselPlaybackRaf = 0
 let vesselPlaybackLastFrameAt = 0
+/** 从信号/航迹播放切回普通地形声场时，下一次计算不要再次进入船舶航迹仿真。 */
+let skipVesselSimulationOnce = false
 const signalPlaybackMode = computed(() => Boolean(
   routePlaybackKind.value === 'signal'
 ))
@@ -2493,6 +2468,12 @@ const configuredSignalRouteReady = computed(() => Boolean(
   selectedAisVessel.value
     ? selectedVesselRoute.value.length >= 2
     : trackPointState.points.length > 0 && trackPointState.finished
+))
+const staticSignalChannelReady = computed(() => Boolean(
+  !selectedAisVessel.value && trackPointState.finished && trackPointState.points.length === 1,
+))
+const sliceReceiverPlacementActive = computed(() => Boolean(
+  staticSignalChannelReady.value && signalTransmissionControls.sliceReceiverPlacement,
 ))
 const configuredSignalSpeedKn = computed(() => {
   const speed = Number(selectedAisVessel.value?.sog_kn ?? signalTransmissionControls.vesselSpeedKn)
@@ -2541,13 +2522,15 @@ const spectrogramFrequencyBounds = computed(() => ({
   maximumHz: Math.max(20, Number(signalTransmissionControls.sampleRate) / 2 || 24000),
 }))
 // 完整传输链路的四个图只消费后端结果；前端负责格式转换和绘制。
+const sourceBackendMatrix = computed(() => backendSpectrogramMatrix(signalTransmissionSession.result?.spectrograms?.source_pressure))
+const receiverBackendMatrix = computed(() => backendSpectrogramMatrix(signalTransmissionSession.result?.spectrograms?.adc_calibrated_pressure))
 const signalSourceSpectrogramData = computed(() => rollingBackendSpectrogramMatrix(
-  backendSpectrogramMatrix(signalTransmissionSession.result?.spectrograms?.source_pressure),
+  sourceBackendMatrix.value,
   vesselPlaybackTimeS.value,
   vesselTimeFrequencyWindowS.value,
 ))
 const adcCalibratedReceiverSpectrogramData = computed(() => rollingBackendSpectrogramMatrix(
-  backendSpectrogramMatrix(signalTransmissionSession.result?.spectrograms?.adc_calibrated_pressure),
+  receiverBackendMatrix.value,
   vesselPlaybackTimeS.value,
   vesselTimeFrequencyWindowS.value,
 ))
@@ -2621,26 +2604,17 @@ const receiverSpectrogramData = computed(() => (
     ? vesselPlaybackSpectrogramData.value
     : adcCalibratedReceiverSpectrogramData.value
 ))
-// 声源/接收两个时频图（含运行前的实时预览）共用同一色标范围。
-const signalSpectrogramColorRange = computed(() => {
-  let minDb = Infinity
-  let maxDb = -Infinity
-  for (const matrix of [signalSourceSpectrogramData.value, receiverSpectrogramData.value]) {
-    if (!matrix?.data?.length) continue
-    const minimum = Number(matrix?.minDb)
-    const maximum = Number(matrix?.maxDb)
-    if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || maximum <= minimum) continue
-    minDb = Math.min(minDb, minimum)
-    maxDb = Math.max(maxDb, maximum)
-  }
-  return maxDb > minDb ? { minDb, maxDb } : null
-})
+// 声源/接收两个时频图（含运行前的实时预览）统一使用固定的 50–110 dB 色标范围。
+const SIGNAL_SPECTROGRAM_COLOR_RANGE = Object.freeze({ minDb: 50, maxDb: 110 })
+const signalSpectrogramColorRange = computed(() => (
+  backendSignalPlotMode.value ? SIGNAL_SPECTROGRAM_COLOR_RANGE : null
+))
 function withSpectrogramColorRange(matrix, range) {
   if (!matrix || !range) return matrix
   return { ...matrix, minDb: range.minDb, maxDb: range.maxDb }
 }
 const signalSourceSpectrogram = computed(() => (
-  withSpectrogramColorRange(signalSourceSpectrogramData.value, signalSpectrogramColorRange.value)
+  withSpectrogramColorRange(signalSourceSpectrogramData.value, SIGNAL_SPECTROGRAM_COLOR_RANGE)
 ))
 const receiverDisplaySpectrogram = computed(() => (
   withSpectrogramColorRange(receiverSpectrogramData.value, signalSpectrogramColorRange.value)
@@ -2683,10 +2657,10 @@ function updateCoordStatus(screenPos) {
   }
 }
 
-const datasetOptions = ref([{ id: 'EnvReanalysis', name: '历史数据集' }])
 const timeOptions = ref(['2025-01-02T12:00:00'])
+const hycomTimeMeta = ref({ defaultTime: '', forecastStartTime: '' })
 
-/* ── 查询时间：日历弹层（先选年/月/日，再选时次；无数据的日期禁用） ── */
+/* ── 查询时间：日历弹层（先选年/月/日，再选时次；本地已有数据仅作提示） ── */
 const timePickerOpen = ref(false)
 const timeTriggerEl = ref(null)
 const noiseTimeTriggerEl = ref(null)
@@ -2699,7 +2673,7 @@ const pad2 = (n) => String(n).padStart(2, '0')
 const displayQueryTime = computed(() => String(calcParams.value.time || '').replace('T', ' '))
 const displayNoiseQueryTime = computed(() => String(noiseParams.value.time || '').replace('T', ' '))
 const activeTimeParams = computed(() => (timePickerTarget.value === 'noise' ? noiseParams : calcParams))
-/** 有数据的日期集合（'YYYY-MM-DD'） */
+/** 当前本地文件已确认可用的日期集合（仅用于提示）。 */
 const timeDateSet = computed(() => new Set(timeOptions.value.map((t) => String(t).slice(0, 10))))
 /** 日期 → 该日可选时次列表 */
 const timesByDate = computed(() => {
@@ -2711,7 +2685,7 @@ const timesByDate = computed(() => {
   }
   return map
 })
-/** 当月日历格：前导空白 + 每天（带 hasData 标记） */
+/** 当月日历格：允许选择任意日期，文件是否存在由后端在计算时校验。 */
 const calendarCells = computed(() => {
   const y = pickerYear.value
   const m = pickerMonth.value
@@ -2721,18 +2695,24 @@ const calendarCells = computed(() => {
   for (let i = 0; i < startWeekday; i++) cells.push(null)
   for (let d = 1; d <= daysInMonth; d++) {
     const iso = `${y}-${pad2(m)}-${pad2(d)}`
-    cells.push({ day: d, iso, hasData: timeDateSet.value.has(iso) })
+    cells.push({ day: d, iso, hasData: timeDateSet.value.has(iso), selectable: true })
   }
   return cells
 })
-const pickerTimes = computed(() => timesByDate.value.get(pickerDate.value) ?? [])
+const pickerTimes = computed(() => {
+  const date = String(pickerDate.value || '')
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return []
+  // 本地 HYCOM 温盐为 3 小时步长。即使当前没有对应文件也允许选择，
+  // 后端 file 模式会返回明确的“该时次没有本地文件”错误。
+  return Array.from({ length: 8 }, (_, index) => `${date}T${pad2(index * 3)}:00:00`)
+})
 
 function openTimePicker(kind = 'calc') {
   timePickerTarget.value = kind === 'noise' ? 'noise' : 'calc'
   const cur = String(activeTimeParams.value.time || '') || timeOptions.value[0] || ''
   const curDate = cur.slice(0, 10)
   const firstDate = String(timeOptions.value[0] || '').slice(0, 10)
-  const target = timeDateSet.value.has(curDate) ? curDate : firstDate
+  const target = /^\d{4}-\d{2}-\d{2}$/.test(curDate) ? curDate : firstDate
   pickerDate.value = target
   const [y, m] = target.split('-').map(Number)
   pickerYear.value = Number.isFinite(y) ? y : new Date().getFullYear()
@@ -2770,9 +2750,9 @@ function shiftPickerMonth(delta) {
   pickerMonth.value = m
 }
 
-/** 选日期：仅当该日有数据时可选（无数据的按钮已禁用） */
+/** 选日期：允许任意日期；本地文件是否存在由后端校验。 */
 function selectPickerDate(iso) {
-  if (!iso || !timeDateSet.value.has(iso)) return
+  if (!iso) return
   pickerDate.value = iso
 }
 
@@ -2786,7 +2766,7 @@ function selectPickerTime(t) {
  * coordX/coordY 同时作为声源经纬度（三维体渲染的解码原点）。
  */
 const calcParams = ref({
-  dataset: 'EnvReanalysis',
+  dataset: 'HYCOM',
   time: '2025-01-02T12:00:00',
   regionType: 'normal',
   // 默认声源放在北极海域（巴伦支海），避免默认落到陆地
@@ -2840,13 +2820,9 @@ watch(
   },
   { immediate: true, flush: 'sync' }
 )
-/**
- * 环境噪声参数（面板样式与声场参数一致）：
- *   - 非冰区（normal）→ AnalyseEnvironmentNoise，仅发送航运 / 海况 / 降雨等级与频率；
- *   - 冰区（ice）→ AnalyseIceEnvironmentNoise，额外发送接收点、工作深度、数据集和查询时间。
- */
+/** 环境噪声参数：只调用 AnalyseEnvironmentNoise。 */
 const noiseParams = ref({
-  dataset: 'EnvReanalysis',
+  dataset: 'HYCOM',
   time: '2025-01-02T12:00:00',
   regionType: 'normal',
   receiverX: 132.5135,
@@ -2863,7 +2839,7 @@ const noiseParams = ref({
 const noiseResult = shallowRef(null)
 const noiseResultParams = ref(null)
 const noiseResultOutdated = ref(false)
-const noiseResultLabel = computed(() => ((noiseResultParams.value?.regionType || noiseParams.value.regionType) === 'ice' ? '冰区环境噪声' : '环境噪声'))
+const noiseResultLabel = computed(() => '环境噪声')
 const noiseResultMeta = computed(() => {
   const p = noiseResultParams.value || noiseParams.value
   const freq = Number(p.minFreq) === Number(p.maxFreq) ? `${p.minFreq} Hz` : `${p.minFreq}~${p.maxFreq} Hz`
@@ -2946,6 +2922,25 @@ const rayRequestByKey = new Map()
 const MAX_CACHED_RAY_AZIMUTHS = 2
 let rayLoadToken = 0
 let rayLoadTimer = 0
+
+/**
+ * 移动声源切换声场站位时，旧声线的声源位置/深度已经失效。
+ * 同时递增令牌，使仍在返回途中的旧二维/三维声线响应不能重新写回缓存。
+ */
+function invalidateMovingSourceRayData() {
+  clearTimeout(rayLoadTimer)
+  rayLoadTimer = 0
+  rayLoadToken += 1
+  ray3dToken += 1
+  ray3dRequest = null
+  rayRequestByKey.clear()
+  rayDataByAzimuth.clear()
+  ray3dByAzimuth.static.clear()
+  ray3dByAzimuth.dynamic.clear()
+  staticRayData.value = null
+  stopVolumeRayAnimation()
+  stopSliceRayAnimation()
+}
 
 function rememberRayData(key, value) {
   if (rayDataByAzimuth.has(key)) rayDataByAzimuth.delete(key)
@@ -3110,6 +3105,17 @@ watch(() => verticalSliceControls.showSlice, (val) => {
   // 图层常驻：开关只改显隐，不销毁 ECharts 或三维剖面 primitive。
   applySliceCurtainVisibility()
 })
+watch(staticSignalChannelReady, (ready) => {
+  if (!ready) signalTransmissionControls.sliceReceiverPlacement = false
+})
+watch(sliceReceiverPlacementActive, (active) => {
+  if (!active) return
+  verticalSliceControls.showSlice = true
+  terrainSliceOpen.value = true
+  terrainSliceMinimized.value = false
+  removeTerrainWindowFromDock('slice')
+  nextTick(() => terrainLossChartRef.value?.refreshLayout?.())
+})
 watch(() => verticalSliceControls.sspWindow, (val) => {
   terrainProfileOpen.value = !!val
 })
@@ -3133,6 +3139,7 @@ watch(() => terrainSliceOpen.value, (val) => {
     seekRayFlowClock(0)
     nextTick(() => terrainLossChartRef.value?.refreshLayout?.())
   } else {
+    signalTransmissionControls.sliceReceiverPlacement = false
     terrainSliceMinimized.value = false
     removeTerrainWindowFromDock('slice')
   }
@@ -3515,43 +3522,27 @@ function portalUnitResponse(json) {
   return json?.Data?.Units?.[0]?.Response
 }
 
-function arrivalTransmissionLossDb(arrivals) {
-  const paths = Array.isArray(arrivals?.impulse_response) ? arrivals.impulse_response : []
-  const power = paths.reduce((sum, path) => {
-    const real = Number(path?.gain_real)
-    const imaginary = Number(path?.gain_imag)
-    const amplitude = Number(path?.amplitude)
-    const squared = Number.isFinite(real) && Number.isFinite(imaginary)
-      ? real * real + imaginary * imaginary
-      : Number.isFinite(amplitude) ? amplitude * amplitude : 0
-    return sum + Math.max(0, squared)
-  }, 0)
-  return power > 0 ? -10 * Math.log10(power) : null
-}
-
 async function loadDatasetTimes(target = calcParams) {
   try {
     const response = portalUnitResponse(await getDatasetTimeList(target.value.dataset)) ?? {}
     const list = Array.isArray(response.standardTimeList) ? response.standardTimeList : response.displayList
     if (!Array.isArray(list) || !list.length) return
     timeOptions.value = list.map((item) => String(item).replace(' ', 'T'))
-    if (!timeOptions.value.includes(target.value.time)) target.value.time = timeOptions.value[0]
+    hycomTimeMeta.value = {
+      defaultTime: String(response.defaultTime || '').replace(' ', 'T'),
+      forecastStartTime: String(response.forecastStartTime || '').replace(' ', 'T'),
+    }
+    if (!timeOptions.value.includes(target.value.time)) {
+      target.value.time = timeOptions.value.includes(hycomTimeMeta.value.defaultTime)
+        ? hycomTimeMeta.value.defaultTime
+        : timeOptions.value[timeOptions.value.length - 1]
+    }
   } catch (err) {
-    console.warn('[Portal Catalog] 可用时次加载失败，继续使用默认值：', err?.message ?? err)
+    console.warn('[HYCOM] 可用时次加载失败，继续使用默认值：', err?.message ?? err)
   }
 }
 
 async function loadCatalogOptions() {
-  try {
-    const response = portalUnitResponse(await getDatasetList())
-    const list = Array.isArray(response) ? response : response ? [response] : []
-    const normalized = list
-      .map((item) => ({ id: String(item?.id || item?.pid || ''), name: String(item?.name || item?.id || '') }))
-      .filter((item) => item.id)
-    if (normalized.length) datasetOptions.value = normalized
-  } catch (err) {
-    console.warn('[Portal Catalog] 数据集目录加载失败，继续使用默认值：', err?.message ?? err)
-  }
   await loadDatasetTimes()
 }
 
@@ -3579,11 +3570,11 @@ const isRayModel = computed(() => calcParams.value.model === 'bellhop')
 /** 是否使用后端动态声线接口 */
 const useDynamicRays = computed(() => calcParams.value.rayInterface === 'dynamic')
 /**
- * 动态声线统一走三维接口：冰区使用 AnalyseIce3DRTRDDynamic，
- * 非冰区使用 Analyse3DRTRDDynamic。二维分析模式仍保留二维声线接口。
+ * 普通三维仿真可使用三维声线接口；完整信号传输的移动声源固定按当前
+ * 切面调用二维动态声线，避免每个 500 m 声场站位重复计算 24 个方位面。
  */
 const use3dRays = computed(
-  () => isRayModel.value && (
+  () => isRayModel.value && !signalPlaybackMode.value && (
     calcParams.value.regionType === 'ice' ||
     (useDynamicRays.value && analysisMode.value === '3d')
   )
@@ -4091,6 +4082,38 @@ function onReceiverArraySelected(point) {
   statusText.value = `接收阵中心已标注：${(rangeM / 1000).toFixed(2)} km，深度 ${depthM.toFixed(1)} m；切换到水声通信可直接计算静态信道。`
 }
 
+/** 单航迹点静态信道：把垂直切面的距离/深度换算成水听器经纬度并同步到完整链路。 */
+function onSignalSliceReceiverSelected(point) {
+  if (!sliceReceiverPlacementActive.value) return
+  const source = configuredSignalRoutePoints.value[0]
+  const sourceLon = Number(source?.lon)
+  const sourceLat = Number(source?.lat)
+  const rangeM = Number(point?.rangeM)
+  const depthM = Number(point?.depthM)
+  const internalAzimuth = Number(point?.azimuthDeg ?? profileAzimuthDeg.value)
+  if (![sourceLon, sourceLat, rangeM, depthM, internalAzimuth].every(Number.isFinite)) return
+  const bearingDeg = internalAzimuthToCompassBearing(internalAzimuth)
+  const destination = destinationLonLat(sourceLon, sourceLat, bearingDeg, rangeM)
+  const receiver = {
+    lon: Number(destination.lon.toFixed(6)),
+    lat: Number(destination.lat.toFixed(6)),
+    depthM: Number(Math.max(0.01, depthM).toFixed(2)),
+    rangeM: Number(Math.max(0, rangeM).toFixed(2)),
+    bearingDeg: Number(bearingDeg.toFixed(3)),
+  }
+  receiverArrayMarker.value = receiver
+  hydrophonePlaced.value = true
+  signalTransmissionControls.receiverDepthM = receiver.depthM
+  calcParams.value.receiverX = receiver.lon
+  calcParams.value.receiverY = receiver.lat
+  annotatePropagationReceiver(receiver)
+  syncEnvironmentNoiseReceiver(receiver)
+  refreshPickMarkers()
+  viewer?.scene?.requestRender?.()
+  syncHydrophonePreviewPlayback()
+  errorText.value = ''
+}
+
 function cloneNoiseParameters(source) {
   return JSON.parse(JSON.stringify(source))
 }
@@ -4116,7 +4139,7 @@ function syncEnvironmentNoiseReceiver(receiver) {
 
 function resetParameters() {
   calcParams.value = {
-    dataset: 'EnvReanalysis',
+    dataset: 'HYCOM',
     time: timeOptions.value[0] || '2025-01-02T12:00:00',
     regionType: 'normal',
     coordX: 40,
@@ -4418,14 +4441,19 @@ watch(() => trackPointState.revision, () => {
 })
 
 function vesselSimulationIntent() {
+  if (skipVesselSimulationOnce) {
+    skipVesselSimulationOnce = false
+    return false
+  }
   return Boolean(configuredSignalRoutePoints.value.length)
 }
 
 async function runSignalTransmission() {
+  skipVesselSimulationOnce = false
   normalizeSignalTransmissionControls(signalTransmissionControls)
   if (!configuredSignalRouteReady.value) {
     if (selectedAisVessel.value) {
-      errorText.value = '所选 AIS 船舶缺少有效位置或航向，无法生成 5 海里自动航迹。'
+      errorText.value = '所选 AIS 船舶缺少有效位置或航向，无法生成 1 海里自动航迹。'
       return false
     }
     errorText.value = '请在地形区域单击至少一个发射航迹点，并双击结束选择。双击位置不会计入航迹。'
@@ -4480,12 +4508,15 @@ async function runSignalTransmission() {
       && item.frequency < signalTransmissionControls.sampleRate / 2
       && Number.isFinite(item.level))
   runSignalTransmissionSession({
+    channel_mode: 'waypoint',
+    waypoint_spacing_m: SIGNAL_ARRIVAL_WAYPOINT_SPACING_M,
+    vessel_speed_kn: speedKn,
     request_id: requestId,
     frequencies_hz: sourceBands.map(item => item.frequency),
     source_band_levels_db: sourceBands.map(item => item.level),
     source_level_db: sourceProfile.broadbandSourceLevelDb,
     sample_rate: signalTransmissionControls.sampleRate,
-    // 后端只生成一个有界分析块；完整航迹时长由前端实时站位时间轴管理。
+    // 固定声源时长；移动源由后端按完整航迹、航速确定发射时长。
     duration_s: Math.min(
       signalTransmissionControls.simulationDurationS,
       2400000 / signalTransmissionControls.sampleRate,
@@ -4493,8 +4524,8 @@ async function runSignalTransmission() {
     source_lon: sourceLon,
     source_lat: sourceLat,
     source_depth_m: sourceDepth,
-    // WebSocket 只生成首站有界分析块；其余分钟站位由实时调度器逐站计算，避免启动前整线等待。
-    source_route: sourceRoute.slice(0, 1),
+    // 提交整条航迹；后端到达结构保持 50 m Waypoint 精度。
+    source_route: routePoints.map(point => ({ lon: Number(point.lon), lat: Number(point.lat), depth_m: sourceDepth })),
     receiver_lon: receiverLon,
     receiver_lat: receiverLat,
     receiver_depth_m: receiverDepth,
@@ -4513,7 +4544,7 @@ async function runSignalTransmission() {
     preamp_gain_db: signalTransmissionControls.preampGainDb,
     adc_bits: signalTransmissionControls.adcBits,
     adc_full_scale_v: signalTransmissionControls.adcFullScaleV,
-    dataSource: calcParams.value.dataset || calcParams.value.dataSource || 'EnvReanalysis',
+    dataSource: 'HYCOM',
     dataType: 'DT_ENV_SOUND',
     time: calcParams.value.time,
     timeRes: 0,
@@ -4527,6 +4558,8 @@ async function runSignalTransmission() {
 function stopSignalTransmission() {
   stopSignalTransmissionSession({ preserveResult: true })
   signalTransmissionSession.playbackActive = false
+  // 下一次普通运行不应因残留的航迹点重新进入船舶航迹仿真。
+  skipVesselSimulationOnce = true
   vesselPlaybackPlaying.value = false
   vesselPlaybackBusy.value = false
   vesselPlaybackGeneration += 1
@@ -4594,8 +4627,13 @@ function syncHydrophonePreviewPlayback() {
 }
 
 function setVesselPlaybackTime(value) {
-  const next = Math.max(0, Math.min(hydrophoneDisplayDurationS.value, Number(value) || 0))
+  const available = signalPlaybackMode.value
+    ? Number(signalTransmissionSession.result?.available_until_s) || 0
+    : hydrophoneDisplayDurationS.value
+  const availableFrom = signalPlaybackMode.value ? Number(signalTransmissionSession.result?.available_from_s) || 0 : 0
+  const next = Math.max(availableFrom, Math.min(hydrophoneDisplayDurationS.value, available, Number(value) || 0))
   vesselPlaybackTimeS.value = next
+  if (signalPlaybackMode.value) signalTransmissionSession.playbackTimeS = next
   const nextWindowStart = next <= vesselTimeFrequencyWindowS.value
     ? 0
     : Math.floor((next - vesselTimeFrequencyWindowS.value) * 2) / 2
@@ -4609,7 +4647,7 @@ function setVesselPlaybackTime(value) {
   if (!vesselPlaybackBusy.value && !vesselPlaybackError.value) {
     vesselPlaybackStatus.value = next < vesselPlaybackPreRollS.value
       ? `环境噪声预播放 · ${Math.ceil(vesselPlaybackPreRollS.value - next)} s 后船舶开始运动`
-      : `第 ${index + 1}/${vesselRouteSamples.value.length} 个分钟站位`
+      : `${signalPlaybackMode.value ? 'Waypoint' : '分钟站位'} ${index + 1}/${vesselRouteSamples.value.length}`
   }
 }
 
@@ -4698,26 +4736,7 @@ async function calculateVesselFieldSample(index, generation = vesselPlaybackGene
   })
   const ice = calcParams.value.regionType === 'ice'
   const model = vesselPlaybackModel.value
-  const fieldRequest = analyse3dTLRDByModel(payload, model, ice)
-  const arrivalRequest = routePlaybackKind.value === 'signal'
-    ? analyseChannelImpulseResponse({
-      sourceLon: sample.lon,
-      sourceLat: sample.lat,
-      sourceDepth: vesselPlaybackSpectrum.value?.sourceDepthM || 6,
-      receiverLon: receiver.lon,
-      receiverLat: receiver.lat,
-      receiverDepth: receiver.depthM,
-      depressionAngleDeg: Math.min(90, Math.abs(Number(calcParams.value.grazingAngleMin) || 45)),
-      elevationAngleDeg: Math.min(90, Math.abs(Number(calcParams.value.grazingAngleMax) || 45)),
-      frequencyHz,
-      arrivalBeamCount: signalTransmissionControls.arrivalBeamCount,
-      dataSource: calcParams.value.dataset || calcParams.value.dataSource || 'EnvReanalysis',
-      dataType: 'DT_ENV_SOUND',
-      time: calcParams.value.time,
-      timeRes: 0,
-    }).then(value => ({ value, error: null })).catch(error => ({ value: null, error }))
-    : Promise.resolve({ value: null, error: null })
-  const [response, arrivalOutcome] = await Promise.all([fieldRequest, arrivalRequest])
+  const response = await analyse3dTLRDByModel(payload, model, ice)
   if (generation !== vesselPlaybackGeneration) throw new Error('本次播放任务已取消。')
   const parsed = parseAnalyse3DTlrd(response)
   const texture = decodeTlrdPolarVolume(parsed, {
@@ -4736,7 +4755,6 @@ async function calculateVesselFieldSample(index, generation = vesselPlaybackGene
     distanceM,
     depthM: receiver.depthM,
   })
-  const arrivals = portalUnitResponse(arrivalOutcome.value)
   return {
     index,
     sample,
@@ -4748,18 +4766,13 @@ async function calculateVesselFieldSample(index, generation = vesselPlaybackGene
     rangeNm,
     frequencyHz,
     model,
-    arrivals,
-    arrivalTlDb: arrivalTransmissionLossDb(arrivals),
-    arrivalError: arrivalOutcome.error?.message || '',
   }
 }
 
 function rememberVesselReceiverResult(record) {
   const losses = [...vesselReceiverTlDb.value]
   const distances = [...vesselReceiverDistancesM.value]
-  losses[record.index] = routePlaybackKind.value === 'signal' && Number.isFinite(record.arrivalTlDb)
-    ? record.arrivalTlDb
-    : record.receiverTl
+  losses[record.index] = record.receiverTl
   distances[record.index] = record.distanceM
   vesselReceiverTlDb.value = losses
   vesselReceiverDistancesM.value = distances
@@ -4776,7 +4789,11 @@ function requestVesselFieldSample(index) {
       rememberVesselReceiverResult(record)
       return record
     })
-    .finally(() => vesselFieldRequests.delete(index))
+    .finally(() => {
+      // 航迹被后端权威 Waypoint 替换时可能立即为同一索引创建新请求；
+      // 旧 Promise 完成后不能误删新请求。
+      if (vesselFieldRequests.get(index) === request) vesselFieldRequests.delete(index)
+    })
   vesselFieldRequests.set(index, request)
   return request
 }
@@ -4784,6 +4801,7 @@ function requestVesselFieldSample(index) {
 function applyVesselFieldRecord(record) {
   if (!record || !viewer) return
   vesselAppliedSampleIndex.value = record.index
+  invalidateMovingSourceRayData()
   if (soundField?.loaded) soundField.destroy()
   soundField = new SoundField(viewer, { depthExaggeration: depthExaggeration.value })
   soundField.displayAboveWater = false
@@ -4821,7 +4839,11 @@ function applyVesselFieldRecord(record) {
   calcParams.value.srcDepth = vesselPlaybackSpectrum.value?.sourceDepthM || 6
   calcParams.value.minFreq = record.frequencyHz
   calcParams.value.maxFreq = record.frequencyHz
+  calcParams.value.range = record.rangeNm
   calcParams.value.model = record.model
+  if (routePlaybackKind.value === 'signal' && record.model === 'bellhop') {
+    calcParams.value.rayInterface = 'dynamic'
+  }
   calculatedSectorCount.value = record.parsed.grid.sector
   texWidth.value = record.texture.width
   texHeight.value = record.texture.height
@@ -4835,6 +4857,14 @@ function applyVesselFieldRecord(record) {
   setupAzimuthPointer()
   applyPointerVisibility()
   soundField.requestRender()
+  if (
+    routePlaybackKind.value === 'signal'
+    && record.model === 'bellhop'
+    && (verticalSliceControls.dynamicRays || verticalSliceControls.staticRays)
+  ) {
+    dynamicRaysActivated.value = true
+    scheduleRayDataForAzimuth(sliceAzimuthDeg.value, 0)
+  }
 }
 
 async function activateVesselRouteSample(index) {
@@ -4850,22 +4880,21 @@ async function activateVesselRouteSample(index) {
     if (!record || !vesselPlaybackOpen.value || vesselPlaybackSampleIndex.value !== index) return
     applyVesselFieldRecord(record)
     if (routePlaybackKind.value === 'signal') {
-      signalCurrentArrivals.value = record.arrivals
-      const arrivalText = record.arrivals
-        ? `Bellhop 到达 ${Number(record.arrivals.path_count) || 0} 条`
-        : `Bellhop 到达失败${record.arrivalError ? `：${record.arrivalError}` : ''}`
-      vesselPlaybackStatus.value = `站位 ${index + 1}/${vesselRouteSamples.value.length} · ${record.model.toUpperCase()} 声场 · ${arrivalText}`
+      const tlText = Number.isFinite(record.receiverTl) ? `接收点 TL ${record.receiverTl.toFixed(1)} dB` : '3D 声场就绪'
+      vesselPlaybackStatus.value = `站位 ${index + 1}/${vesselRouteSamples.value.length} · ${record.model.toUpperCase()} 声场 · ${tlText}`
     } else {
       vesselPlaybackStatus.value = `站位 ${index + 1}/${vesselRouteSamples.value.length} · ${record.frequencyHz.toFixed(0)} Hz 代表频率`
     }
     const nextIndex = index + 1
     if (
-      routePlaybackKind.value !== 'signal'
-      && nextIndex < vesselRouteSamples.value.length
+      nextIndex < vesselRouteSamples.value.length
       && !vesselFieldCache.has(nextIndex)
+      && !vesselFieldRequests.has(nextIndex)
     ) {
       void requestVesselFieldSample(nextIndex).catch(error => {
-        console.warn(`[船舶噪声] 预取站位 ${nextIndex + 1} 失败：`, error?.message ?? error)
+        if (error?.message !== '本次播放任务已取消。') {
+          console.warn(`[航迹声场] 预取站位 ${nextIndex + 1} 失败：`, error?.message ?? error)
+        }
       })
     }
   } catch (error) {
@@ -4882,6 +4911,7 @@ async function activateVesselRouteSample(index) {
 }
 
 async function startVesselNoiseSimulation() {
+  skipVesselSimulationOnce = false
   const selectionError = validateVesselSimulationSelections()
   if (selectionError) {
     errorText.value = selectionError
@@ -4962,7 +4992,7 @@ async function startSignalRouteFieldPlayback(result) {
   if (!(speedKn > 0)) return
   const samples = resampleTrackByDistance(
     configuredSignalRoutePoints.value,
-    distancePerMinuteM(speedKn),
+    SIGNAL_FIELD_WAYPOINT_SPACING_M,
   )
   if (!samples.length) {
     vesselPlaybackError.value = '无法从当前航迹生成声场站位。'
@@ -4976,9 +5006,9 @@ async function startSignalRouteFieldPlayback(result) {
   routePlaybackKind.value = 'signal'
   signalTransmissionSession.playbackActive = true
   vesselPlaybackGeneration += 1
+  invalidateMovingSourceRayData()
   vesselFieldCache.clear()
   vesselFieldRequests.clear()
-  signalCurrentArrivals.value = null
   vesselRouteSamples.value = samples
   vesselPlaybackVessel.value = resolveVesselSimulationProfile(selectedAisVessel.value, speedKn)
   vesselPlaybackModel.value = selectedModel
@@ -5003,10 +5033,11 @@ async function startSignalRouteFieldPlayback(result) {
   vesselPlaybackPlaying.value = false
   vesselPlaybackBusy.value = true
   vesselPlaybackError.value = ''
-  vesselPlaybackStatus.value = `实时仿真已启动 · 正在准备第 1/${samples.length} 个分钟站位`
+  vesselPlaybackStatus.value = `连续仿真已启动 · 正在准备Waypoint 1/${samples.length}`
   removeTerrainWindowFromDock('waveform')
   removeTerrainWindowFromDock('spectrogram')
-  volumeRenderingControls.colormap = 'jet'
+  // 完整传输链路默认沿用体绘制的 custom 色标。
+  volumeRenderingControls.colormap = 'bellhop'
   analysisMode.value = '3d'
   calcParams.value.model = selectedModel
   calcParams.value.sector = 24
@@ -5018,7 +5049,7 @@ async function startSignalRouteFieldPlayback(result) {
   if (!vesselPlaybackError.value) {
     signalTransmissionSession.error = ''
     signalTransmissionSession.message = samples.length > 1
-      ? `实时传输中；${selectedModel.toUpperCase()} 声场与 Bellhop 到达结构每分钟更新`
+      ? `连续传输中；到达结构每50米计算，${selectedModel.toUpperCase()} 声场体每500米更新`
       : `固定发射位置实时传输中；${selectedModel.toUpperCase()} 声场与 Bellhop 到达结构持续更新`
   }
 }
@@ -5029,6 +5060,12 @@ watch(
   (result) => {
     const requestId = String(result?.request_id || '')
     if (!requestId || requestId !== lastSignalFieldRequestId) return
+    if (result?.continuous) {
+      vesselPlaybackDurationS.value = result.duration_s
+      // result.waypoints 是 50 m 到达结构节点，不能覆盖前端独立的 500 m
+      // 三维声场站位；否则声场体仍会每 50 m 重算和移动。
+      return
+    }
     signalTransmissionSession.message = '链路后台结果已就绪；实时航迹播放继续运行'
   },
 )
@@ -6480,12 +6517,6 @@ function addShipEvent() {
   })
 }
 
-function addIceCrackEvent() {
-  const events = noiseParams.value.timeFrequencyScenario.iceCrackEvents
-  const previous = events.length ? Number(events[events.length - 1]?.timeS) : -3
-  events.push({ timeS: Math.min(scenarioDuration(), Math.max(0, previous + 6)), durationS: 1.5, level: 3 })
-}
-
 function removeScenarioItem(collection, index) {
   const items = noiseParams.value.timeFrequencyScenario?.[collection]
   if (Array.isArray(items)) items.splice(index, 1)
@@ -6495,7 +6526,7 @@ function resetNoiseScenario() {
   noiseParams.value.timeFrequencyScenario = createDefaultNoiseScenario(
     noiseParams.value.windSpeed,
     noiseParams.value.shipDensityLevel,
-    noiseParams.value.regionType
+    'normal'
   )
 }
 
@@ -6504,17 +6535,6 @@ function clearNoiseScenarioEvents() {
   scenario.rainEvents = []
   scenario.shipEvents = []
   scenario.iceCrackEvents = []
-}
-
-function onNoiseRegionChange() {
-  const scenario = noiseParams.value.timeFrequencyScenario
-  if (noiseParams.value.regionType === 'ice' && !scenario.iceCrackEvents.length) {
-    scenario.iceCrackEvents = createDefaultNoiseScenario(
-      noiseParams.value.windSpeed,
-      noiseParams.value.shipDensityLevel,
-      'ice'
-    ).iceCrackEvents
-  }
 }
 
 function noisePortalPayload() {
@@ -6533,18 +6553,10 @@ function noisePortalPayload() {
     numPoints: Math.max(2, Math.round(Number(p.numPoints) || 2)),
     timeFrequency: p.timeFrequencyScenario,
   }
-  if (p.regionType !== 'ice') return levels
-  return {
-    coordX: Number(p.receiverX),
-    coordY: Number(p.receiverY),
-    srcDepth: Number(p.depth),
-    dataSource: p.dataset,
-    time: normalizePortalTime(p.time),
-    ...levels,
-  }
+  return levels
 }
 
-/** 提交环境噪声计算：非冰区走 AnalyseEnvironmentNoise，冰区走 AnalyseIceEnvironmentNoise。 */
+/** 提交非冰区环境噪声计算。 */
 async function submitNoiseCalculation() {
   activeMapPick.value = ''
   loading.value = true
@@ -6554,10 +6566,9 @@ async function submitNoiseCalculation() {
   statusText.value = ''
 
   try {
-    const ice = noiseParams.value.regionType === 'ice'
-    const scenarioErrors = validateNoiseScenario(noiseParams.value.timeFrequencyScenario, noiseParams.value.regionType)
+    const scenarioErrors = validateNoiseScenario(noiseParams.value.timeFrequencyScenario, 'normal')
     if (scenarioErrors.length) throw new Error(`时频合成参数无效：${scenarioErrors[0]}`)
-    const json = await analyseEnvironmentNoise(noisePortalPayload(), ice)
+    const json = await analyseEnvironmentNoise(noisePortalPayload())
     const response = portalUnitResponse(json)
     if (!response || (!Array.isArray(response.freq) && !response.noiseSpectrum && !response.depthProfile)) {
       throw new Error('环境噪声接口返回格式无效')
@@ -6565,7 +6576,7 @@ async function submitNoiseCalculation() {
     noiseResult.value = response
     noiseResultParams.value = cloneNoiseParameters(noiseParams.value)
     noiseResultOutdated.value = false
-    publishEnvironmentNoise(response, noiseParams.value, noiseParams.value.regionType)
+    publishEnvironmentNoise(response, noiseParams.value, 'normal')
     cleanGlobeView.value = false
     parameterPanelOpen.value = false
     resultPanelOpen.value = true
@@ -6581,7 +6592,7 @@ async function submitNoiseCalculation() {
 
 function resetNoiseParameters() {
   noiseParams.value = {
-    dataset: 'EnvReanalysis',
+    dataset: 'HYCOM',
     time: timeOptions.value[0] || '2025-01-02T12:00:00',
     regionType: 'normal',
     receiverX: 132.5135,
@@ -6768,6 +6779,11 @@ async function loadData() {
   rayLoadToken++
   clearTimeout(rayLoadTimer)
   rayLoadTimer = 0
+  bottomTypeToken++
+  clearTimeout(bottomTypeTimer)
+  bottomTypeTimer = 0
+  bottomTypeSegments.value = []
+  bottomTypeState.value = 'idle'
   loadingMessage.value = '检查声源区域海冰覆盖…'
   await detectModelSeaIce()
   loadingMessage.value = '调用声场计算接口…'
@@ -6968,8 +6984,9 @@ async function ensureRayDataForAzimuth(azimuthDeg) {
   try {
     result = await pendingRequest
   } finally {
-    rayRequestByKey.delete(key)
+    if (rayRequestByKey.get(key) === pendingRequest) rayRequestByKey.delete(key)
   }
+  if (requestToken !== rayLoadToken) return null
   rememberRayData(key, result)
   const currentKey = `${nearestAvailableAzimuth(sliceAzimuthDeg.value).toFixed(4)}:${calcParams.value.rayInterface}`
   if (requestToken === rayLoadToken && currentKey === key) {
@@ -7035,6 +7052,22 @@ async function activateDynamicRaysForCurrentAzimuth() {
   }
 }
 
+/** 底质缓存必须绑定声源、方位、距离、数据集和时间，避免换位置后复用旧分段。 */
+function bottomTypeCacheKey(bearingDeg, distanceM) {
+  const bearing = ((((Number(bearingDeg) || 0) % 360) + 360) % 360).toFixed(2)
+  const lon = Number(calcParams.value.coordX)
+  const lat = Number(calcParams.value.coordY)
+  const range = Math.round(Math.max(0, Number(distanceM) || 0))
+  return [
+    bearing,
+    lon.toFixed(6),
+    lat.toFixed(6),
+    range,
+    calcParams.value.dataset,
+    calcParams.value.time,
+  ].join('|')
+}
+
 /** 当前结果沿航线的最大距离（米）。 */
 function currentBottomTypeRangeM() {
   const radiusM = Number(sourceRadiusKm.value) * 1000
@@ -7059,7 +7092,7 @@ async function loadBottomTypesForRoute({ bearingDeg, distanceM } = {}) {
   }
 
   const bearing = (((Number(bearingDeg) || 0) % 360) + 360) % 360
-  const cacheKey = bearing.toFixed(2)
+  const cacheKey = bottomTypeCacheKey(bearing, totalM)
   const cached = bottomTypeByAzimuth.get(cacheKey)
   if (cached) {
     bottomTypeToken++
@@ -7126,21 +7159,22 @@ function scheduleBottomTypesForAzimuth(azimuthDeg, delay = 260) {
   if (analysisMode.value !== '3d' || !raySourceData.value) return
   clearTimeout(bottomTypeTimer)
   const bearing = internalAzimuthToCompassBearing(Number(azimuthDeg) || 0)
-  const normalizedBearing = ((((Number(bearing) || 0) % 360) + 360) % 360).toFixed(2)
-  const cached = bottomTypeByAzimuth.get(normalizedBearing)
+  const distanceM = currentBottomTypeRangeM()
+  const cacheKey = bottomTypeCacheKey(bearing, distanceM)
+  const cached = bottomTypeByAzimuth.get(cacheKey)
   if (cached) {
     bottomTypeToken++
     bottomTypeSegments.value = cached
     bottomTypeState.value = 'ready'
     return
   }
-  // 方位已经改变，旧方位的标注不再适用；先清空并提示加载中。
+  // 方位、声源或距离已经改变，旧标注不再适用；先清空并提示加载中。
   bottomTypeToken++
   bottomTypeSegments.value = []
   bottomTypeState.value = 'loading'
   bottomTypeTimer = setTimeout(() => {
     bottomTypeTimer = 0
-    void loadBottomTypesForRoute({ bearingDeg: bearing, distanceM: currentBottomTypeRangeM() })
+    void loadBottomTypesForRoute({ bearingDeg: bearing, distanceM })
   }, Math.max(0, Number(delay) || 0))
 }
 
@@ -8788,10 +8822,9 @@ input[type='range']:disabled {
   cursor: pointer;
 }
 .cal-cell.empty { cursor: default; }
-.cal-cell:not(.disabled):hover { background: rgba(41, 195, 240, 0.22); }
+.cal-cell:hover { background: rgba(41, 195, 240, 0.22); }
+.cal-cell.available { color: #a5f3fc; }
 .cal-cell.active { color: #04101f; font-weight: 700; background: #29c3f0; }
-/* 无数据的日期：灰色且不可点击 */
-.cal-cell.disabled { color: #5b7484; cursor: not-allowed; }
 
 .cal-times-wrap {
   margin-top: 8px;

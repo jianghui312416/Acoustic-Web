@@ -587,10 +587,10 @@ const simulationTimeText = computed(() => {
   return match ? `${match[1]} ${match[2]}` : '2025-01-02 12:00'
 })
 const simulationTimeInputValue = computed(() => simulationTimeText.value.replace(' ', 'T'))
-/** 运行按钮按当前仿真模型显示算法名：射线模型=Bellhop，RAM=Ram，KRAKEN=Kraken。 */
+/** 运行按钮按当前仿真模型显示算法名：射线模型=Bellhop，RAM=Ram。 */
 const runSimulationLabel = computed(() => {
   const model = String(simulation.model || 'bellhop').toLowerCase()
-  const name = model === 'ram' ? 'Ram' : model === 'kraken' ? 'Kraken' : 'Bellhop'
+  const name = model === 'ram' ? 'Ram' : 'Bellhop'
   return `运行仿真（${name}）`
 })
 const volumeControlsAvailable = computed(() => props.viewMode === 'terrain' && acousticSceneState.hasTerrainVolume)

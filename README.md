@@ -16,6 +16,28 @@ npm run dev
 npm run check
 ```
 
+## 构建并交付到另一台电脑
+
+```bash
+npm run package:dist
+```
+
+`package:dist` 会执行 `vite build`，并在 `dist/` 中附带：
+
+- `serve_dist.py`：同时托管前端静态文件和本地 GEBCO `/api/gebco` 接口。
+- `start.bat`：在 Windows 上双击启动。
+
+把整个 `dist/` 复制到另一台电脑（只需 Python，不需要 Node 或源码）。该电脑需安装：
+
+```bash
+pip install h5py numpy
+```
+
+默认读取 `D:\JD功能开发\HYdata\GEBCO_2026_sub_ice.nc`；如果文件在别处，用
+`python serve_dist.py --nc "实际路径"` 指定，或把 `.nc` 放在 `dist/` 目录下。
+启动后浏览器打开 `http://127.0.0.1:8080`。纯静态 `dist` 无法直接读取本地
+NetCDF，必须通过 `serve_dist.py` 同时提供页面和地形接口。
+
 ## 目录职责
 
 ```text
@@ -86,8 +108,9 @@ VITE_API_TIMEOUT_MS=120000
 - 运行自动进入地形视图，使用现有三维计算接口；计算成功后，将真实 TL 数据按经纬度、距离、方位、深度投影在海底上方。拖动旋转，滚轮缩放。
 - 声源上方菜单提供运行、二维声场、参数设置图标。参数窗口复用原有三维参数；最小化后保留顶部恢复按钮。
 - 二维按钮同时打开可拖动的动态传播损失剖面和声速剖面，使用同一次计算的声线与 `reconstructDataVS` 数据。无数据时显示空态，不合成计算结果。
-- 海底使用 Terrarium 编码的有符号高程（负值表示海底），显示高程色标和悬停水深。服务失败时保留上次成功区域或显示重试提示，不再将影像或模拟高程当作真实水深。
-- 开发环境通过 Vite `/bathy` 代理读取 AWS Terrain Tiles；生产环境直连公开服务，或通过 `VITE_BATHYMETRY_TILE_URL` 配置内部同格式瓦片服务。数据源归属链接显示在底部状态栏。地形和声场为带垂向夸张的透视展示，数值标签保留实际米数。
+- 海底高程支持两种数据源，底部状态栏可运行时切换：`本地 GEBCO`（默认，读取本地 GEBCO 2026 NetCDF 子网格）和 `在线瓦片`（AWS Terrain Tiles，Terrarium 编码）。选择会记住在浏览器本地，也可用 `VITE_BATHYMETRY_SOURCE=local|online` 设置默认值。
+- 两种数据源都返回有符号高程（负值表示海底），显示高程色标和悬停水深。服务失败时保留上次成功区域或显示重试提示，不将影像或模拟高程当作真实水深。
+- 在线瓦片在开发环境通过 Vite `/bathy` 代理读取，生产环境直连公开服务，或通过 `VITE_BATHYMETRY_TILE_URL` 配置内部同格式瓦片服务。数据源归属链接显示在底部状态栏。地形和声场为带垂向夸张的透视展示，数值标签保留实际米数。
 
 ### 地形站点信息
 

@@ -86,7 +86,7 @@ function localGebcoPlugin(ncPath, pythonExecutable = 'python') {
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, __dirname, '')
-  const ncPath = env.GEBCO_NC_PATH || 'D:\\JD功能开发\\HYdata\\GEBCO_2026_sub_ice\\GEBCO_2026_sub_ice.nc'
+  const ncPath = env.GEBCO_NC_PATH || 'D:\\JD功能开发\\HYdata\\GEBCO_2026_sub_ice.nc'
   return {
   plugins: [vue(), localGebcoPlugin(ncPath, env.GEBCO_PYTHON || 'python')],
   resolve: {
@@ -94,6 +94,13 @@ export default defineConfig(({ mode }) => {
       // 让复制过来的代码里的 '@/...' 指向 src/
       '@': path.resolve(__dirname, 'src'),
     },
+  },
+  build: {
+    // Windows 的 dist 目录不区分大小写：默认的 assets/ 会与 public/Assets/
+    // 合并成同一个目录（实际大小写取决于创建顺序）。vite preview 的静态服务
+    // 按大小写查找文件，合并后 /assets/*.js 会 404，页面白屏、数字地球不显示。
+    // 改用独立目录名，避免与 GeoVis 的 Assets 冲突。
+    assetsDir: 'build-assets',
   },
   server: {
     host: true,
@@ -105,6 +112,16 @@ export default defineConfig(({ mode }) => {
       ignored: ['**/.tmp/**', '**/.tmp_vid_frames/**', '**/*.log'],
     },
     proxy: {
+      // 在线 Terrarium 高程瓦片：开发环境经 Vite 代理，避免 S3 的 CORS/连接重置问题。
+      '/bathy': {
+        target: 'https://s3.amazonaws.com',
+        changeOrigin: true,
+        secure: false,
+        rewrite: (p) => p.replace(/^\/bathy/, '/elevation-tiles-prod/terrarium'),
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => proxyReq.setHeader('Connection', 'close'))
+        },
+      },
       // Google 卫星瓦片不返回 Access-Control-Allow-Origin，浏览器直连会被 CORS 拦截。
       // 开发环境经 Vite 代理转发为同源请求，绕开该限制。
       '/gmap': {

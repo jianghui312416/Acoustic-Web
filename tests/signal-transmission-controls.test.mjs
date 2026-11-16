@@ -112,3 +112,10 @@ test('frequency settings are followed by a source waveform preview for manual an
 test('propagation and multipath settings are collapsed by default', () => {
   assert.match(controlsComponent, /<details class="st-advanced">\s*<summary>传播与多途<\/summary>/)
 })
+
+test('slice receiver placement is limited to a completed single-point static channel', () => {
+  assert.match(controlsComponent, /<span>切面接收位置<\/span>/)
+  assert.match(controlsComponent, /v-model="state\.sliceReceiverPlacement"/)
+  assert.match(controlsComponent, /:disabled="!staticChannelReady"/)
+  assert.match(controlsComponent, /trackPointState\.finished && trackPointState\.points\.length === 1/)
+})

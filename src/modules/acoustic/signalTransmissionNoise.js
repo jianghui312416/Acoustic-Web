@@ -93,9 +93,10 @@ export function backendSpectrogramMatrix(payload) {
   return {
     times,
     frequencies,
+    continuous: Boolean(payload?.continuous),
     data,
-    minDb: Math.floor(Math.min(...levels) / 5) * 5,
-    maxDb: Math.ceil(Math.max(...levels) / 5) * 5,
+    minDb: Math.floor(levels.reduce((a, b) => Math.min(a, b), Infinity) / 5) * 5,
+    maxDb: Math.ceil(levels.reduce((a, b) => Math.max(a, b), -Infinity) / 5) * 5,
   }
 }
 
@@ -112,7 +113,7 @@ export function backendWaveformSeries(payload) {
     times.push(time)
     values.push(value)
   }
-  return { times, values }
+  return { times, values, ...(payload?.continuous ? { continuous: true } : {}) }
 }
 
 function repeatedWindowCycles(dataStart, dataEnd, currentTime, windowDuration, sampleStep = 0) {
@@ -139,6 +140,11 @@ export function rollingBackendWaveformSeries(series, currentTime, windowDuration
   const dataEnd = times[count - 1]
   const sampleStep = (dataEnd - dataStart) / Math.max(1, count - 1)
   const window = repeatedWindowCycles(dataStart, dataEnd, currentTime, windowDuration, sampleStep)
+  if (series?.continuous) {
+    const indices = times.map((t, i) => i).filter(i => times[i] >= window.windowStart && times[i] <= window.current)
+    return { times: indices.map(i => times[i]), values: indices.map(i => values[i]),
+      windowStartS: window.windowStart, windowEndS: window.windowEnd }
+  }
   const output = []
   for (let cycle = window.firstCycle; cycle <= window.lastCycle; cycle += 1) {
     const offset = cycle * window.period
@@ -193,7 +199,7 @@ export function rollingBackendSpectrogramMatrix(matrix, currentTime, windowDurat
 
   function nearestSourceIndex(absoluteTime) {
     const phase = ((absoluteTime - dataStart) % window.period + window.period) % window.period
-    const localTime = dataStart + phase
+    const localTime = matrix.continuous ? absoluteTime : dataStart + phase
     if (localTime >= dataEnd) {
       return localTime - dataEnd <= dataStart + window.period - localTime
         ? sourceTimes.length - 1
@@ -215,6 +221,7 @@ export function rollingBackendSpectrogramMatrix(matrix, currentTime, windowDurat
   for (let timeIndex = 0; timeIndex < times.length; timeIndex += 1) {
     const time = times[timeIndex]
     if (time > window.current + 1e-9) continue
+    if (matrix.continuous && (time < dataStart || time > dataEnd)) continue
     const row = sourceRows[nearestSourceIndex(time)]
     for (let frequencyIndex = 0; frequencyIndex < row.length; frequencyIndex += 1) {
       const level = row[frequencyIndex]

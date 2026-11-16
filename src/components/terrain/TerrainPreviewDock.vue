@@ -79,6 +79,7 @@ import { inverseMercatorY } from '@/utils/terrainPreview.js'
 import { loadBathymetry } from '@/utils/bathymetry.js'
 import { bathymetryColor } from '@/utils/terrainScene.js'
 import { aisMonitorState } from '@/modules/ais/aisMonitorStore.js'
+import { bathymetrySourceState } from '@/modules/terrain/bathymetrySource.js'
 
 const props = defineProps({
   bounds: { type: Object, required: true },
@@ -110,7 +111,8 @@ function scheduleBathyMap() {
     const key = viewKey()
     try {
       const grid = await loadBathymetry({ west: view.x0 * 360 - 180, east: view.x1 * 360 - 180,
-        north: inverseMercatorY(view.y0), south: inverseMercatorY(view.y1) }, 160)
+        north: inverseMercatorY(view.y0), south: inverseMercatorY(view.y1) }, 160,
+      { source: bathymetrySourceState.source })
       if (disposed || request !== bathyToken) return
       const image = document.createElement('canvas'); image.width = image.height = 160
       const ctx = image.getContext('2d')
@@ -146,6 +148,12 @@ watch(() => props.bounds, (bounds) => {
   renderMap()
   scheduleBathyMap()
 }, { immediate: true })
+
+watch(() => bathymetrySourceState.source, () => {
+  bathyImage = null
+  bathyViewKey = ''
+  scheduleBathyMap()
+})
 
 const rectStyle = computed(() => {
   const rect = boundsToViewRect(props.bounds, thumbView.value)

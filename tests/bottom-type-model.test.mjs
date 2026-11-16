@@ -28,6 +28,7 @@ test('uses the documented geoacoustic class-id data type', () => {
   assert.equal(BOTTOM_ACOUSTIC_DATA_TYPES.alphaP, 'DT_ENV_GEOACOUSTIC_ALPHA_P')
   assert.equal(BOTTOM_ACOUSTIC_DATA_TYPES.density, 'DT_ENV_GEOACOUSTIC_DENSITY')
   assert.equal(BOTTOM_ACOUSTIC_DATA_TYPES.porosity, 'DT_ENV_GEOACOUSTIC_POROSITY')
+  assert.equal(BOTTOM_ACOUSTIC_DATA_TYPES.thickness, 'DT_ENV_GEOACOUSTIC_THICKNESS')
 })
 
 test('enriches class segments with real route acoustic values', () => {
@@ -59,6 +60,8 @@ test('normalises class ids and labels invalid values as default', () => {
   assert.equal(normalizeBottomTypeId('3'), 3)
   assert.equal(normalizeBottomTypeId(0), 0)
   assert.equal(normalizeBottomTypeId(-1), 0)
+  assert.equal(normalizeBottomTypeId(9999), 0)
+  assert.equal(normalizeBottomTypeId(-9999), 0)
   assert.equal(normalizeBottomTypeId(null), 0)
   assert.equal(normalizeBottomTypeId(Number.NaN), 0)
   assert.equal(bottomTypeLabel(2), '类型2')
@@ -82,6 +85,10 @@ test('normalises optional geoacoustic properties without inventing missing value
     porosity: null,
     thickness: null,
   })
+  assert.deepEqual(
+    bottomTypeAcousticProperties({ cp: 9999, alphaP: -9999, density: 9999, porosity: -9999 }),
+    { cp: null, alphaP: null, density: null, porosity: null, thickness: null }
+  )
 })
 
 test('builds an evenly sampled route from source to the requested range', () => {
@@ -131,7 +138,7 @@ test('labels missing or invalid class ids as one default segment', () => {
       data: [
         { size: 1, x: [0], y: [0] },
         { size: 1, x: [0], y: [null] },
-        { size: 1, x: [0], y: [-1] },
+        { size: 1, x: [0], y: [9999] },
       ],
     },
   })

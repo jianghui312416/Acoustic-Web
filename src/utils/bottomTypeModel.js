@@ -23,14 +23,16 @@ export const BOTTOM_ACOUSTIC_DATA_TYPES = Object.freeze({
   alphaP: 'DT_ENV_GEOACOUSTIC_ALPHA_P',
   density: 'DT_ENV_GEOACOUSTIC_DENSITY',
   porosity: 'DT_ENV_GEOACOUSTIC_POROSITY',
+  thickness: 'DT_ENV_GEOACOUSTIC_THICKNESS',
 })
 
-/** 后端固定海底半空间默认参数（BELLHOP_ENV.BOTTOM）。 */
+/** 后端固定海底半空间默认参数；展示接口的密度单位统一为 kg/m³。 */
 export const DEFAULT_BOTTOM_ACOUSTICS = Object.freeze({
   cp: 1600,
   alphaP: 0.8,
-  density: 1.8,
+  density: 1800,
   porosity: null,
+  thickness: null,
 })
 
 /** 前端默认底质兜底展示名称。 */
@@ -63,7 +65,8 @@ function round6(value) {
 
 function toFiniteNumber(value) {
   const n = Number(value)
-  return Number.isFinite(n) ? n : NaN
+  // 门户为保持数组长度会用 ±9999 表示缺测；不能把它当成底质类型或声学参数。
+  return Number.isFinite(n) && Math.abs(n) < 9999 ? n : NaN
 }
 
 /** 统一 class id：有效正数 → 四舍五入整数；其余 → 0（默认）。 */
@@ -107,7 +110,7 @@ export function bottomTypeAcousticProperties(value) {
     for (const key of aliases) {
       const raw = Array.isArray(source[key]) ? source[key][0] : source[key]
       if (raw == null || raw === '') continue
-      const number = Number(raw)
+      const number = toFiniteNumber(raw)
       if (Number.isFinite(number)) {
         parsed = number
         break
@@ -438,7 +441,7 @@ function routeValueAt(samples, distanceM) {
   return lower.value + (upper.value - lower.value) * ratio
 }
 
-/** 将四类真实声学参数按分段中点插值并合并到底质分段。 */
+/** 将五类真实底质参数按分段中点插值并合并到底质分段。 */
 export function enrichBottomTypeSegments(segments, propertyPayloads = {}, options = {}) {
   const source = Array.isArray(segments) ? segments : []
   const samplesByField = Object.fromEntries(

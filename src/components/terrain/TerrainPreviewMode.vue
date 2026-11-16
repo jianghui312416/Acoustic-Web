@@ -22,7 +22,7 @@
       @pointercancel="onExaggerationPointerUp"
     ><span aria-hidden="true">⋮</span></button>
     <div class="compass-stack">
-      <button class="compass" title="恢复正北视角（R）" aria-label="恢复正北视角（R）" @click="resetCamera">
+      <button class="compass" title="切换俯视视角（R）" aria-label="切换俯视视角（R）" @click="resetCamera">
         <svg class="compass-dial" viewBox="0 0 120 120" aria-hidden="true">
           <circle cx="60" cy="60" r="56" fill="#0b1d30" stroke="#2f5a78" stroke-width="2" />
           <circle cx="60" cy="60" r="47" fill="none" stroke="#1f4663" stroke-width="1" />
@@ -63,7 +63,13 @@
       <span v-if="hover">经度 {{ hover.lon.toFixed(4) }}°　纬度 {{ hover.lat.toFixed(4) }}°　{{ hover.elevation < 0 ? '水深' : '高程' }} {{ Math.abs(hover.elevation).toFixed(0) }} m</span>
       <span v-else-if="error" class="terrain-warn">{{ error }}</span>
       <span v-else>{{ status === 'loading' ? '正在加载地形' : grid ? '地形已就绪' : '等待加载地形' }}</span>
-      <a href="https://www.gebco.net/data-products-gridded-bathymetry-data/gebco2026-grid" target="_blank" rel="noreferrer">GEBCO 2026 海底高程</a>
+      <div class="terrain-source" role="group" aria-label="海底高程数据源">
+        <button v-for="option in BATHYMETRY_SOURCE_OPTIONS" :key="option.value" type="button"
+          :class="{ active: bathymetrySourceState.source === option.value }" :title="option.title"
+          :aria-pressed="bathymetrySourceState.source === option.value"
+          @click="switchBathymetrySource(option.value)">{{ option.label }}</button>
+      </div>
+      <a :href="sourceAttribution.href" target="_blank" rel="noreferrer">{{ sourceAttribution.label }}</a>
     </footer>
   </section>
 </template>
@@ -72,6 +78,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { normalizeTerrainBounds } from '@/utils/terrainPreview.js'
 import { loadBathymetry, acousticTerrainBounds } from '@/utils/bathymetry.js'
+import { BATHYMETRY_SOURCE_OPTIONS, bathymetrySourceState, setBathymetrySource } from '@/modules/terrain/bathymetrySource.js'
 import { drawTerrainScene, terrainMetersPerPixel } from '@/utils/terrainScene.js'
 import TerrainPreviewDock from './TerrainPreviewDock.vue'
 import TerrainStationCard from './TerrainStationCard.vue'
@@ -98,7 +105,7 @@ import { aisMonitorState, selectAisVessel } from '@/modules/ais/aisMonitorStore.
 
 const props = defineProps({
   active: Boolean,
-  dataset: { type: String, default: 'EnvReanalysis' },
+  dataset: { type: String, default: 'HYCOM' },
   time: { type: String, default: '' },
   running: Boolean,
   viewer: Object,
@@ -168,6 +175,10 @@ const terrainReceiver = computed(() => (
 
 const headingDeg = computed(() => ((camera.value.yaw * 180 / Math.PI) % 360 + 360) % 360)
 const headingLabel = computed(() => `${Math.round(headingDeg.value).toString().padStart(3, '0')}°`)
+const sourceAttribution = computed(() => (
+  BATHYMETRY_SOURCE_OPTIONS.find(option => option.value === bathymetrySourceState.source)
+  || BATHYMETRY_SOURCE_OPTIONS[0]
+).attribution)
 
 const canvasSize = ref({ width: 0, height: 0 })
 
@@ -242,7 +253,9 @@ const MIN_CAMERA_ZOOM = 0.1
 // 允许贴近声场体与海底表面观察细节；仅改变投影视图比例，不重载地形或声场。
 const MAX_CAMERA_ZOOM = 40
 const MIN_CAMERA_PITCH = 0.05
-const MAX_CAMERA_PITCH = 1.5
+/** 俯视时 pitch = 90°，高程不再影响屏幕位置，避免点选标记与地形落点产生视角偏移。 */
+const TOP_DOWN_PITCH = Math.PI / 2
+const MAX_CAMERA_PITCH = TOP_DOWN_PITCH
 const EXAGGERATION_HANDLE_OFFSET = 64
 /** AIS 船位始终贴在海面基准，不跟随海底地形、吃水或船体高度。 */
 const AIS_SEA_SURFACE_ELEVATION_M = 0
@@ -635,7 +648,7 @@ function rebuildRayFlow() {
 }
 
 function resetCamera() {
-  camera.value = { yaw: 0, pitch: 0.68, zoom: 1, panX: 0, panY: 0 }
+  camera.value = { yaw: 0, pitch: TOP_DOWN_PITCH, zoom: 1, panX: 0, panY: 0 }
   scheduleDraw()
 }
 
@@ -722,7 +735,7 @@ async function loadTerrain(next) {
   hover.value = null
   try {
     // Read a finer grid from the same cached tiles once; camera/scale never fetch data.
-    const data = await loadBathymetry(target, 192)
+    const data = await loadBathymetry(target, 192, { source: bathymetrySourceState.source })
     if (request !== token || disposed) return
     grid.value = data
     loadedBounds.value = target
@@ -735,6 +748,14 @@ async function loadTerrain(next) {
     error.value = `${err?.message ?? err}${grid.value ? '。保留上次加载区域。' : ''}`
     scheduleDraw()
   }
+}
+
+function switchBathymetrySource(source) {
+  if (bathymetrySourceState.source === source) return
+  setBathymetrySource(source)
+  grid.value = null
+  loadedBounds.value = null
+  loadTerrain(bounds.value)
 }
 
 function startExaggerationDrag(event) {
@@ -1190,6 +1211,10 @@ onBeforeUnmount(() => {
 .terrain-error { color: #f1c38c; max-width: 400px; line-height: 1.8; }.terrain-error button { margin-left: 10px; background: #22435b; border: 1px solid #5c90b3; color: #dff6ff; cursor: pointer; }
 .depth-tooltip { position: absolute; z-index: 7; pointer-events: none; background: #071b2ee8; border: 1px solid #42748e; border-radius: 4px; padding: 7px 10px; font: 11px/1.7 monospace; }.depth-tooltip b { color: #66ebda; }
 .terrain-status { position: absolute; bottom: 0; left: 0; right: 0; z-index: 6; height: 24px; display: flex; align-items: center; gap: 8px; padding: 0 14px; box-sizing: border-box; background: #101e30; border-top: 1px solid #304256; font-size: 10px; }
-.terrain-status i { width: 6px; height: 6px; border-radius: 50%; background: #00c8b0; }.terrain-status a { margin-left: auto; color: #83a9c0; text-decoration: none; }.terrain-warn { color: #f1c38c; }
+.terrain-status i { width: 6px; height: 6px; border-radius: 50%; background: #00c8b0; }.terrain-status a { margin-left: 8px; color: #83a9c0; text-decoration: none; }.terrain-warn { color: #f1c38c; }
+.terrain-source { display: flex; gap: 2px; margin-left: auto; }
+.terrain-source button { padding: 1px 7px; border: 1px solid #35516a; border-radius: 3px; background: #14283c; color: #9bbdd3; font: inherit; font-size: 10px; line-height: 16px; cursor: pointer; }
+.terrain-source button:hover { border-color: #5c90b3; color: #dff6ff; }
+.terrain-source button.active { border-color: #00b7a4; background: #0d3a3c; color: #66ebda; }
 @keyframes pulse { to { opacity: .3; } }
 </style>
