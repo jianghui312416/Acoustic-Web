@@ -283,6 +283,18 @@ export async function getRealtimeAis(params = {}) {
   return data
 }
 
+/** 获取指定 MMSI 最近五分钟的真实位置序列和最新单船状态。 */
+export async function getRealtimeAisTrack(mmsi, params = {}, options = {}) {
+  const url = new URL(directEndpoint('GetRealtimeAISTrack'))
+  url.searchParams.set('mmsi', String(mmsi))
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value))
+  }
+  const { response, data } = await getJson(url.toString(), { timeoutMs: 15_000, ...options })
+  if (!response.ok || !data || !Array.isArray(data.track)) throw directApiError('单船 AIS 航迹获取', response, data)
+  return data
+}
+
 /** 固定前端 AIS 快照，并由后端天气接口生成 48 小时 Wenz 噪声帧。 */
 export async function analyseForecastEnvironmentNoise(params) {
   const { response, data } = await postJson(

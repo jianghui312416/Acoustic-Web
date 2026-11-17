@@ -44,7 +44,7 @@
       <p>{{ selected.ship_type_name || '未知船型' }}　{{ speedText(selected) }}　{{ headingText(selected) }}　{{ ageText(selected) }}</p>
       <dl>
         <dt>位置</dt><dd>{{ coordinateText(selected) }}</dd>
-        <dt>状态</dt><dd>{{ state.connected ? '实时跟踪' : '已断开' }}</dd>
+        <dt>状态</dt><dd>{{ trackingStatus }}</dd>
         <dt>距仿真中心</dt><dd>{{ distanceText(selected) }}</dd>
         <dt>相对方位</dt><dd>{{ bearingText(selected) }}</dd>
         <dt>船体尺寸</dt><dd>{{ dimensionsText(selected) }}</dd>
@@ -96,12 +96,20 @@ import {
   disconnectAis,
   selectAisVessel,
   selectedAisVessel,
+  selectedAisTrackState,
 } from '@/modules/ais/aisMonitorStore.js'
 
 const props = defineProps({ viewMode: { type: String, default: 'globe' } })
 const emit = defineEmits(['navigate'])
 const visibleLimit = ref(100)
 const selected = selectedAisVessel
+const trackingStatus = computed(() => {
+  if (!state.connected) return '已断开'
+  if (selectedAisTrackState.mmsi !== selected.value?.mmsi) return '等待地形跟踪'
+  if (selectedAisTrackState.error) return '航迹同步异常'
+  if (selectedAisTrackState.found === false && !selectedAisTrackState.points.length) return '等待该船 AIS 新报文'
+  return `实时跟踪 · ${selectedAisTrackState.points.length} 个实测点`
+})
 
 const connectionClass = computed(() => ({ live: state.connected && !state.error, error: !!state.error, offline: !state.connected }))
 const connectionLabel = computed(() => state.loading ? '正在同步' : state.error ? '连接异常' : state.connected ? '实时连接' : '已断开')

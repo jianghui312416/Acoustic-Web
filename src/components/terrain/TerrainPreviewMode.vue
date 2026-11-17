@@ -7,6 +7,7 @@
       @dblclick="onTrackDoubleClick" @contextmenu.prevent></canvas>
     <canvas ref="rayCanvasEl" class="ray-canvas" aria-hidden="true"></canvas>
     <canvas ref="aisCanvasEl" class="ais-canvas" aria-label="地形模式 AIS 船舶位置图层"></canvas>
+    <canvas ref="aisDynamicCanvasEl" class="ais-dynamic-canvas" aria-hidden="true"></canvas>
     <canvas ref="trackCanvasEl" class="track-canvas" aria-hidden="true"></canvas>
     <button
       v-if="exaggerationHandle && !leavingForGlobe"
@@ -106,7 +107,18 @@ import {
   trackPointState,
 } from '@/modules/acoustic/trackPointState.js'
 import { signalTransmissionControls } from '@/modules/acoustic/signalTransmissionControls.js'
-import { aisMonitorState, selectAisVessel } from '@/modules/ais/aisMonitorStore.js'
+import {
+  aisMonitorState,
+  selectAisVessel,
+  selectedAisMotionPosition,
+  selectedAisTrackOpacity,
+  selectedAisTrackState,
+  selectedAisVessel,
+  setAisTrackRequestsEnabled,
+  startSelectedAisTracking,
+  stopSelectedAisTracking,
+} from '@/modules/ais/aisMonitorStore.js'
+import { aisHeadingDegrees, screenHeadingAngle } from '@/utils/aisTrackMotion.js'
 
 const props = defineProps({
   active: Boolean,
@@ -161,6 +173,7 @@ watch(() => props.stationParametersOpen, (open, previous) => {
 const canvasEl = ref(null)
 const rayCanvasEl = ref(null)
 const aisCanvasEl = ref(null)
+const aisDynamicCanvasEl = ref(null)
 const trackCanvasEl = ref(null)
 const bounds = ref(normalizeTerrainBounds({ west: 115.4, east: 116.6, south: 15.4, north: 16.6 }))
 const loadedBounds = ref(null)
@@ -240,6 +253,7 @@ const compassTicks = computed(() => {
 let resizeObserver = null
 let drawRaf = 0
 let rayAnimationRaf = 0
+let aisMotionRaf = 0
 let rayAnimationLastAt = 0
 let hoverRaf = 0
 let token = 0
@@ -247,6 +261,12 @@ let disposed = false
 let dragState = null
 let lastScene = null
 let aisMarkerHits = []
+let aisSelectedMarkerHit = null
+let aisStaticCache = null
+let aisTrackProjectionCache = { project: null, points: null, projected: [] }
+let aisMotionLastAt = 0
+/** AIS 选船动画只需 30 fps；静态船位缓存在离屏画布，避免每帧重绘全部船舶。 */
+const AIS_MOTION_FRAME_MS = 33
 /** 方位方向线箭头拖拽状态 */
 let arrowDrag = null
 let arrowEmitRaf = 0
@@ -472,64 +492,217 @@ function aisSourceColor(level) {
   return level >= 185 ? '#ff4e55' : level >= 175 ? '#ffb72e' : level >= 160 ? '#f3da25' : '#24d99b'
 }
 
-function drawAisVessels() {
-  if (!aisCanvasEl.value || !props.active) return
-  const canvas = aisCanvasEl.value
-  const rect = canvas.getBoundingClientRect()
-  const width = rect.width
-  const height = rect.height
-  if (!width || !height) return
-  const dpr = Math.min(2, globalThis.devicePixelRatio || 1)
-  if (canvas.width !== Math.round(width * dpr)) canvas.width = Math.round(width * dpr)
-  if (canvas.height !== Math.round(height * dpr)) canvas.height = Math.round(height * dpr)
-  const ctx = canvas.getContext('2d')
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.clearRect(0, 0, width, height)
-  aisMarkerHits = []
-  if (!aisMonitorState.displayEnabled) return
-  const project = lastScene?.project
-  const activeBounds = grid.value?.bounds || loadedBounds.value || bounds.value
-  if (typeof project !== 'function' || !activeBounds) return
+function drawSelectedAisTrack(ctx, project, currentPosition, opacity = 1) {
+  if (opacity <= 0) return
+  if (selectedAisTrackState.mmsi !== aisMonitorState.selectedMmsi) return
+  const points = selectedAisTrackState.points
+  let measured
+  if (aisTrackProjectionCache.project === project && aisTrackProjectionCache.points === points) {
+    measured = aisTrackProjectionCache.projected
+  } else {
+    measured = points
+      .map(point => project(point.longitude, point.latitude, AIS_SEA_SURFACE_ELEVATION_M))
+      .filter(point => point && Number.isFinite(point.x) && Number.isFinite(point.y))
+    aisTrackProjectionCache = { project, points, projected: measured }
+  }
+  if (!measured.length) return
+  ctx.save()
+  ctx.globalAlpha = opacity
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  if (measured.length > 1) {
+    ctx.beginPath()
+    measured.forEach((point, index) => index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y))
+    ctx.strokeStyle = 'rgba(70, 229, 255, .92)'
+    ctx.lineWidth = 2.2
+    ctx.shadowColor = '#20bdda'
+    ctx.shadowBlur = 5
+    ctx.stroke()
+  }
+  const latestMeasured = measured.at(-1)
+  const projected = currentPosition
+    ? project(currentPosition.longitude, currentPosition.latitude, AIS_SEA_SURFACE_ELEVATION_M)
+    : null
+  if (projected && Number.isFinite(projected.x) && Number.isFinite(projected.y)) {
+    ctx.beginPath()
+    ctx.moveTo(latestMeasured.x, latestMeasured.y)
+    ctx.lineTo(projected.x, projected.y)
+    ctx.setLineDash([4, 4])
+    ctx.strokeStyle = 'rgba(255, 255, 255, .72)'
+    ctx.lineWidth = 1.4
+    ctx.shadowBlur = 0
+    ctx.stroke()
+  }
+  ctx.restore()
+}
 
+function drawAisMarker(ctx, project, point, vessel, color, selected, movingPosition, opacity = 1) {
+  if (opacity <= 0) return null
+  const displayVessel = selected && movingPosition ? { ...vessel, ...movingPosition } : vessel
+  const heading = screenHeadingAngle(
+    project,
+    Number(displayVessel.longitude),
+    Number(displayVessel.latitude),
+    aisHeadingDegrees(displayVessel),
+    AIS_SEA_SURFACE_ELEVATION_M
+  )
+  ctx.save()
+  ctx.globalAlpha = opacity
+  ctx.translate(point.x, point.y)
+  ctx.rotate(heading)
+  if (!selected) {
+    // 非选中船舶用半透明外圈代替 shadowBlur，绘制量小很多。
+    ctx.beginPath()
+    ctx.arc(0, 0, 9, 0, Math.PI * 2)
+    ctx.fillStyle = color
+    ctx.globalAlpha = opacity * 0.18
+    ctx.fill()
+    ctx.globalAlpha = opacity
+  }
+  ctx.shadowColor = color
+  ctx.shadowBlur = selected ? 12 : 0
+  ctx.fillStyle = color
+  ctx.strokeStyle = selected ? '#ffffff' : '#062033'
+  ctx.lineWidth = selected ? 2 : 1.2
+  ctx.beginPath()
+  ctx.moveTo(0, -10)
+  ctx.lineTo(6, 7)
+  ctx.lineTo(0, 4)
+  ctx.lineTo(-6, 7)
+  ctx.closePath()
+  ctx.fill()
+  ctx.stroke()
+  ctx.restore()
+  if (selected) {
+    ctx.save()
+    ctx.globalAlpha = opacity
+    ctx.strokeStyle = color
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.arc(point.x, point.y, 15, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.fillStyle = '#e9f8ff'
+    ctx.font = "600 9px 'Microsoft YaHei', sans-serif"
+    ctx.fillText(displayVessel.vessel_name || `MMSI ${displayVessel.mmsi}`, point.x + 18, point.y - 7)
+    ctx.restore()
+  }
+  return displayVessel
+}
+
+function rebuildAisStaticVessels(ctx, project, activeBounds, width, height, dpr) {
+  ctx.clearRect(0, 0, width, height)
+  const hits = []
   for (const vessel of aisMonitorState.vessels) {
+    if (vessel.mmsi === aisMonitorState.selectedMmsi) continue
     const lon = Number(vessel.longitude)
     const lat = Number(vessel.latitude)
     if (lon < activeBounds.west || lon > activeBounds.east || lat < activeBounds.south || lat > activeBounds.north) continue
     const point = project(lon, lat, AIS_SEA_SURFACE_ELEVATION_M)
     if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) continue
     if (point.x < -18 || point.x > width + 18 || point.y < -18 || point.y > height + 18) continue
-    const selected = vessel.mmsi === aisMonitorState.selectedMmsi
-    const color = aisSourceColor(vessel.source_level_db)
-    const heading = (Number(vessel.heading_deg ?? vessel.cog_deg) || 0) * Math.PI / 180
-    ctx.save()
-    ctx.translate(point.x, point.y)
-    ctx.rotate(heading)
-    ctx.shadowColor = color
-    ctx.shadowBlur = selected ? 12 : 6
-    ctx.fillStyle = color
-    ctx.strokeStyle = selected ? '#ffffff' : '#062033'
-    ctx.lineWidth = selected ? 2 : 1.2
-    ctx.beginPath()
-    ctx.moveTo(0, -10)
-    ctx.lineTo(6, 7)
-    ctx.lineTo(0, 4)
-    ctx.lineTo(-6, 7)
-    ctx.closePath()
-    ctx.fill()
-    ctx.stroke()
-    ctx.restore()
-    if (selected) {
-      ctx.strokeStyle = color
-      ctx.lineWidth = 1
-      ctx.beginPath()
-      ctx.arc(point.x, point.y, 15, 0, Math.PI * 2)
-      ctx.stroke()
-      ctx.fillStyle = '#e9f8ff'
-      ctx.font = "600 9px 'Microsoft YaHei', sans-serif"
-      ctx.fillText(vessel.vessel_name || `MMSI ${vessel.mmsi}`, point.x + 18, point.y - 7)
-    }
-    aisMarkerHits.push({ x: point.x, y: point.y, vessel })
+    drawAisMarker(ctx, project, point, vessel, aisSourceColor(vessel.source_level_db), false, null)
+    hits.push({ x: point.x, y: point.y, vessel })
   }
+  aisStaticCache = {
+    grid: grid.value,
+    vessels: aisMonitorState.vessels,
+    selectedMmsi: aisMonitorState.selectedMmsi,
+    camera: camera.value,
+    exaggeration: visualControls.terrainExaggeration,
+    width,
+    height,
+    dpr,
+    hits,
+  }
+  return hits
+}
+
+function drawAisVessels() {
+  if (!aisCanvasEl.value || !aisDynamicCanvasEl.value || !props.active) return
+  const staticCanvas = aisCanvasEl.value
+  const dynamicCanvas = aisDynamicCanvasEl.value
+  const rect = staticCanvas.getBoundingClientRect()
+  const width = rect.width
+  const height = rect.height
+  if (!width || !height) return
+  const dpr = Math.min(2, globalThis.devicePixelRatio || 1)
+  const pixelWidth = Math.round(width * dpr)
+  const pixelHeight = Math.round(height * dpr)
+  if (staticCanvas.width !== pixelWidth) staticCanvas.width = pixelWidth
+  if (staticCanvas.height !== pixelHeight) staticCanvas.height = pixelHeight
+  if (dynamicCanvas.width !== pixelWidth) dynamicCanvas.width = pixelWidth
+  if (dynamicCanvas.height !== pixelHeight) dynamicCanvas.height = pixelHeight
+  const staticCtx = staticCanvas.getContext('2d')
+  const dynamicCtx = dynamicCanvas.getContext('2d')
+  staticCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  dynamicCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  dynamicCtx.clearRect(0, 0, width, height)
+  aisMarkerHits = []
+  aisSelectedMarkerHit = null
+  if (!aisMonitorState.displayEnabled) return
+  const project = lastScene?.project
+  const activeBounds = grid.value?.bounds || loadedBounds.value || bounds.value
+  if (typeof project !== 'function' || !activeBounds) return
+
+  const cache = aisStaticCache
+  const reuseStatic = cache
+    && cache.grid === grid.value
+    && cache.vessels === aisMonitorState.vessels
+    && cache.selectedMmsi === aisMonitorState.selectedMmsi
+    && cache.camera === camera.value
+    && cache.exaggeration === visualControls.terrainExaggeration
+    && cache.width === width
+    && cache.height === height
+    && cache.dpr === dpr
+  if (!reuseStatic) {
+    rebuildAisStaticVessels(staticCtx, project, activeBounds, width, height, dpr)
+  }
+  aisMarkerHits = aisStaticCache?.hits || []
+
+  const movingPosition = selectedAisMotionPosition()
+  const opacity = selectedAisTrackOpacity()
+  drawSelectedAisTrack(dynamicCtx, project, movingPosition, opacity)
+
+  const selected = selectedAisVessel.value
+  if (opacity > 0 && selected && selected.mmsi === aisMonitorState.selectedMmsi) {
+    const displayVessel = movingPosition ? { ...selected, ...movingPosition } : selected
+    const lon = Number(displayVessel.longitude)
+    const lat = Number(displayVessel.latitude)
+    if (lon >= activeBounds.west && lon <= activeBounds.east &&
+        lat >= activeBounds.south && lat <= activeBounds.north) {
+      const point = project(lon, lat, AIS_SEA_SURFACE_ELEVATION_M)
+      if (point && Number.isFinite(point.x) && Number.isFinite(point.y) &&
+          point.x >= -18 && point.x <= width + 18 &&
+          point.y >= -18 && point.y <= height + 18) {
+        const color = aisSourceColor(selected.source_level_db)
+        const rendered = drawAisMarker(dynamicCtx, project, point, selected, color, true, movingPosition, opacity)
+        if (rendered) aisSelectedMarkerHit = { x: point.x, y: point.y, vessel: rendered }
+      }
+    }
+  }
+}
+
+function stopAisMotionAnimation() {
+  if (aisMotionRaf) cancelAnimationFrame(aisMotionRaf)
+  aisMotionRaf = 0
+}
+
+function syncAisMotionAnimation() {
+  stopAisMotionAnimation()
+  aisMotionLastAt = 0
+  if (!props.active || !selectedAisTrackState.mmsi || document.hidden) return
+  const tick = (now) => {
+    if (!props.active || !selectedAisTrackState.mmsi || disposed) {
+      aisMotionRaf = 0
+      return
+    }
+    if (!aisMotionLastAt || now - aisMotionLastAt >= AIS_MOTION_FRAME_MS) {
+      aisMotionLastAt = now
+      drawAisVessels()
+    }
+    aisMotionRaf = requestAnimationFrame(tick)
+  }
+  aisMotionRaf = requestAnimationFrame(tick)
 }
 
 function drawRays() {
@@ -771,12 +944,28 @@ function focusBounds(next) {
 }
 defineExpose({ focusBounds })
 
+function syncSelectedAisTracking() {
+  if (!props.active) return
+  const mmsi = aisMonitorState.selectedMmsi
+  if (!mmsi) {
+    stopSelectedAisTracking()
+    return
+  }
+  if (selectedAisTrackState.mmsi === mmsi) return
+  const vessel = aisMonitorState.vessels.find(item => item.mmsi === mmsi)
+    || aisMonitorState.selectedVesselSnapshot
+  if (vessel?.mmsi !== mmsi) return
+  startSelectedAisTracking(vessel)
+  syncAisMotionAnimation()
+}
+
 function focusAisRequest() {
   const request = aisMonitorState.focusRequest
   if (!props.active || request?.viewMode !== 'terrain') return
   const lat = Number(request.latitude)
   const lon = Number(request.longitude)
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return
+  syncSelectedAisTracking()
   const latSpan = 0.6
   const lonSpan = Math.min(2.4, latSpan / Math.max(0.25, Math.cos(lat * Math.PI / 180)))
   focusBounds({ west: lon - lonSpan / 2, east: lon + lonSpan / 2, south: lat - latSpan / 2, north: lat + latSpan / 2 })
@@ -942,12 +1131,14 @@ function pickAisMarker(event) {
   if (!point) return null
   let nearest = null
   let bestDistance = 14 ** 2
-  for (const marker of aisMarkerHits) {
+  const consider = (marker) => {
     const distance = (marker.x - point.x) ** 2 + (marker.y - point.y) ** 2
-    if (distance > bestDistance) continue
+    if (distance > bestDistance) return
     nearest = marker.vessel
     bestDistance = distance
   }
+  for (const marker of aisMarkerHits) consider(marker)
+  if (aisSelectedMarkerHit) consider(aisSelectedMarkerHit)
   return nearest
 }
 
@@ -1044,6 +1235,8 @@ function onPointerUp(event) {
   try { canvasEl.value?.releasePointerCapture?.(event.pointerId) } catch {}
   if (!moved && mode === 'ais' && event.type !== 'pointercancel') {
     selectAisVessel(aisVessel, '')
+    startSelectedAisTracking(aisVessel)
+    syncAisMotionAnimation()
     return
   }
   if (!moved && mode === 'pan' && event.type !== 'pointercancel') {
@@ -1141,8 +1334,16 @@ onMounted(() => {
   }
   resizeObserver = new ResizeObserver(() => { updateCanvasSize(); scheduleDraw() })
   if (canvasEl.value) { updateCanvasSize(); resizeObserver.observe(canvasEl.value) }
+  setAisTrackRequestsEnabled(props.active)
   if (props.active && !applyInitialBounds()) locateSource()
+  if (props.active) {
+    nextTick(() => {
+      syncSelectedAisTracking()
+      syncAisMotionAnimation()
+    })
+  }
   document.addEventListener('visibilitychange', syncRayAnimation)
+  document.addEventListener('visibilitychange', syncAisMotionAnimation)
   window.addEventListener('keydown', onKeyDown)
   rebuildRayFlow()
 })
@@ -1157,9 +1358,13 @@ watch(() => props.active, (active) => {
       camera.value = savedTerrainCamera ? { ...savedTerrainCamera } : { ...camera.value, zoom: 1 }
     }
     stopRayAnimation()
+    stopAisMotionAnimation()
+    setAisTrackRequestsEnabled(false)
+    stopSelectedAisTracking()
     return
   }
   savedTerrainCamera = null
+  setAisTrackRequestsEnabled(true)
   nextTick(() => {
     if (aisMonitorState.focusRequest?.viewMode === 'terrain') {
       focusAisRequest()
@@ -1169,13 +1374,32 @@ watch(() => props.active, (active) => {
     if (applyInitialBounds()) return
     if (status.value === 'idle') locateSource()
     else scheduleDraw()
+    const selected = aisMonitorState.vessels.find(item => item.mmsi === aisMonitorState.selectedMmsi)
+      || aisMonitorState.selectedVesselSnapshot
+    if (selected) startSelectedAisTracking(selected)
+    syncAisMotionAnimation()
     syncRayAnimation()
   })
 })
 watch(() => aisMonitorState.focusToken, focusAisRequest)
 watch(() => aisMonitorState.vessels, () => scheduleDraw())
-watch(() => aisMonitorState.selectedMmsi, () => scheduleDraw())
-watch(() => aisMonitorState.displayEnabled, () => scheduleDraw())
+watch(() => aisMonitorState.selectedMmsi, () => {
+  syncSelectedAisTracking()
+  scheduleDraw()
+})
+watch(() => selectedAisTrackState.points, () => drawAisVessels())
+watch(() => aisMonitorState.displayEnabled, (enabled) => {
+  aisStaticCache = null
+  if (!enabled) {
+    for (const canvas of [aisCanvasEl.value, aisDynamicCanvasEl.value]) {
+      if (!canvas) continue
+      const ctx = canvas.getContext('2d')
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+    }
+  }
+  scheduleDraw()
+})
 watch(() => trackPointState.revision, () => scheduleDraw())
 watch(() => signalTransmissionControls.showReceiver, () => scheduleDraw())
 watch(() => props.initialBoundsToken, () => {
@@ -1264,6 +1488,9 @@ onBeforeUnmount(() => {
   token += 1
   if (drawRaf) cancelAnimationFrame(drawRaf)
   stopRayAnimation()
+  stopAisMotionAnimation()
+  setAisTrackRequestsEnabled(false)
+  stopSelectedAisTracking()
   if (hoverRaf) cancelAnimationFrame(hoverRaf)
   if (globeTransitionRaf) cancelAnimationFrame(globeTransitionRaf)
   if (regionalWeatherLoadTimer) clearTimeout(regionalWeatherLoadTimer)
@@ -1272,6 +1499,7 @@ onBeforeUnmount(() => {
   globeTransitionRaf = 0
   resizeObserver?.disconnect()
   document.removeEventListener('visibilitychange', syncRayAnimation)
+  document.removeEventListener('visibilitychange', syncAisMotionAnimation)
   window.removeEventListener('keydown', onKeyDown)
   emit('anchor', null)
   emit('layer-anchors', {})
@@ -1284,6 +1512,7 @@ onBeforeUnmount(() => {
 .terrain-canvas:active { cursor: grabbing; }
 .ray-canvas { position: absolute; inset: 0 0 25px; z-index: 1; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
 .ais-canvas { position: absolute; inset: 0 0 25px; z-index: 2; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
+.ais-dynamic-canvas { position: absolute; inset: 0 0 25px; z-index: 2; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
 .track-canvas { position: absolute; inset: 0 0 25px; z-index: 3; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
 .exaggeration-handle { position: absolute; z-index: 3; width: 18px; height: 96px; display: grid; place-items: center; padding: 0; color: #8fb8cc; border: 1px solid #345b72; border-radius: 9px; background: linear-gradient(#17364a, #0d2434); box-shadow: 0 2px 8px #00101d88; transform: translate(-50%, -50%); cursor: ns-resize; touch-action: none; }
 .exaggeration-handle span { font-size: 15px; line-height: 1; text-shadow: 0 1px 2px #00101d; }

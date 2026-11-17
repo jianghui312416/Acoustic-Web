@@ -4317,6 +4317,11 @@ function addTrackPointFeature(feature) {
 function renderTrackPointFeatures() {
   if (!viewer?.features) return
   clearTrackPointFeatures()
+  // 选中 AIS 船舶时自动生成的 1 海里信号航线只参与计算，不在地球上显示航迹点/航线。
+  if (selectedAisVessel.value) {
+    viewer.scene?.requestRender?.()
+    return
+  }
   const points = configuredSignalRoutePoints.value
   if (!points.length) {
     viewer.scene?.requestRender?.()

@@ -240,21 +240,24 @@ function destroyLayer() {
   selectedScreen.value = null
 }
 
-watch(() => aisMonitorState.vessels, renderVessels)
+watch(() => aisMonitorState.vessels, () => {
+  if (props.active) renderVessels()
+})
 watch(() => aisMonitorState.selectedMmsi, () => { syncHalo(); updateSelectedScreen() })
 watch(() => aisMonitorState.focusToken, focusRequestedVessel)
 watch(() => props.active, (active) => {
+  if (active) renderVessels()
   if (billboardCollection) billboardCollection.show = active
   if (active) { focusRequestedVessel(); updateSelectedScreen() }
   else { hoveredVessel.value = null; hoverScreen.value = null }
   syncHalo()
   props.viewer?.scene?.requestRender?.()
 })
-watch(() => props.viewer, () => { destroyLayer(); renderVessels() })
+watch(() => props.viewer, () => { destroyLayer(); if (props.active) renderVessels() })
 
 onMounted(() => {
   ensureAisConnection()
-  renderVessels()
+  if (props.active) renderVessels()
 })
 onBeforeUnmount(() => {
   releaseAisConnection()
