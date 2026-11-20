@@ -1,6 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { terrainMesh, terrainSegments, hillshade, terrainLighting } from '../src/utils/terrainRendering.js'
+import {
+  TERRAIN_MAX_MESH_SEGMENTS,
+  terrainMesh,
+  terrainSegments,
+  hillshade,
+  terrainLighting,
+} from '../src/utils/terrainRendering.js'
 import { drawTerrainScene, createTerrainProjection } from '../src/utils/terrainScene.js'
 import { pickTerrainPoint } from '../src/utils/terrainPicking.js'
 import { readFileSync } from 'node:fs'
@@ -38,7 +44,7 @@ test('zoom refines cached meshes within source resolution and fixed face budget'
   const far = terrainMesh(g, terrainSegments(size, .55))
   const near = terrainMesh(g, terrainSegments(size, 14))
   assert.ok(near.faces.length > far.faces.length)
-  assert.ok(near.faces.length <= 192 ** 2)
+  assert.ok(near.faces.length <= TERRAIN_MAX_MESH_SEGMENTS ** 2)
   assert.equal(terrainMesh(g, terrainSegments(size, .55)), far)
   g.values[0] = NaN
   const hole = grid(2); hole.values[0] = NaN

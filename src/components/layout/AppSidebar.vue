@@ -95,7 +95,31 @@
             <p class="feature-section-title">显示</p>
             <label class="feature-slider">
               <span>垂直夸张 <b>{{ formatControl(visualControls.terrainExaggeration, 1) }}×</b></span>
-              <input v-model.number="visualControls.terrainExaggeration" aria-label="垂直夸张倍率" type="range" min="1" max="30" step="0.1" @input="normalizeControls" />
+              <input v-model.number="visualControls.terrainExaggeration" aria-label="垂直夸张倍率" type="range" min="0.5" max="50" step="0.1" @input="normalizeControls" />
+            </label>
+            <label class="feature-slider">
+              <span>地形亮度 <b>{{ formatControl(visualControls.terrainBrightness, 2) }}×</b></span>
+              <input v-model.number="visualControls.terrainBrightness" aria-label="地形整体亮度" type="range" min="0.5" max="4" step="0.05" @input="normalizeControls" />
+            </label>
+            <label class="feature-switch">
+              <input v-model="visualControls.terrainBands" type="checkbox" />
+              <span class="switch-track"><i></i></span>
+              <span class="feature-switch-label"><span aria-hidden="true">▤</span><span>高程色带</span></span>
+            </label>
+            <label class="feature-switch">
+              <input v-model="visualControls.terrainFog" type="checkbox" />
+              <span class="switch-track"><i></i></span>
+              <span class="feature-switch-label"><span aria-hidden="true">≋</span><span>距离雾</span></span>
+            </label>
+            <label class="feature-switch">
+              <input v-model="visualControls.terrainContours" type="checkbox" />
+              <span class="switch-track"><i></i></span>
+              <span class="feature-switch-label"><span aria-hidden="true">〰️</span><span>等高线</span></span>
+            </label>
+            <label class="feature-switch">
+              <input v-model="visualControls.terrainCoastline" type="checkbox" />
+              <span class="switch-track"><i></i></span>
+              <span class="feature-switch-label"><span aria-hidden="true">◠</span><span>海岸线</span></span>
             </label>
           </div>
         </section>
@@ -377,11 +401,11 @@
                 @input="normalizeSliceControls"
               />
             </label>
-            <p class="feature-section-title">dB 范围</p>
+            <p class="feature-section-title">dB 范围（与三维声场体共用）</p>
             <div class="db-control-grid">
               <span>Min</span><span>Max</span>
-              <div class="stepper"><button type="button" @click="stepSliceDb('dbMin', -1)">−</button><input v-model.number="sliceControls.dbMin" type="number" min="0" max="199" @change="normalizeSliceControls" /><em>dB</em><button type="button" @click="stepSliceDb('dbMin', 1)">＋</button></div>
-              <div class="stepper"><button type="button" @click="stepSliceDb('dbMax', -1)">−</button><input v-model.number="sliceControls.dbMax" type="number" min="1" max="200" @change="normalizeSliceControls" /><em>dB</em><button type="button" @click="stepSliceDb('dbMax', 1)">＋</button></div>
+              <div class="stepper"><button type="button" @click="stepDb('dbMin', -1)">−</button><input v-model.number="visualControls.dbMin" type="number" min="0" max="199" @change="normalizeControls" /><em>dB</em><button type="button" @click="stepDb('dbMin', 1)">＋</button></div>
+              <div class="stepper"><button type="button" @click="stepDb('dbMax', -1)">−</button><input v-model.number="visualControls.dbMax" type="number" min="1" max="200" @change="normalizeControls" /><em>dB</em><button type="button" @click="stepDb('dbMax', 1)">＋</button></div>
             </div>
             <div class="color-scale-bar" :style="{ background: sliceColorGradient }"></div>
             <p class="feature-section-title">显示</p>
@@ -394,11 +418,6 @@
               <input v-model="sliceControls.seafloorMask" type="checkbox" />
               <span class="switch-track"><i></i></span>
               <span class="feature-switch-label"><span aria-hidden="true">◼️</span><span>海底掩膜</span></span>
-            </label>
-            <label class="feature-switch">
-              <input v-model="sliceControls.east90Indicator" type="checkbox" />
-              <span class="switch-track"><i></i></span>
-              <span class="feature-switch-label"><span aria-hidden="true">➤</span><span>方位方向线</span></span>
             </label>
             <label class="feature-switch">
               <input v-model="sliceControls.clipBody" type="checkbox" />
@@ -729,11 +748,6 @@ function toggleModule(moduleItem) {
 function stepDb(key, delta) {
   visualControls[key] = Number(visualControls[key]) + delta
   normalizeControls()
-}
-
-function stepSliceDb(key, delta) {
-  sliceControls[key] = Number(sliceControls[key]) + delta
-  normalizeSliceControls()
 }
 
 function stepMove(key, delta) {

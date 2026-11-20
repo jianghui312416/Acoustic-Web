@@ -106,15 +106,23 @@ async function callPortalOnce(sn, plugin, requestPayload) {
     wrapped?.detail
 
   if (!res.ok) {
-    const reason = message ? `声场计算失败：${message}` : `声场计算接口 HTTP ${res.status}`
+    // 带上插件名，便于在浏览器只看到 POST 500 时定位是哪一个门户任务失败。
+    const reason = message
+      ? `声场计算失败：${message}`
+      : `声场计算失败：${plugin} 接口 HTTP ${res.status}`
     const error = new Error(reason)
     error.status = res.status
+    error.plugin = plugin
+    error.sn = sn
     error.response = wrapped
     throw error
   }
 
   if (!unit || Number(unit.ResultCode) !== 0) {
-    throw new Error(message ? `声场计算失败：${message}` : '声场计算失败（未知错误）')
+    const error = new Error(message ? `声场计算失败：${message}` : '声场计算失败（未知错误）')
+    error.plugin = plugin
+    error.sn = sn
+    throw error
   }
 
   return wrapped

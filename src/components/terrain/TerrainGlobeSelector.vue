@@ -5,7 +5,7 @@
     class="globe-selector"
     aria-label="地形区域选框"
   >
-    <div v-if="!zoomedIn" class="globe-selector-hint">
+    <div v-if="!zoomedIn && !returnActive" class="globe-selector-hint">
       <span class="globe-hint-mark" aria-hidden="true"></span>
       <span>放大地图，框选局部地形区域</span>
     </div>
@@ -21,6 +21,13 @@
     </div>
 
     <div
+      v-if="showRegionRect"
+      class="globe-region-frame"
+      :style="regionStyle"
+      aria-hidden="true"
+    ></div>
+
+    <div
       v-if="showRect"
       class="globe-rect"
       :class="{ armed, dragging }"
@@ -30,7 +37,7 @@
       @wheel.prevent.stop="onWheel"
     >
       <span
-        v-for="handle in handles"
+        v-for="handle in visibleHandles"
         :key="handle.key"
         class="globe-handle"
         :class="`handle-${handle.key}`"
@@ -77,6 +84,8 @@ const props = defineProps({
   active: { type: Boolean, default: true },
   loading: { type: Boolean, default: false },
   zoomHeight: { type: Number, default: GLOBE_SELECTION_ZOOM_HEIGHT },
+  /** 当前选区经纬度；全球视图中的红框会跟随该区域的位置与大小。 */
+  selectionBounds: { type: Object, default: null },
   /** 缩回全球后，红框用来返回刚才的地形。 */
   returnActive: { type: Boolean, default: false },
 })
@@ -96,6 +105,8 @@ const handles = Object.freeze([
 
 const rootEl = ref(null)
 const rect = ref(null)
+/** 仅用于全球视图展示“当前区域”的只读框，不参与拖动/缩放/加载。 */
+const regionRect = ref(null)
 const size = ref({ width: 0, height: 0 })
 const zoomedIn = ref(false)
 const armed = ref(false)
@@ -108,6 +119,17 @@ let disposed = false
 
 const rectStyle = computed(() => {
   const value = rect.value
+  if (!value) return { display: 'none' }
+  return {
+    left: `${value.left}px`,
+    top: `${value.top}px`,
+    width: `${value.width}px`,
+    height: `${value.height}px`,
+  }
+})
+
+const regionStyle = computed(() => {
+  const value = regionRect.value
   if (!value) return { display: 'none' }
   return {
     left: `${value.left}px`,
@@ -135,8 +157,19 @@ const invalidStyle = computed(() => {
   return { left: style.left, top: `${top}px` }
 })
 
-/** 与初始全球视图一致：只有放大到阈值以内才出现红框。 */
-const showRect = computed(() => !!(rect.value && zoomedIn.value))
+/** 交互选框只在放大到阈值以内或返回地形时显示。 */
+const showRect = computed(() => !!(rect.value && (zoomedIn.value || props.returnActive)))
+/** 全球视图下显示当前已加载区域的只读框。 */
+const showRegionRect = computed(() => !!(
+  regionRect.value && !zoomedIn.value && !props.returnActive
+))
+/** 区域很小时不显示 8 个缩放手柄，避免手柄互相重叠。 */
+const showHandles = computed(() => {
+  const value = rect.value
+  if (!value || !zoomedIn.value) return false
+  return value.width >= 56 && value.height >= 44
+})
+const visibleHandles = computed(() => showHandles.value ? handles : [])
 
 function clampHeightOk(height) {
   return Number.isFinite(height) && height <= Number(props.zoomHeight || GLOBE_SELECTION_ZOOM_HEIGHT)
@@ -146,6 +179,86 @@ function updateZoomState() {
   if (!props.active || !props.viewer || disposed) return
   const height = Number(props.viewer.camera?.positionCartographic?.height)
   zoomedIn.value = clampHeightOk(height)
+}
+
+/** 把选区经纬度四角投影到屏幕，得到红框的位置和大小。 */
+function projectBoundsRect(bounds) {
+  const viewer = props.viewer
+  const root = rootEl.value
+  const canvas = viewer?.canvas
+  const scene = viewer?.scene
+  const transforms = Cesium?.SceneTransforms
+  if (
+    !bounds ||
+    !viewer ||
+    !root ||
+    !canvas ||
+    !scene ||
+    typeof transforms?.wgs84ToWindowCoordinates !== 'function'
+  ) return null
+
+  const rootBox = root.getBoundingClientRect()
+  const canvasBox = canvas.getBoundingClientRect()
+  if (!(rootBox.width > 0 && rootBox.height > 0)) return null
+  const offsetX = canvasBox.left - rootBox.left
+  const offsetY = canvasBox.top - rootBox.top
+  const corners = [
+    [bounds.west, bounds.south],
+    [bounds.east, bounds.south],
+    [bounds.east, bounds.north],
+    [bounds.west, bounds.north],
+  ]
+  const points = []
+  for (const [lon, lat] of corners) {
+    if (!Number.isFinite(Number(lon)) || !Number.isFinite(Number(lat))) continue
+    const cartesian = Cesium.Cartesian3.fromDegrees(Number(lon), Number(lat), 0)
+    let window = null
+    try {
+      window = transforms.wgs84ToWindowCoordinates(scene, cartesian)
+    } catch {
+      continue
+    }
+    if (!window || !Number.isFinite(window.x) || !Number.isFinite(window.y)) continue
+    points.push({ x: window.x + offsetX, y: window.y + offsetY })
+  }
+  if (points.length < 2) return null
+
+  const margin = GLOBE_SELECTION_MARGIN_PX
+  const maxWidth = Math.max(8, size.value.width - margin * 2)
+  const maxHeight = Math.max(8, size.value.height - margin * 2)
+  let left = Math.min(...points.map(point => point.x))
+  let right = Math.max(...points.map(point => point.x))
+  let top = Math.min(...points.map(point => point.y))
+  let bottom = Math.max(...points.map(point => point.y))
+  left = Math.max(margin, Math.min(left, margin + maxWidth - 8))
+  top = Math.max(margin, Math.min(top, margin + maxHeight - 8))
+  right = Math.min(margin + maxWidth, Math.max(right, left + 8))
+  bottom = Math.min(margin + maxHeight, Math.max(bottom, top + 8))
+  return {
+    left,
+    top,
+    width: Math.max(8, right - left),
+    height: Math.max(8, bottom - top),
+  }
+}
+
+/** 全球视图的只读区域框跟随当前加载区域。 */
+function syncRegionRect() {
+  if (!props.selectionBounds) {
+    regionRect.value = null
+    return false
+  }
+  if (!(size.value.width > 0 && size.value.height > 0)) return false
+  const next = projectBoundsRect(props.selectionBounds)
+  if (!next) return false
+  const current = regionRect.value
+  const changed = !current
+    || Math.abs(current.left - next.left) > 0.5
+    || Math.abs(current.top - next.top) > 0.5
+    || Math.abs(current.width - next.width) > 0.5
+    || Math.abs(current.height - next.height) > 0.5
+  if (changed) regionRect.value = next
+  return true
 }
 
 function measure() {
@@ -158,6 +271,7 @@ function measure() {
 
   const previous = size.value
   size.value = { width, height }
+  syncRegionRect()
 
   if (!rect.value) {
     rect.value = createGlobeSelectionRect(width, height)
@@ -181,6 +295,7 @@ function measure() {
 function onPostRender() {
   if (!props.active || disposed) return
   updateZoomState()
+  syncRegionRect()
   if (zoomedIn.value && !rect.value) measure()
 }
 
@@ -388,7 +503,7 @@ function onKeyDown(event) {
   }
 }
 
-/** 缩回全球后把红框放回视图中心，并直接显示「加载」。 */
+/** 缩回全球后让红框跟随刚才的区域，并直接显示「加载」。 */
 async function prepareReturnBox() {
   await nextTick()
   measure()
@@ -401,6 +516,8 @@ async function prepareReturnBox() {
 watch(() => props.returnActive, (active) => {
   if (active) prepareReturnBox()
 })
+
+watch(() => props.selectionBounds, () => syncRegionRect(), { deep: true })
 
 watch(
   () => props.viewer,
@@ -504,6 +621,16 @@ onBeforeUnmount(() => {
   cursor: move;
   pointer-events: auto;
   touch-action: none;
+}
+
+/* 全球视图中的只读区域框：只显示位置和大小，不响应鼠标。 */
+.globe-region-frame {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1.5px dashed rgba(255, 90, 82, 0.9);
+  background: rgba(255, 90, 82, 0.06);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1), inset 0 0 16px rgba(255, 90, 82, 0.12);
+  pointer-events: none;
 }
 
 .globe-rect.armed {

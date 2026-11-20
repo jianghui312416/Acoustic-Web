@@ -47,7 +47,7 @@ function bearingDegFromLonLat(source, lon, lat) {
 }
 
 export function positionFromScatterPoint(point, volume) {
-  const exag = Math.max(1, volume.depthExaggeration ?? 1)
+  const exag = Math.max(0.5, volume.depthExaggeration ?? 1)
   const offset = volume.displayAltitudeOffset ?? 0
   return Cesium.Cartesian3.fromDegrees(point.longitude, point.latitude, -point.depthM * exag + offset)
 }

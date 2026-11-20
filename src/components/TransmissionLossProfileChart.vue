@@ -4,11 +4,11 @@
   距离 - 深度 TL 伪彩图（方位剖面），可叠加白色波前声线动画。
 
   展示当前方位的「距离 - 深度」剖面：
-   - 主体：TL 伪彩热力图（颜色 = TL dB，60~120 dB，与体渲染色标一致）；
+   - 主体：TL 伪彩热力图（颜色 = TL dB，色标范围与三维声场体一致）；
    - 参考线：声源深度（黄色虚线）；
    - 地形：海底地形线 + 海底以下区域着色（仅 `tlrd` 标准格式自带
      `altitudeList.pairedDataVS[row].y`，经 `model.seabedFor()` 取海深，向下为正）；
-   - 右侧：TL 色标（120 dB ~ 60 dB）。
+   - 右侧：TL 色标（dbMax ~ dbMin）。
 
   声线轨迹由同级的「声线展示图」组件单独呈现（见 SoundRayChart.vue），
   两者共用 utils/soundProfileModel.js 的数据解析。

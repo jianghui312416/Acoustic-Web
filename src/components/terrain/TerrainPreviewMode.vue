@@ -1,5 +1,6 @@
 <template>
   <section class="terrain-preview-mode" aria-label="区域海底地形">
+    <canvas ref="terrainGlCanvasEl" class="terrain-gl-canvas" aria-hidden="true"></canvas>
     <canvas ref="canvasEl" class="terrain-canvas" style="position:absolute;inset:0 0 25px;width:100%;height:calc(100% - 25px);display:block"
       aria-label="区域海底地形，左键拖动平移，右键拖动旋转，滚轮缩放，悬停查看深度"
       @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp"
@@ -56,6 +57,13 @@
     </div>
     <TerrainStationCard v-if="station" :point="station" :dataset="dataset" :time="time" :running="running"
       @close="station = null" @run="runStation" @parameters="openStationParameters" @noise="$emit('noise', $event)" />
+    <div v-if="terrainLegend" class="terrain-legend" aria-label="高程色带图例">
+      <span class="terrain-legend-title">{{ terrainLegend.title }}</span>
+      <div class="terrain-legend-bar" :style="{ background: terrainLegend.gradient }"></div>
+      <div class="terrain-legend-ticks">
+        <span>{{ terrainLegend.min }}</span><span>{{ terrainLegend.mid }}</span><span>{{ terrainLegend.max }}</span>
+      </div>
+    </div>
     <slot :anchor="anchor" />
     <TerrainPreviewDock v-model:bounds="bounds" :collapsed="thumbnailCollapsed" :loading="status === 'loading'"
       @update:collapsed="$emit('update:thumbnailCollapsed', $event)" @load="loadTerrainFromDock" @locate="locateSource" />
@@ -81,6 +89,8 @@ import { normalizeTerrainBounds } from '@/utils/terrainPreview.js'
 import { loadBathymetry, acousticTerrainBounds } from '@/utils/bathymetry.js'
 import { BATHYMETRY_SOURCE_OPTIONS, bathymetrySourceState, setBathymetrySource } from '@/modules/terrain/bathymetrySource.js'
 import { drawTerrainScene, terrainMetersPerPixel } from '@/utils/terrainScene.js'
+import { createTerrainWebGLRenderer } from '@/utils/terrainWebGL.js'
+import { TERRAIN_MAX_MESH_SEGMENTS, terrainColorAt } from '@/utils/terrainRendering.js'
 import TerrainPreviewDock from './TerrainPreviewDock.vue'
 import TerrainStationCard from './TerrainStationCard.vue'
 import { pickTerrainPoint } from '@/utils/terrainPicking.js'
@@ -170,6 +180,7 @@ watch(() => props.stationParametersOpen, (open, previous) => {
   suspendedStation = null
 })
 
+const terrainGlCanvasEl = ref(null)
 const canvasEl = ref(null)
 const rayCanvasEl = ref(null)
 const aisCanvasEl = ref(null)
@@ -197,6 +208,34 @@ const sourceAttribution = computed(() => (
   BATHYMETRY_SOURCE_OPTIONS.find(option => option.value === bathymetrySourceState.source)
   || BATHYMETRY_SOURCE_OPTIONS[0]
 ).attribution)
+
+/** 与地形着色共用同一套色带，生成左下角之外的高程/水深图例。 */
+const terrainLegend = computed(() => {
+  const current = grid.value
+  if (!current) return null
+  const low = Math.min(0, Number(current.min) || 0)
+  const high = Math.max(0, Number(current.max) || 0)
+  // 纯水深区域按浅→深排列，混合区域按深水→低地→山峰排列。
+  const allSea = high <= 0
+  const start = allSea ? high : low
+  const end = allSea ? low : high
+  const span = Math.max(1, end - start)
+  const steps = 24
+  const stops = []
+  for (let index = 0; index <= steps; index += 1) {
+    const t = index / steps
+    const [r, g, b] = terrainColorAt(start + t * span, current.min, current.max)
+    stops.push(`rgb(${r}, ${g}, ${b}) ${(t * 100).toFixed(1)}%`)
+  }
+  const format = (value) => value < 0 ? `${Math.round(-value)}` : `${Math.round(value)}`
+  return {
+    title: low < 0 && high > 0 ? '水深 / 高程 (m)' : low < 0 ? '水深 (m)' : '高程 (m)',
+    gradient: `linear-gradient(90deg, ${stops.join(', ')})`,
+    min: format(start),
+    mid: format(start + span / 2),
+    max: format(end),
+  }
+})
 
 const canvasSize = ref({ width: 0, height: 0 })
 
@@ -252,6 +291,8 @@ const compassTicks = computed(() => {
 
 let resizeObserver = null
 let drawRaf = 0
+let interactionActive = false
+let interactionTimer = 0
 let rayAnimationRaf = 0
 let aisMotionRaf = 0
 let rayAnimationLastAt = 0
@@ -260,6 +301,7 @@ let token = 0
 let disposed = false
 let dragState = null
 let lastScene = null
+let terrainGl = null
 let aisMarkerHits = []
 let aisSelectedMarkerHit = null
 let aisStaticCache = null
@@ -276,7 +318,10 @@ let globeTransitionRaf = 0
 let savedTerrainCamera = null
 const MIN_CAMERA_ZOOM = 0.1
 // 允许贴近声场体与海底表面观察细节；仅改变投影视图比例，不重载地形或声场。
-const MAX_CAMERA_ZOOM = 40
+// 上限受 DEM/网格分辨率约束，继续放大会只放大插值块，而不是增加细节。
+const MAX_CAMERA_ZOOM = 14
+/** 拖动/缩放期间先降细分保证跟手，停手后再补一帧高精度地形。 */
+const INTERACTIVE_MESH_SEGMENTS = 128
 const MIN_CAMERA_PITCH = 0.05
 /** 俯视时 pitch = 90°，高程不再影响屏幕位置，避免点选标记与地形落点产生视角偏移。 */
 const TOP_DOWN_PITCH = Math.PI / 2
@@ -337,6 +382,8 @@ const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
 
 /** 首次加载地形时固定使用 100 km × 100 km，避免直接运行时被传播距离提前改写。 */
 const DEFAULT_TERRAIN_SPAN_KM = 100
+/** 地形高程采样分辨率；提高后可减轻放大时的块状插值，但会增加加载与缓存开销。 */
+const TERRAIN_GRID_RESOLUTION = 512
 
 function sourceBounds() {
   const center = props.source || props.initialCenter || { lon: 116, lat: 16 }
@@ -389,13 +436,26 @@ function updateExaggerationHandle() {
 function draw() {
   drawRaf = 0
   if (!props.active || !canvasEl.value || !grid.value) return
+  const controls = sceneControls()
+  let paintTerrain = true
+  if (terrainGl) {
+    try {
+      paintTerrain = !terrainGl.render(grid.value, camera.value, controls)
+    } catch (error) {
+      console.warn('[terrain] WebGL 地形渲染失败，回退到 Canvas 渲染：', error)
+      terrainGl.dispose()
+      terrainGl = null
+    }
+  }
   lastScene = drawTerrainScene(canvasEl.value, grid.value, {
     field: props.field,
     fields: props.fields,
     source: props.source,
     receiver: terrainReceiver.value,
     camera: camera.value,
-    controls: sceneControls(),
+    controls,
+    paintTerrain,
+    meshMax: interactionActive ? INTERACTIVE_MESH_SEGMENTS : TERRAIN_MAX_MESH_SEGMENTS,
     rayScene: null,
     raySource: props.raySource,
     directionLine: {
@@ -824,6 +884,24 @@ function scheduleDraw() {
   drawRaf = requestAnimationFrame(draw)
 }
 
+function beginInteraction() {
+  interactionActive = true
+  if (interactionTimer) {
+    clearTimeout(interactionTimer)
+    interactionTimer = 0
+  }
+}
+
+function settleInteraction() {
+  if (interactionTimer) clearTimeout(interactionTimer)
+  interactionTimer = window.setTimeout(() => {
+    interactionTimer = 0
+    if (!interactionActive) return
+    interactionActive = false
+    scheduleDraw()
+  }, 180)
+}
+
 function stopRayAnimation() {
   if (rayAnimationRaf) cancelAnimationFrame(rayAnimationRaf)
   rayAnimationRaf = 0
@@ -884,7 +962,38 @@ function rebuildRayFlow() {
 }
 
 function resetCamera() {
-  camera.value = { yaw: 0, pitch: TOP_DOWN_PITCH, zoom: 1, panX: 0, panY: 0 }
+  const { width, height } = canvasSize.value
+  const b = grid.value?.bounds || bounds.value
+  if (!b || !(width > 0) || !(height > 0)) {
+    camera.value = { yaw: 0, pitch: TOP_DOWN_PITCH, zoom: 0.7, panX: 0, panY: 0 }
+    scheduleDraw()
+    return
+  }
+  // 俯视时让整块地形完整落在画布内：按南北边缘的透视缩放分别计算宽高上限，
+  // 再同时确定缩放与垂直平移，避免只改 pitch 后地形被上下裁掉。
+  const cosLat = Math.max(.1, Math.cos((Number(b.north) + Number(b.south)) / 2 * Math.PI / 180))
+  const spanX = Math.max(1e-9, (Number(b.east) - Number(b.west)) * cosLat)
+  const spanY = Math.max(1e-9, Number(b.north) - Number(b.south))
+  const span = Math.max(spanX, spanY)
+  const fullX = spanX / span
+  const fullY = spanY / span
+  const baseScale = Math.min(width * .72, height * 1.2)
+  const southPerspective = 1 / (1 - fullY / 2 * .35)
+  const northPerspective = 1 / (1 + fullY / 2 * .35)
+  const usableWidth = Math.max(1, width * .84)
+  const usableHeight = Math.max(1, height * .82)
+  const maxWidth = fullX * Math.max(southPerspective, northPerspective) * baseScale
+  const maxHeight = fullY / 2 * (southPerspective + northPerspective) * baseScale
+  const zoom = Math.min(1, usableWidth / Math.max(1e-9, maxWidth), usableHeight / Math.max(1e-9, maxHeight))
+  const centerOffset = fullY / 2 * (southPerspective - northPerspective) / 2 * baseScale * zoom
+  const targetY = height * .06 + usableHeight / 2
+  camera.value = {
+    yaw: 0,
+    pitch: TOP_DOWN_PITCH,
+    zoom,
+    panX: 0,
+    panY: targetY - height * .40 - centerOffset,
+  }
   scheduleDraw()
 }
 
@@ -987,7 +1096,7 @@ async function loadTerrain(next) {
   hover.value = null
   try {
     // Read a finer grid from the same cached tiles once; camera/scale never fetch data.
-    const data = await loadBathymetry(target, 192, { source: bathymetrySourceState.source })
+    const data = await loadBathymetry(target, TERRAIN_GRID_RESOLUTION, { source: bathymetrySourceState.source })
     if (request !== token || disposed) return
     grid.value = data
     loadedBounds.value = target
@@ -1020,6 +1129,7 @@ function startExaggerationDrag(event) {
     value: Number(visualControls.terrainExaggeration) || 1,
   }
   exaggerationDragging.value = true
+  beginInteraction()
   event.currentTarget?.setPointerCapture?.(event.pointerId)
 }
 
@@ -1027,7 +1137,7 @@ function onExaggerationPointerMove(event) {
   if (!exaggerationDrag || event.pointerId !== exaggerationDrag.pointerId) return
   event.preventDefault()
   const dy = event.clientY - exaggerationDrag.startY
-  const next = clamp(exaggerationDrag.value * Math.exp(-dy * 0.008), 1, 30)
+  const next = clamp(exaggerationDrag.value * Math.exp(-dy * 0.008), 0.5, 50)
   visualControls.terrainExaggeration = Math.round(next * 10) / 10
 }
 
@@ -1037,6 +1147,7 @@ function onExaggerationPointerUp(event) {
   exaggerationDrag = null
   exaggerationDragging.value = false
   scheduleDraw()
+  settleInteraction()
 }
 
 /** 方向方位线所属声场体（与 terrainScene 的 layerId 规则一致）。 */
@@ -1160,6 +1271,7 @@ function onPointerDown(event) {
     return
   }
   const mode = event.button === 2 ? 'rotate' : 'pan'
+  beginInteraction()
   canvasEl.value?.setPointerCapture?.(event.pointerId)
   dragState = {
     pointerId: event.pointerId,
@@ -1232,6 +1344,7 @@ function onPointerUp(event) {
   const mode = dragState.mode
   const aisVessel = dragState.vessel
   dragState = null
+  settleInteraction()
   try { canvasEl.value?.releasePointerCapture?.(event.pointerId) } catch {}
   if (!moved && mode === 'ais' && event.type !== 'pointercancel') {
     selectAisVessel(aisVessel, '')
@@ -1285,6 +1398,12 @@ function onTrackDoubleClick(event) {
 function startGlobeTransition() {
   if (leavingForGlobe.value || disposed) return
   leavingForGlobe.value = true
+  // 缩出动画期间改用较低网格精度，避免与全球视图初始化同时占用 CPU。
+  if (interactionTimer) {
+    clearTimeout(interactionTimer)
+    interactionTimer = 0
+  }
+  interactionActive = true
   // 记住缩回前的视角，点击红框返回时恢复到“刚才的地形视图”。
   savedTerrainCamera = { ...camera.value }
   const target = normalizeTerrainBounds(loadedBounds.value || bounds.value)
@@ -1320,14 +1439,19 @@ function onWheel(event) {
     startGlobeTransition()
     return
   }
+  beginInteraction()
   camera.value = {
     ...camera.value,
     zoom: clamp(nextZoom, MIN_CAMERA_ZOOM, MAX_CAMERA_ZOOM),
   }
   scheduleDraw()
+  settleInteraction()
 }
 
 onMounted(() => {
+  if (terrainGlCanvasEl.value) {
+    terrainGl = createTerrainWebGLRenderer(terrainGlCanvasEl.value)
+  }
   const updateCanvasSize = () => {
     const rect = canvasEl.value?.getBoundingClientRect()
     if (rect) canvasSize.value = { width: rect.width, height: rect.height }
@@ -1353,6 +1477,11 @@ watch(() => props.active, (active) => {
     hover.value = null
     if (globeTransitionRaf) cancelAnimationFrame(globeTransitionRaf)
     globeTransitionRaf = 0
+    if (interactionTimer) {
+      clearTimeout(interactionTimer)
+      interactionTimer = 0
+    }
+    interactionActive = false
     if (leavingForGlobe.value) {
       leavingForGlobe.value = false
       camera.value = savedTerrainCamera ? { ...savedTerrainCamera } : { ...camera.value, zoom: 1 }
@@ -1497,6 +1626,8 @@ onBeforeUnmount(() => {
   if (regionalNoiseLoadTimer) clearTimeout(regionalNoiseLoadTimer)
   if (oceanCurrentLoadTimer) clearTimeout(oceanCurrentLoadTimer)
   globeTransitionRaf = 0
+  terrainGl?.dispose()
+  terrainGl = null
   resizeObserver?.disconnect()
   document.removeEventListener('visibilitychange', syncRayAnimation)
   document.removeEventListener('visibilitychange', syncAisMotionAnimation)
@@ -1507,14 +1638,15 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.terrain-preview-mode { position: absolute; inset: 0; z-index: 8; overflow: hidden; color: #b8d6ec; background: radial-gradient(ellipse at 20% 0%, #244777, transparent 80%), linear-gradient(140deg,#162a4d 15%,#4b617d 65%,#9399a3); font: 12px 'Microsoft YaHei', sans-serif; }
-.terrain-canvas { position: absolute; inset: 0 0 25px; z-index: 0; width: 100%; height: calc(100% - 25px); display: block; cursor: grab; touch-action: none; }
+.terrain-preview-mode { position: absolute; inset: 0; z-index: 8; overflow: hidden; color: #b8d6ec; background: radial-gradient(ellipse at 50% -8%, #123553 0%, #081a2b 46%, #03080f 100%); font: 12px 'Microsoft YaHei', sans-serif; }
+.terrain-gl-canvas { position: absolute; inset: 0 0 25px; z-index: 0; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
+.terrain-canvas { position: absolute; inset: 0 0 25px; z-index: 1; width: 100%; height: calc(100% - 25px); display: block; cursor: grab; touch-action: none; }
 .terrain-canvas:active { cursor: grabbing; }
-.ray-canvas { position: absolute; inset: 0 0 25px; z-index: 1; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
-.ais-canvas { position: absolute; inset: 0 0 25px; z-index: 2; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
-.ais-dynamic-canvas { position: absolute; inset: 0 0 25px; z-index: 2; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
-.track-canvas { position: absolute; inset: 0 0 25px; z-index: 3; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
-.exaggeration-handle { position: absolute; z-index: 3; width: 18px; height: 96px; display: grid; place-items: center; padding: 0; color: #8fb8cc; border: 1px solid #345b72; border-radius: 9px; background: linear-gradient(#17364a, #0d2434); box-shadow: 0 2px 8px #00101d88; transform: translate(-50%, -50%); cursor: ns-resize; touch-action: none; }
+.ray-canvas { position: absolute; inset: 0 0 25px; z-index: 2; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
+.ais-canvas { position: absolute; inset: 0 0 25px; z-index: 3; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
+.ais-dynamic-canvas { position: absolute; inset: 0 0 25px; z-index: 3; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
+.track-canvas { position: absolute; inset: 0 0 25px; z-index: 4; width: 100%; height: calc(100% - 25px); display: block; pointer-events: none; }
+.exaggeration-handle { position: absolute; z-index: 5; width: 18px; height: 96px; display: grid; place-items: center; padding: 0; color: #8fb8cc; border: 1px solid #345b72; border-radius: 9px; background: linear-gradient(#17364a, #0d2434); box-shadow: 0 2px 8px #00101d88; transform: translate(-50%, -50%); cursor: ns-resize; touch-action: none; }
 .exaggeration-handle span { font-size: 15px; line-height: 1; text-shadow: 0 1px 2px #00101d; }
 .exaggeration-handle:hover, .exaggeration-handle.active { color: #eaffff; border-color: #38c8f0; background: linear-gradient(#1d4c63, #123244); box-shadow: 0 0 10px #38c8f088, 0 2px 8px #00101d88; }
 .compass-stack { position: absolute; right: 22px; top: 14px; z-index: 6; display: flex; flex-direction: column; align-items: center; pointer-events: none; }
@@ -1527,6 +1659,10 @@ onBeforeUnmount(() => {
 .terrain-loading i { display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: #00d5bd; animation: pulse .8s infinite alternate; }
 .terrain-error { color: #f1c38c; max-width: 400px; line-height: 1.8; }.terrain-error button { margin-left: 10px; background: #22435b; border: 1px solid #5c90b3; color: #dff6ff; cursor: pointer; }
 .depth-tooltip { position: absolute; z-index: 7; pointer-events: none; background: #071b2ee8; border: 1px solid #42748e; border-radius: 4px; padding: 7px 10px; font: 11px/1.7 monospace; }.depth-tooltip b { color: #66ebda; }
+.terrain-legend { position: absolute; right: 16px; bottom: 34px; z-index: 6; width: 196px; padding: 7px 9px 6px; box-sizing: border-box; border: 1px solid #274255; border-radius: 5px; background: #061522d9; pointer-events: none; }
+.terrain-legend-title { display: block; margin-bottom: 4px; color: #cfe9f6; font-size: 10px; }
+.terrain-legend-bar { height: 7px; border: 1px solid #2c4c62; border-radius: 2px; }
+.terrain-legend-ticks { display: flex; justify-content: space-between; margin-top: 3px; color: #8fb8cc; font: 9px ui-monospace, monospace; }
 .terrain-status { position: absolute; bottom: 0; left: 0; right: 0; z-index: 6; height: 24px; display: flex; align-items: center; gap: 8px; padding: 0 14px; box-sizing: border-box; background: #101e30; border-top: 1px solid #304256; font-size: 10px; }
 .terrain-status i { width: 6px; height: 6px; border-radius: 50%; background: #00c8b0; }.terrain-status a { margin-left: 8px; color: #83a9c0; text-decoration: none; }.terrain-warn { color: #f1c38c; }
 .terrain-source { display: flex; gap: 2px; margin-left: auto; }

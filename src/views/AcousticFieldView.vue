@@ -6,6 +6,7 @@
       v-if="viewerReady"
       :active="viewMode === 'globe' && !terrainLeaving"
       :viewer="activeViewer"
+      :selection-bounds="globeSelection"
       :return-active="terrainReturnAvailable"
       @load="loadGlobeTerrain"
       @return="returnToTerrain"
@@ -42,7 +43,6 @@
       :rays-visible="profileTerrainRaysVisible"
       :rays-static="profileTerrainRaysStatic"
       :rays-animated="profileTerrainRaysAnimated"
-      :direction-line-visible="verticalSliceControls.east90Indicator"
       :direction-line-layer-id="profileDirectionLayerId"
       :clip-body="verticalSliceControls.clipBody"
       @arrow-azimuth="onTerrainArrowAzimuth"
@@ -601,7 +601,7 @@
         <!-- <label class="toggle-line"><input v-model="omni2dVisible" type="checkbox" @change="onOmni2dVisibleChange" /> 海面二维投影</label> -->
         <div class="mini-control">
           <span>垂直夸张（地形 + 声场） <b>{{ depthExaggeration }}×</b></span>
-          <input v-model.number="depthExaggeration" type="range" min="1" max="30" step="0.1" @input="onDepthExagChange" />
+          <input v-model.number="depthExaggeration" type="range" min="0.5" max="50" step="0.1" @input="onDepthExagChange" />
         </div>
         <div class="mini-control">
           <span>透明度 <b>{{ alphaPercent }}%</b></span>
@@ -972,8 +972,8 @@
             <input
               v-model.number="depthExaggeration"
               type="range"
-              min="1"
-              max="30"
+              min="0.5"
+              max="50"
               step="0.1"
               @input="onDepthExagChange"
             />
@@ -1381,7 +1381,7 @@ import {
 // 二维声场：栅格化为影像图层贴在 Cesium 球面（不再是小窗口图表）
 import { buildOmniField } from '@/utils/omniFieldModel.js'
 import { buildOmniFieldImage } from '@/utils/omniFieldImage.js'
-import { maskVolumeByTerrain } from '@/sdk/terrainVolumeMask.js'
+import { canSampleTerrain, maskVolumeByTerrain } from '@/sdk/terrainVolumeMask.js'
 import { acousticTerrainBounds } from '@/utils/bathymetry.js'
 import { loadAcousticJob, loadAcousticJobParams } from '@/api/jobWorkspaceApi.js'
 import { jobWorkspace, markJobClosed, markJobOpened } from '@/modules/acoustic/jobWorkspace.js'
@@ -1509,7 +1509,10 @@ function runPanelDockIndex(id) {
   return index < 0 ? 0 : index
 }
 /** 全球视图红框选择的区域：加载后作为地形模式的初始区域。 */
-const globeSelection = ref(null)
+const globeSelection = ref(acousticTerrainBounds(
+  { lon: 116, lat: 16 },
+  DEFAULT_TERRAIN_SPAN_KM / 6
+))
 /** 每次从全球视图点击“加载”都递增，地形模式据此重新加载选区。 */
 const globeSelectionToken = ref(0)
 /** 地形缩放到最小时，先淡出地形并在数字地球上继续缩小，再回到全球视图。 */
@@ -1684,7 +1687,7 @@ function leaveTerrainForGlobe(payload) {
           viewer.camera.flyTo({
             // 缩回后仍以刚才的区域为中心，用户在同一位置继续放大到一定高度时，
             // 选框正好落回刚才的地形区域，而不是出现在极区大框。
-            destination: Cesium.Cartesian3.fromDegrees(centerLon, centerLat, 23000000),
+            destination: Cesium.Cartesian3.fromDegrees(centerLon, centerLat, 18000000),
             orientation: { heading: 0, pitch: -Math.PI / 2, roll: 0 },
             duration: 1.8,
             complete: finish,
@@ -1692,7 +1695,7 @@ function leaveTerrainForGlobe(payload) {
           })
         } else {
           viewer.camera.setView({
-            destination: Cesium.Cartesian3.fromDegrees(centerLon, centerLat, 23000000),
+            destination: Cesium.Cartesian3.fromDegrees(centerLon, centerLat, 18000000),
             orientation: { heading: 0, pitch: -Math.PI / 2, roll: 0 },
           })
           finish()
@@ -1700,7 +1703,7 @@ function leaveTerrainForGlobe(payload) {
       } catch {
         try {
           viewer.camera.setView({
-            destination: Cesium.Cartesian3.fromDegrees(centerLon, centerLat, 23000000),
+            destination: Cesium.Cartesian3.fromDegrees(centerLon, centerLat, 18000000),
             orientation: { heading: 0, pitch: -Math.PI / 2, roll: 0 },
           })
         } catch {}
@@ -2769,11 +2772,11 @@ const calcParams = ref({
   dataset: 'HYCOM',
   time: '2025-01-02T12:00:00',
   regionType: 'normal',
-  // 默认声源放在北极海域（巴伦支海），避免默认落到陆地
-  coordX: -60,
-  coordY: 70.8,
-  receiverX: -60,
-  receiverY: 70,
+  // 默认声源放在南海海域。
+  coordX: 116,
+  coordY: 16,
+  receiverX: 116.1,
+  receiverY: 16,
   srcDepth: 150,
   grazingAngleMin: -25,
   grazingAngleMax: 25,
@@ -3033,10 +3036,12 @@ const sliceAzimuthDeg = ref(compassBearingToInternalAzimuth(verticalSliceControl
 
 /* ── 垂直切面 / 动态声线使用的数据（当前结果或选中的历史声场） ── */
 const profileData = computed(() => selectedProfileLayer.value?.field || raySourceData.value)
-/** 垂直切面颜色范围：信号余量模式下使用 SE/Pd 自身的色标范围。 */
+/** 垂直切面颜色范围：普通 TL 与三维声场体共用同一 dB 色标；信号余量模式下使用 SE/Pd 自身的色标范围。 */
 const profileDbRange = computed(() => {
   const params = signalExcessParams.value
-  if (!params) return { min: verticalSliceControls.dbMin, max: verticalSliceControls.dbMax }
+  if (!params) {
+    return { min: Number(volumeRenderingControls.dbMin), max: Number(volumeRenderingControls.dbMax) }
+  }
   if (params.displayMode === 'pd') return { min: 0, max: 100 }
   const min = Number(signalExcessState.dbMin)
   const max = Number(signalExcessState.dbMax)
@@ -3159,12 +3164,6 @@ watch(() => verticalSliceControls.clipBody, (enabled) => {
   syncSoundField()
   viewer?.scene?.requestRender?.()
 })
-// 方位方向线开关：开启时箭头可拖动切换方位，关闭时按指针自身开关决定显隐。
-watch(() => verticalSliceControls.east90Indicator, () => {
-  setupAzimuthPointer()
-  applyPointerVisibility()
-  viewer?.scene?.requestRender?.()
-})
 watch(() => terrainProfileOpen.value, (val) => {
   if (verticalSliceControls.sspWindow !== !!val) verticalSliceControls.sspWindow = !!val
   if (!val) {
@@ -3233,96 +3232,6 @@ function applyRayPlaybackVisibility() {
   if (!dynamic && !staticRays) stopTwoDRayAnimation()
   viewer?.scene?.requestRender?.()
 }
-
-/** 方位方向线（Display[4]）：在海平面绘制指向当前方位角的洋红方向线 + 标签 */
-let east90IndicatorEntities = []
-
-/** 罗盘方位角 → 中文八方位 */
-function compassCardinalLabel(bearing) {
-  const dirs = ['北', '东北', '东', '东南', '南', '西南', '西', '西北']
-  const normalized = ((Math.round(bearing) % 360) + 360) % 360
-  return dirs[Math.round(normalized / 45) % 8]
-}
-
-function applyEast90Indicator() {
-  if (viewer?.entities) {
-    for (const entity of east90IndicatorEntities) {
-      try { viewer.entities.remove(entity) } catch {}
-    }
-  }
-  east90IndicatorEntities = []
-  // 区域地形模式由 TerrainPreviewMode 直接绘制方位线；这里负责全球
-  // Cesium 三维体，避免把线绘制到地形模式下被隐藏的画布上。
-  const enabled = verticalSliceControls.east90Indicator && props.viewMode !== 'terrain'
-  if (!enabled || !viewer?.entities || !viewer || viewer.isDestroyed?.()) return
-  // 选中历史声场时方向线跟随该声场体，否则用当前实际声源点。
-  const layer = selectedProfileLayer.value
-  const source = layer?.source ?? sourcePoint.value ?? { lon: calcParams.value.coordX, lat: calcParams.value.coordY }
-  const sourceLon = Number(source.lon)
-  const sourceLat = Number(source.lat)
-  if (!Number.isFinite(sourceLon) || !Number.isFinite(sourceLat)) return
-  const radiusM = Number(layer ? (layer.sourceRadiusKm || layer.radiusKm) : sourceRadiusKm.value) * 1000 || 10000
-  // 内部方位（正东 0°、逆时针）转罗盘方位（正北 0°、顺时针）
-  const bearing = internalAzimuthToCompassBearing(
-    layer ? (Number(layer.sliceAzimuthDeg) || 0) : sliceAzimuthDeg.value
-  )
-  const end = destinationLonLat(sourceLon, sourceLat, bearing, radiusM)
-  const color = Cesium.Color.fromCssColorString('#ff2d95').withAlpha(0.95)
-  const lineAltitude = 5
-  const start = Cesium.Cartesian3.fromDegrees(sourceLon, sourceLat, lineAltitude)
-  const endCart = Cesium.Cartesian3.fromDegrees(end.lon, end.lat, lineAltitude)
-  east90IndicatorEntities.push(
-    viewer.entities.add({
-      polyline: {
-        positions: [start, endCart],
-        width: 2.5,
-        arcType: Cesium.ArcType.NONE,
-        material: new Cesium.ColorMaterialProperty(color),
-        depthFailMaterial: new Cesium.ColorMaterialProperty(color),
-      },
-    })
-  )
-  east90IndicatorEntities.push(
-    viewer.entities.add({
-      position: Cesium.Cartesian3.midpoint(start, endCart, new Cesium.Cartesian3()),
-      label: {
-        text: `${Math.round(bearing)}° ${compassCardinalLabel(bearing)}`,
-        font: '600 13px sans-serif',
-        fillColor: Cesium.Color.fromCssColorString('#ffd6e4'),
-        backgroundColor: Cesium.Color.fromCssColorString('#4a0b2e'),
-        showBackground: true,
-        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
-        pixelOffset: new Cesium.Cartesian2(0, -14),
-        disableDepthTestDistance: Number.POSITIVE_INFINITY,
-      },
-    })
-  )
-  east90IndicatorEntities.push(
-    viewer.entities.add({
-      position: endCart,
-      point: {
-        pixelSize: 6,
-        color,
-        outlineColor: Cesium.Color.WHITE,
-        outlineWidth: 1,
-        disableDepthTestDistance: Number.POSITIVE_INFINITY,
-      },
-    })
-  )
-  viewer.scene?.requestRender?.()
-}
-watch(
-  () => [
-    verticalSliceControls.east90Indicator,
-    props.viewMode,
-    profileDirectionLayerId.value,
-    profileSourceLon.value,
-    profileSourceLat.value,
-    profileMaxRadiusM.value,
-    profileAzimuthDeg.value,
-  ],
-  () => applyEast90Indicator()
-)
 
 /** 三维「体渲染」控制窗是否展开（由结果窗「体渲染」按钮控制） */
 const renderControlsOpen = ref(false)
@@ -3808,7 +3717,7 @@ watch(
 watch(
   () => volumeRenderingControls.terrainExaggeration,
   (value) => {
-    const next = Math.min(30, Math.max(1, Number(value) || 3))
+    const next = Math.min(50, Math.max(0.5, Number(value) || 3))
     if (Math.abs(Number(depthExaggeration.value) - next) < 1e-6) return
     depthExaggeration.value = next
     onDepthExagChange()
@@ -3817,7 +3726,7 @@ watch(
 )
 
 watch(depthExaggeration, (value) => {
-  const next = Math.min(30, Math.max(1, Number(value) || 3))
+  const next = Math.min(50, Math.max(0.5, Number(value) || 3))
   if (Math.abs(Number(depthExaggeration.value) - next) >= 1e-6) depthExaggeration.value = next
   if (Math.abs(Number(volumeRenderingControls.terrainExaggeration) - next) >= 1e-6) {
     volumeRenderingControls.terrainExaggeration = next
@@ -3970,12 +3879,17 @@ watch(
     }
     if (!viewer || viewer.isDestroyed?.()) return
     nextTick(() => {
-      if (typeof viewer.resize === 'function') viewer.resize()
-      onDepthExagChange()
-      refreshVolumeRayScatterPoints()
-      syncSoundField()
-      setupAzimuthPointer()
-      startVolumeRayAnimation()
+      // 地形→全球的过渡已在起飞前 resize；避免动画开始后再次 resize 造成顿挫。
+      if (!terrainLeaving.value && typeof viewer.resize === 'function') viewer.resize()
+      // 回到“干净全球视图”时三维体/声线仍处于隐藏状态，无需立即重建
+      // GPU 纹理与 primitive；等用户重新计算或打开结果时再同步，避免切换卡顿。
+      if (!cleanGlobeView.value) {
+        onDepthExagChange()
+        refreshVolumeRayScatterPoints()
+        syncSoundField()
+        setupAzimuthPointer()
+        startVolumeRayAnimation()
+      }
       viewer.scene?.requestRender?.()
     })
   }
@@ -5248,8 +5162,8 @@ function build2dCurtainVolume({
   const span = Math.max(1, depthMaxM - depthMinM)
   const exag =
     Number.isFinite(Number(exaggeration)) && Number(exaggeration) > 0
-      ? Math.max(1, Math.min(200, Number(exaggeration)))
-      : Math.max(1, Math.min(80, Math.round((boxLength * 0.18) / span)))
+      ? Math.max(0.5, Math.min(200, Number(exaggeration)))
+      : Math.max(0.5, Math.min(80, Math.round((boxLength * 0.18) / span)))
 
   let topAltitude
   let bottomAltitude
@@ -5899,14 +5813,13 @@ let lastClipAzimuthDeg = null
 function setupAzimuthPointer() {
   if (!soundField?.loaded) return
   const clipMode = verticalSliceControls.clipBody
-  const directionLine = verticalSliceControls.east90Indicator
-  // 方位方向线开启时箭头也需可拖拽切换方位；裁剪体模式下取消吸附做连续旋转。
-  const interactive = pointerEnabled.value || clipMode || directionLine
+  // 裁剪模式下方位指针也需要可拖动，用于调整切面方位。
+  const interactive = pointerEnabled.value || clipMode
   soundField.setAzimuthPointer({
     azimuths: clipMode ? [] : availableAzimuths.value,
     snapStepDeg: 1,
     azimuthDeg: Number(sliceAzimuthDeg.value),
-    visible: interactive && (!sliceEnabled.value || clipMode || directionLine),
+    visible: interactive && (!sliceEnabled.value || clipMode),
     draggable: interactive,
     // 仅方位方向线驱动时只显示箭头/杆，不显示辅助圈，避免默认多出一整圈刻度。
     ringVisible: pointerRingVisible.value && (pointerEnabled.value || clipMode),
@@ -5939,9 +5852,8 @@ function setupAzimuthPointer() {
 /** 指针显隐：方位方向线 / 裁剪体开启时保留箭头，可拖拽切换方位。 */
 function applyPointerVisibility() {
   const clipMode = verticalSliceControls.clipBody
-  const directionLine = verticalSliceControls.east90Indicator
-  const interactive = pointerEnabled.value || clipMode || directionLine
-  const show = interactive && (!sliceEnabled.value || clipMode || directionLine)
+  const interactive = pointerEnabled.value || clipMode
+  const show = interactive && (!sliceEnabled.value || clipMode)
   soundField?.setAzimuthPointerVisible(show)
   soundField?.pointer?.setDraggable(interactive)
   soundField?.setAzimuthPointerRingVisible(pointerRingVisible.value && (pointerEnabled.value || clipMode))
@@ -6381,7 +6293,7 @@ function onColorRangeChange() {
 }
 
 function onDepthExagChange() {
-  const next = Math.min(30, Math.max(1, Number(depthExaggeration.value) || 3))
+  const next = Math.min(50, Math.max(0.5, Number(depthExaggeration.value) || 3))
   depthExaggeration.value = next
   if (Math.abs(Number(volumeRenderingControls.terrainExaggeration) - next) >= 1e-6) {
     volumeRenderingControls.terrainExaggeration = next
@@ -7190,13 +7102,9 @@ function scheduleBottomTypesForAzimuth(azimuthDeg, delay = 260) {
  */
 async function validateSourceDepthAgainstTerrain() {
   const provider = viewer?.scene?.terrainProvider
-  if (
-    !provider ||
-    provider.constructor?.name === 'EllipsoidTerrainProvider' ||
-    typeof Cesium?.sampleTerrainMostDetailed !== 'function'
-  ) {
-    return
-  }
+  // 椭球地形或没有瓦片可用性的提供器无法做 sampleTerrainMostDetailed，
+  // 直接交给门户校验，避免每次计算都打印警告。
+  if (!canSampleTerrain(provider)) return
 
   const lon = Number(calcParams.value.coordX)
   const lat = Number(calcParams.value.coordY)
@@ -7274,7 +7182,7 @@ async function loadTlrdData() {
   terrainTexture.value = texture
   // 地形、声场、声源、声线和切面共用侧边栏的唯一垂直夸张倍率。
   // 不再根据水深自动改写倍率，因此 1× 始终代表真实物理比例。
-  depthExaggeration.value = Math.min(30, Math.max(1, Number(volumeRenderingControls.terrainExaggeration) || 3))
+  depthExaggeration.value = Math.min(50, Math.max(0.5, Number(volumeRenderingControls.terrainExaggeration) || 3))
   soundField.depthExaggeration = depthExaggeration.value
   // SoundField.setVolume 会调用 decodeFn(texture) 得到纹理再 finalize；
   // 这里传入恒等函数，因为 texture 已经是解码结果。
@@ -7402,7 +7310,7 @@ function startVolumeRayAnimation() {
     visible: true,
     project: ([distanceM, depthM]) => {
       const point = destinationLonLat(sourceLon, sourceLat, bearing, Number(distanceM) || 0)
-      const altitude = -(Number(depthM) || 0) * Math.max(1, Number(volume.depthExaggeration) || 1)
+      const altitude = -(Number(depthM) || 0) * Math.max(0.5, Number(volume.depthExaggeration) || 1)
         + (Number(volume.displayAltitudeOffset) || 0)
       return Cesium.Cartesian3.fromDegrees(point.lon, point.lat, altitude)
     },
@@ -7614,12 +7522,6 @@ onBeforeUnmount(() => {
   clearTwoDMapFeatures()
   removeCurtainPrimitive()
   removeSliceCurtain()
-  if (viewer?.entities) {
-    for (const entity of east90IndicatorEntities) {
-      try { viewer.entities.remove(entity) } catch {}
-    }
-    east90IndicatorEntities = []
-  }
   removePickMarker('source')
   removePickMarker('receiver')
   clearTrackPointFeatures()

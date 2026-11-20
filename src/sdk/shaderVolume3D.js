@@ -139,7 +139,7 @@ export function finalizeVolumeTexture(texture, depthExaggeration = 10, finalizeO
 
   const depthMin = texture.depthValues[0] ?? 0
   const depthMax = texture.depthValues[texture.depthValues.length - 1] ?? depthMin + 1
-  const exag = Math.max(1, depthExaggeration)
+  const exag = Math.max(0.5, depthExaggeration)
 
   let topAltitude = -depthMin * exag
   let bottomAltitude = -depthMax * exag

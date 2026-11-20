@@ -18,7 +18,8 @@ test('volume menu exposes translated color maps and returns isolated SDK stops',
 
 test('volume menu values are clamped to safe rendering ranges', () => {
   const controls = {
-    terrainExaggeration: 40,
+    terrainExaggeration: 80,
+    terrainBrightness: 10,
     opacity: -1,
     sampling: 2,
     alphaPower: 0,
@@ -32,7 +33,8 @@ test('volume menu values are clamped to safe rendering ranges', () => {
     moveZ: 10,
   }
   clampVolumeRenderingControls(controls)
-  assert.equal(controls.terrainExaggeration, 30)
+  assert.equal(controls.terrainExaggeration, 50)
+  assert.equal(controls.terrainBrightness, 4)
   assert.equal(controls.opacity, 0.2)
   assert.equal(controls.sampling, 0.03)
   assert.equal(controls.alphaPower, 0.35)

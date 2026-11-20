@@ -90,6 +90,13 @@ export const VOLUME_COLORMAPS = Object.freeze([
 
 export const volumeRenderingControls = reactive({
   terrainExaggeration: 3,
+  /** 地形光照风格：分层色带、距离雾、等高线与海岸线。 */
+  terrainBands: false,
+  /** 地形整体亮度倍率（1 = 原始亮度）。 */
+  terrainBrightness: 1,
+  terrainFog: true,
+  terrainContours: false,
+  terrainCoastline: false,
   volumeVisible: true,
   opacity: 1.7,
   sampling: 0.01,
@@ -126,7 +133,12 @@ export function clampVolumeRenderingControls(controls = volumeRenderingControls)
     const number = Number(value)
     return Math.min(max, Math.max(min, Number.isFinite(number) ? number : fallback))
   }
-  controls.terrainExaggeration = clamp(controls.terrainExaggeration, 1, 30, 3)
+  controls.terrainExaggeration = clamp(controls.terrainExaggeration, 0.5, 50, 3)
+  controls.terrainBands = controls.terrainBands === true
+  controls.terrainBrightness = clamp(controls.terrainBrightness, 0.5, 4, 1)
+  controls.terrainFog = controls.terrainFog !== false
+  controls.terrainContours = controls.terrainContours === true
+  controls.terrainCoastline = controls.terrainCoastline === true
   controls.opacity = clamp(controls.opacity, 0.2, 5, 1.7)
   controls.sampling = clamp(controls.sampling, 0.004, 0.03, 0.01)
   controls.alphaPower = clamp(controls.alphaPower, 0.35, 3, 1.3)

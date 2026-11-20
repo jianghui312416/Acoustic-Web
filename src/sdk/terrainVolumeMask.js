@@ -32,6 +32,22 @@ function destinationLonLat(lonDeg, latDeg, bearingDeg, distanceM) {
   }
 }
 
+/**
+ * sampleTerrainMostDetailed 要求地形提供器带瓦片可用性（availability）。
+ * GeoVis 打包后类名会被压缩，不能用 constructor.name 判断椭球地形，
+ * 统一用 instanceof + 能力检测，避免对椭球地形发起注定失败的采样。
+ * @param {object} terrainProvider GeoVis scene.terrainProvider
+ * @returns {boolean}
+ */
+export function canSampleTerrain(terrainProvider) {
+  if (!terrainProvider || typeof Cesium?.sampleTerrainMostDetailed !== 'function') {
+    return false
+  }
+  const Ellipsoid = Cesium.EllipsoidTerrainProvider
+  if (typeof Ellipsoid === 'function' && terrainProvider instanceof Ellipsoid) return false
+  return Boolean(terrainProvider.availability)
+}
+
 async function sampleInChunks(provider, positions, chunkSize) {
   const out = []
   for (let start = 0; start < positions.length; start += chunkSize) {
@@ -51,11 +67,7 @@ async function sampleInChunks(provider, positions, chunkSize) {
  * @returns {Promise<{supported:boolean,sampledColumns:number,landColumns:number,blockedColumns:number,maskedVoxels:number,visiblePathMaxM:number,sourceOnLand:boolean}>}
  */
 export async function maskVolumeByTerrain(texture, terrainProvider, options = {}) {
-  const canSample =
-    texture?.data instanceof Uint8Array &&
-    typeof Cesium?.sampleTerrainMostDetailed === 'function' &&
-    terrainProvider &&
-    terrainProvider.constructor?.name !== 'EllipsoidTerrainProvider'
+  const canSample = texture?.data instanceof Uint8Array && canSampleTerrain(terrainProvider)
   if (!canSample) {
     return { supported: false, sampledColumns: 0, landColumns: 0, maskedVoxels: 0, visiblePathMaxM: 0 }
   }

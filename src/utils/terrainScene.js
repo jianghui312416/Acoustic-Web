@@ -1,10 +1,11 @@
-import { normalizeExaggeration, terrainLighting, terrainMesh, terrainSegments, hillshade } from './terrainRendering.js'
+import {
+  TERRAIN_MAX_MESH_SEGMENTS,
+  normalizeExaggeration, terrainLighting, terrainMesh, terrainSegments, hillshade,
+  pickBandStep, terrainColorAt, screenHeightGradient, contourLineWidth,
+} from './terrainRendering.js'
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x))
-
 export function bathymetryColor(height, min = -8000, max = 0) {
-  if (height > 0) return [100, 132, 109]
-  const t = clamp((height - min) / Math.max(1, Math.min(0, max) - min), 0, 1)
-  return [12 + 22 * t, 30 + 78 * t, 65 + 92 * t]
+  return terrainColorAt(height, min, max)
 }
 
 export function createTerrainProjection(bounds, size, floor, camera = {}) {
@@ -21,15 +22,20 @@ export function createTerrainProjection(bounds, size, floor, camera = {}) {
   // 因此倍率 1 是真实纵横比例，而不是按“最大水深”再次归一化后的视觉厚度。
   const horizontalSpanM = Math.max(1, span * 110574)
   const verticalExaggeration = normalizeExaggeration(camera.verticalExaggeration)
+  // 三角函数与相机无关，提到闭包外，避免逐顶点重复计算。
+  const cosYaw = Math.cos(yaw)
+  const sinYaw = Math.sin(yaw)
+  const sinPitch = Math.sin(pitch)
+  const cosPitch = Math.cos(pitch)
   return (lon, lat, elevation) => {
     const x = (lon - (bounds.west + bounds.east) / 2) * cosLat / span
     const y = ((bounds.north + bounds.south) / 2 - lat) / span
-    const rx = x * Math.cos(yaw) - y * Math.sin(yaw)
-    const ry = x * Math.sin(yaw) + y * Math.cos(yaw)
+    const rx = x * cosYaw - y * sinYaw
+    const ry = x * sinYaw + y * cosYaw
     const z = elevation / horizontalSpanM * verticalExaggeration
     const perspective = 1 / (1 - ry * .35)
     return { x: size.width * .5 + panX + rx * scale * perspective,
-      y: size.height * .40 + panY + (ry * Math.sin(pitch) - z * Math.cos(pitch)) * scale * perspective,
+      y: size.height * .40 + panY + (ry * sinPitch - z * cosPitch) * scale * perspective,
       order: ry + z * .3, perspective }
   }
 }
@@ -69,6 +75,7 @@ function gradientPolygon(ctx, points, colors, alpha) {
   if (!points?.length || !colors?.length) return
   const left = averageRgb([colors[0], colors[3] ?? colors[0]])
   const right = averageRgb([colors[1] ?? colors[0], colors[2] ?? colors[0]])
+  const center = averageRgb(colors)
   const from = {
     x: ((points[0]?.x || 0) + (points[3]?.x ?? points[0]?.x ?? 0)) / 2,
     y: ((points[0]?.y || 0) + (points[3]?.y ?? points[0]?.y ?? 0)) / 2,
@@ -79,12 +86,129 @@ function gradientPolygon(ctx, points, colors, alpha) {
   }
   const gradient = ctx.createLinearGradient(from.x, from.y, to.x, to.y)
   gradient.addColorStop(0, `rgba(${left.join(',')},${alpha})`)
+  gradient.addColorStop(0.5, `rgba(${center.join(',')},${alpha})`)
   gradient.addColorStop(1, `rgba(${right.join(',')},${alpha})`)
   ctx.beginPath()
   points.forEach((point, index) => index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y))
   ctx.closePath()
   ctx.fillStyle = gradient
   ctx.fill()
+  // 相邻面各自抗锯齿会在网格线上留下暗缝；用同一渐变描 1px 覆盖接缝。
+  ctx.strokeStyle = gradient
+  ctx.lineWidth = 1
+  ctx.stroke()
+}
+
+const terrainLineGeometryCache = new WeakMap()
+
+function pushLineSegment(target, from, to) {
+  target.push(from.lon, from.lat, from.elevation, to.lon, to.lat, to.elevation)
+}
+
+function buildTerrainLineGeometry(grid) {
+  const cached = terrainLineGeometryCache.get(grid)
+  if (cached) return cached
+
+  const segments = Math.max(1, Math.min(
+    TERRAIN_MAX_MESH_SEGMENTS,
+    grid.width - 1,
+    grid.height - 1,
+  ))
+  const mesh = terrainMesh(grid, segments)
+  const waterBand = pickBandStep(Math.max(0, -Math.min(0, Number(grid.min) || 0)), 12)
+  const landBand = pickBandStep(Math.max(0, Number(grid.max) || 0), 12)
+  const contours = []
+  const coastline = []
+
+  for (let faceIndex = 0; faceIndex < mesh.faces.length; faceIndex += 1) {
+    const indices = mesh.faces[faceIndex]
+    const vertices = indices.map(index => mesh.vertices[index])
+    const sea = vertices.map(vertex => vertex.sea === true)
+
+    if (sea.some(Boolean) && !sea.every(Boolean)) {
+      const crossings = []
+      for (const [a, b] of [[0, 1], [1, 2], [2, 3], [3, 0]]) {
+        if (sea[a] === sea[b]) continue
+        const from = vertices[a]
+        const to = vertices[b]
+        crossings.push({
+          lon: (from.lon + to.lon) / 2,
+          lat: (from.lat + to.lat) / 2,
+          elevation: (from.elevation + to.elevation) / 2,
+        })
+      }
+      if (crossings.length === 2) {
+        pushLineSegment(coastline, crossings[0], crossings[1])
+      } else if (crossings.length === 4) {
+        const centerSea = sea.filter(Boolean).length >= 2
+        const links = centerSea ? [[0, 3], [1, 2]] : [[0, 1], [2, 3]]
+        for (const [a, b] of links) pushLineSegment(coastline, crossings[a], crossings[b])
+      }
+    }
+
+    const cell = mesh.cells?.[faceIndex]
+    const isSea = cell ? cell[2] === true : false
+    const step = isSea ? waterBand : landBand
+    if (!(step > 0)) continue
+
+    const values = vertices.map(vertex => isSea
+      ? Math.min(vertex.elevation, 0)
+      : Math.max(vertex.elevation, 0))
+    const start = Math.min(...values)
+    const end = Math.max(...values)
+    const first = Math.ceil(start / step)
+    const last = Math.floor(end / step)
+    if (last < first) continue
+
+    const stride = Math.max(1, Math.ceil((last - first + 1) / 6))
+    for (let index = first; index <= last; index += stride) {
+      const level = index * step
+      if (level === 0) continue
+      const crossings = []
+      for (const [a, b] of [[0, 1], [1, 2], [2, 3], [3, 0]]) {
+        const va = values[a] - level
+        const vb = values[b] - level
+        if (va * vb > 0) continue
+        const t = va / (va - vb || 1e-9)
+        const from = vertices[a]
+        const to = vertices[b]
+        crossings.push({
+          lon: from.lon + (to.lon - from.lon) * t,
+          lat: from.lat + (to.lat - from.lat) * t,
+          elevation: level,
+        })
+      }
+      if (crossings.length === 2) {
+        pushLineSegment(contours, crossings[0], crossings[1])
+      } else if (crossings.length === 4) {
+        const centerAbove = (values[0] + values[1] + values[2] + values[3]) / 4 >= level
+        const links = centerAbove ? [[0, 3], [1, 2]] : [[0, 1], [2, 3]]
+        for (const [a, b] of links) pushLineSegment(contours, crossings[a], crossings[b])
+      }
+    }
+  }
+
+  const geometry = { contours, coastline }
+  terrainLineGeometryCache.set(grid, geometry)
+  return geometry
+}
+
+function drawLineSegments(ctx, project, segments, color, lineWidth) {
+  if (!segments.length) return
+  ctx.save()
+  ctx.beginPath()
+  ctx.strokeStyle = color
+  ctx.lineWidth = lineWidth
+  for (let index = 0; index < segments.length; index += 6) {
+    const from = project(segments[index], segments[index + 1], segments[index + 2])
+    const to = project(segments[index + 3], segments[index + 4], segments[index + 5])
+    if (!Number.isFinite(from?.x) || !Number.isFinite(from?.y) ||
+        !Number.isFinite(to?.x) || !Number.isFinite(to?.y)) continue
+    ctx.moveTo(from.x, from.y)
+    ctx.lineTo(to.x, to.y)
+  }
+  ctx.stroke()
+  ctx.restore()
 }
 
 export function drawTerrainScene(canvas, grid, {
@@ -97,6 +221,8 @@ export function drawTerrainScene(canvas, grid, {
   raySource = null,
   directionLine = null,
   receiver = null,
+  meshMax = TERRAIN_MAX_MESH_SEGMENTS,
+  paintTerrain = true,
 } = {}) {
   if (!canvas || !grid) return null
   const { width, height } = canvas.getBoundingClientRect()
@@ -124,22 +250,157 @@ export function drawTerrainScene(canvas, grid, {
     )
   }
   const lighting = { ...terrainLighting, zFactor: normalizeExaggeration(controls.terrainExaggeration) }
-  const mesh = terrainMesh(grid, terrainSegments({ width, height }, camera?.zoom || 1))
+  const brightness = clamp(Number.isFinite(Number(controls.terrainBrightness))
+    ? Number(controls.terrainBrightness) : 1, .5, 4)
+  const mesh = terrainMesh(grid, terrainSegments({ width, height }, camera?.zoom || 1, .75, meshMax))
   const points = mesh.vertices.map(v => ({ ...v, ...project(v.lon, v.lat, v.elevation) }))
-  const colors = mesh.vertices.map(v => {
-    const shade = hillshade(v.slopeX, v.slopeY, lighting)
-    return bathymetryColor(v.elevation, grid.min, grid.max).map(c => Math.round(c * shade))
-  })
-  const faces = mesh.faces.map(indices => {
+  const showBands = controls.terrainBands === true
+  const showFog = controls.terrainFog !== false
+  const showContours = controls.terrainContours === true
+  const showCoastline = controls.terrainCoastline === true
+  const landSpan = Math.max(0, Number(grid.max) || 0)
+  const waterSpan = Math.max(0, -Math.min(0, Number(grid.min) || 0))
+  const landBand = pickBandStep(landSpan, 12)
+  const waterBand = pickBandStep(waterSpan, 12)
+  const colorOptions = {
+    landBand: showBands ? landBand : 0,
+    waterBand: showBands ? waterBand : 0,
+  }
+  // 坡度/坡向光照，保留连续明暗；高程色带按网格面离散。
+  const shades = paintTerrain ? mesh.vertices.map(v => hillshade(v.slopeX, v.slopeY, lighting)) : null
+  const fogColor = Array.isArray(controls.terrainFogColor) && controls.terrainFogColor.length === 3
+    ? controls.terrainFogColor.map(value => clamp(Number(value) || 0, 0, 255))
+    : [7, 19, 30]
+  const fogStrength = showFog
+    ? clamp(Number.isFinite(Number(controls.terrainFogStrength)) ? Number(controls.terrainFogStrength) : .6, 0, 1)
+    : 0
+  let fogFactors = null
+  if (paintTerrain) {
+    // 透视因子 1/perspective 随相机距离增大，用它给远处地形叠加大气透视雾。
+    let invMin = Infinity, invMax = -Infinity
+    const invDepths = points.map(point => {
+      const value = 1 / Math.max(1e-6, Number(point.perspective) || 1)
+      if (value < invMin) invMin = value
+      if (value > invMax) invMax = value
+      return value
+    })
+    fogFactors = fogStrength > 0 && invMax > invMin
+      ? invDepths.map(value => fogStrength * Math.pow(clamp((value - invMin) / (invMax - invMin), 0, 1), 1.35))
+      : invDepths.map(() => 0)
+  }
+  const faces = mesh.faces.map((indices, index) => {
     const p = indices.map(i => points[i])
-    return { p, colors: indices.map(i => colors[i]), order: p.reduce((sum, v) => sum + v.order, 0) / 4 }
+    if (!paintTerrain) return { p }
+    const cell = mesh.cells?.[index] || null
+    const elevations = indices.map(i => mesh.vertices[i].elevation)
+    const meanElevation = elevations.reduce((sum, value) => sum + value, 0) / elevations.length
+    // 外海连通域会修正海面 ±0.x m 噪声，避免把噪声当成陆地画出一圈碎海岸。
+    const isSea = cell ? cell[2] === true : meanElevation <= 0
+    const displayElevations = elevations.map(value => isSea ? Math.min(value, 0) : Math.max(value, 0))
+    const colorElevation = displayElevations.reduce((sum, value) => sum + value, 0) / displayElevations.length
+    const faceColor = showBands
+      ? terrainColorAt(colorElevation, grid.min, grid.max, colorOptions)
+      : null
+    const colors = indices.map((vertexIndex, slot) => {
+      const color = faceColor || terrainColorAt(displayElevations[slot], grid.min, grid.max, colorOptions)
+      const shade = shades[vertexIndex]
+      const fog = fogFactors[vertexIndex]
+      return color.map((channel, channelIndex) => {
+        const lit = clamp(channel * shade * brightness, 0, 255)
+        return Math.round(fog > 0 ? lit + (fogColor[channelIndex] - lit) * fog : lit)
+      })
+    })
+    return {
+      p,
+      colors,
+      order: p.reduce((sum, v) => sum + v.order, 0) / 4,
+      seaCorners: indices.map(i => mesh.vertices[i].sea === true),
+      screenGradient: screenHeightGradient(p, elevations),
+      contourStep: isSea ? waterBand : landBand,
+      displayElevations,
+      cell,
+    }
   })
-  faces.sort((a, b) => a.order - b.order).forEach(f => {
-    // Close-up views retain native samples but avoid shading off-screen faces.
-    if (f.p.every(p => p.x < 0) || f.p.every(p => p.x > width) ||
-        f.p.every(p => p.y < 0) || f.p.every(p => p.y > height)) return
-    gradientPolygon(ctx, f.p, f.colors, 1)
-  })
+  const strokeEdge = (from, to, color, lineWidth) => {
+    ctx.beginPath()
+    ctx.moveTo(from.x, from.y)
+    ctx.lineTo(to.x, to.y)
+    ctx.strokeStyle = color
+    ctx.lineWidth = lineWidth
+    ctx.stroke()
+  }
+  const contourColor = 'rgba(232, 255, 244, 0.26)'
+  const coastlineColor = 'rgba(196, 246, 230, 0.52)'
+  const midpoint = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
+  // 二值掩膜的 marching squares：跨海陆边的中点相连，得到斜向平滑海岸线，
+  // 而不是沿网格单元逐边描出的直角台阶。
+  const drawCoastlineCell = (face) => {
+    const sea = face.seaCorners
+    const crossings = []
+    for (const [a, b] of [[0, 1], [1, 2], [2, 3], [3, 0]]) {
+      if (sea[a] !== sea[b]) crossings.push(midpoint(face.p[a], face.p[b]))
+    }
+    if (crossings.length === 2) {
+      strokeEdge(crossings[0], crossings[1], coastlineColor, 1.15)
+      return
+    }
+    if (crossings.length !== 4) return
+    const centerSea = sea.filter(Boolean).length >= 2
+    const links = centerSea ? [[0, 3], [1, 2]] : [[0, 1], [2, 3]]
+    for (const [a, b] of links) strokeEdge(crossings[a], crossings[b], coastlineColor, 1.15)
+  }
+  const drawContourCell = (face) => {
+    const step = face.contourStep
+    if (!(step > 0)) return
+    const values = face.displayElevations
+    const start = Math.min(...values)
+    const end = Math.max(...values)
+    const first = Math.ceil(start / step)
+    const last = Math.floor(end / step)
+    if (last < first) return
+    // 屏幕空间梯度越大（坡越陡）线越细，平地则变粗，视觉密度更均匀。
+    const lineWidth = contourLineWidth(step, face.screenGradient)
+    const stride = Math.max(1, Math.ceil((last - first + 1) / 6))
+    for (let index = first; index <= last; index += stride) {
+      const level = index * step
+      if (level === 0) continue
+      const crossings = []
+      for (const [a, b] of [[0, 1], [1, 2], [2, 3], [3, 0]]) {
+        const va = values[a] - level
+        const vb = values[b] - level
+        if (va * vb > 0) continue
+        const t = va / (va - vb || 1e-9)
+        crossings.push({
+          x: face.p[a].x + (face.p[b].x - face.p[a].x) * t,
+          y: face.p[a].y + (face.p[b].y - face.p[a].y) * t,
+        })
+      }
+      if (crossings.length === 2) {
+        strokeEdge(crossings[0], crossings[1], contourColor, lineWidth)
+      } else if (crossings.length === 4) {
+        // 鞍点：用面中心高于或低于当前等高线决定连接方式。
+        const centerAbove = (values[0] + values[1] + values[2] + values[3]) / 4 >= level
+        const links = centerAbove ? [[0, 3], [1, 2]] : [[0, 1], [2, 3]]
+        for (const [a, b] of links) strokeEdge(crossings[a], crossings[b], contourColor, lineWidth)
+      }
+    }
+  }
+  if (paintTerrain) {
+    faces.slice().sort((a, b) => a.order - b.order).forEach(face => {
+      // Close-up views retain native samples but avoid shading off-screen faces.
+      if (face.p.every(p => p.x < 0) || face.p.every(p => p.x > width) ||
+          face.p.every(p => p.y < 0) || face.p.every(p => p.y > height)) return
+      gradientPolygon(ctx, face.p, face.colors, 1)
+      if (showCoastline && face.seaCorners.some(Boolean) && !face.seaCorners.every(Boolean)) {
+        drawCoastlineCell(face)
+      }
+      if (showContours) drawContourCell(face)
+    })
+  } else if (showCoastline || showContours) {
+    const lines = buildTerrainLineGeometry(grid)
+    if (showCoastline) drawLineSegments(ctx, project, lines.coastline, coastlineColor, 1.15)
+    if (showContours) drawLineSegments(ctx, project, lines.contours, contourColor, .9)
+  }
   drawTerrainAxes(ctx, project, b, grid)
 
   let anchor = null

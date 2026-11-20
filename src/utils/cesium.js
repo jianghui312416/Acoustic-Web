@@ -49,6 +49,19 @@ function installSampler3DUniformCompatibility(scene) {
 const SKY_BOX_BASE = '/Assets/Textures/SkyBox/Version2_dark_'
 
 /**
+ * 初始全球视图：以东亚为中心、正北朝上，并让地球在画面中占更大比例。
+ * 18,000,000 m 高度下地球直径约占画面高度的八成，接近设计图。
+ */
+const INITIAL_GLOBE_VIEW = Object.freeze({
+  longitude: 116,
+  latitude: 16,
+  height: 18000000,
+  heading: 0,
+  pitch: -Math.PI / 2,
+  roll: 0,
+})
+
+/**
  * 用参考工程同款 Version2_dark_ 贴图重建 skyBox，还原其星空效果。
  * @param {object} scene GeoVis scene
  */
@@ -141,10 +154,19 @@ export function createCesiumViewer(container, options = {}) {
   // 暂时不接入内网 GeoVis 地形服务，统一使用椭球地形。
   e.scene.terrainProvider = new Cesium.EllipsoidTerrainProvider()
 
-  // 初始以更远的北极俯视视角展示完整数字地球。
+  // 初始以东亚为中心、正北朝上展示较大的数字地球。
   if (options.initialView !== false) {
+    const view = typeof options.initialView === 'object'
+      ? { ...INITIAL_GLOBE_VIEW, ...options.initialView }
+      : INITIAL_GLOBE_VIEW
+    const height = Number(view.height) > 0 ? Number(view.height) : INITIAL_GLOBE_VIEW.height
     e.camera.setView({
-      destination: Cesium.Cartesian3.fromDegrees(90, 90, 23000000),
+      destination: Cesium.Cartesian3.fromDegrees(Number(view.longitude), Number(view.latitude), height),
+      orientation: {
+        heading: Number(view.heading) || 0,
+        pitch: Number.isFinite(Number(view.pitch)) ? Number(view.pitch) : -Math.PI / 2,
+        roll: Number(view.roll) || 0,
+      },
     })
   }
 
