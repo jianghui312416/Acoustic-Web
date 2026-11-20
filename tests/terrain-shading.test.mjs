@@ -11,6 +11,9 @@ import {
   contourLineWidth,
   terrainSegments,
   TERRAIN_MAX_MESH_SEGMENTS,
+  hillshade,
+  terrainShadowMask,
+  terrainShadowFactor,
 } from '../src/utils/terrainRendering.js'
 
 const bounds = { west: 115, east: 116, south: 15, north: 16 }
@@ -100,4 +103,43 @@ test('terrain mesh caches cell indices alongside faces', () => {
   const mesh = terrainMesh(grid(values), 16)
   assert.equal(mesh.cells.length, mesh.faces.length)
   assert.ok(mesh.vertices.every(vertex => !('ao' in vertex)))
+})
+
+test('shadow mask darkens terrain behind a ridge relative to the light azimuth', () => {
+  const size = 32
+  const values = []
+  for (let row = 0; row < size; row += 1) {
+    for (let col = 0; col < size; col += 1) values.push(row < size / 2 ? 100 : 0)
+  }
+  const terrain = {
+    ...grid(values),
+    bounds: { west: 0, east: 0.01, south: 0, north: 0.01 },
+  }
+  const sample = (mask, row) => terrainShadowFactor(mask, .5, row / (size - 1))
+
+  // 光从北方(0°)射来：山脊南侧近处被遮挡，远处与山脊表面受光。
+  const fromNorth = terrainShadowMask(terrain, 0, 30, 1)
+  assert.ok(sample(fromNorth, 18) < .5)
+  assert.ok(sample(fromNorth, 5) > .5)
+  assert.ok(sample(fromNorth, 31) > .5)
+
+  // 光从南方(180°)射来时，山脊南侧不再被自身遮挡。
+  const fromSouth = terrainShadowMask(terrain, 180, 30, 1)
+  assert.ok(sample(fromSouth, 18) > .5)
+})
+
+test('hillshade shadows only attenuate the direct light component', () => {
+  const lighting = {
+    hillshadeAzimuth: 0,
+    hillshadeAltitude: 45,
+    zFactor: 1,
+    ambient: .34,
+    diffuse: .92,
+    minLight: .28,
+    maxLight: 1.32,
+  }
+  const lit = hillshade(0, 0, lighting, 1)
+  const shadowed = hillshade(0, 0, lighting, 0)
+  assert.ok(shadowed < lit)
+  assert.ok(shadowed >= lighting.minLight)
 })

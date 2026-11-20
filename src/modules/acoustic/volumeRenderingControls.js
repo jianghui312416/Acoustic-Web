@@ -97,6 +97,8 @@ export const volumeRenderingControls = reactive({
   terrainFog: true,
   terrainContours: false,
   terrainCoastline: false,
+  /** 方向光地形自阴影（跟随月亮方位）。 */
+  terrainShadows: false,
   volumeVisible: true,
   opacity: 1.7,
   sampling: 0.01,
@@ -139,6 +141,7 @@ export function clampVolumeRenderingControls(controls = volumeRenderingControls)
   controls.terrainFog = controls.terrainFog !== false
   controls.terrainContours = controls.terrainContours === true
   controls.terrainCoastline = controls.terrainCoastline === true
+  controls.terrainShadows = controls.terrainShadows === true
   controls.opacity = clamp(controls.opacity, 0.2, 5, 1.7)
   controls.sampling = clamp(controls.sampling, 0.004, 0.03, 0.01)
   controls.alphaPower = clamp(controls.alphaPower, 0.35, 3, 1.3)

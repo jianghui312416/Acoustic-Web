@@ -283,7 +283,7 @@ export function contourLineWidth(step, gradient, options = {}) {
   return clamp(baseWidth * Math.sqrt(reference / grad), minWidth, maxWidth)
 }
 
-export function hillshade(slopeX, slopeY, lighting) {
+export function hillshade(slopeX, slopeY, lighting, shadow = 1) {
   const azimuth = lighting.hillshadeAzimuth * Math.PI / 180
   const altitude = lighting.hillshadeAltitude * Math.PI / 180
   const x = -slopeX * lighting.zFactor, y = -slopeY * lighting.zFactor
@@ -291,7 +291,131 @@ export function hillshade(slopeX, slopeY, lighting) {
     y * Math.cos(azimuth) * Math.cos(altitude) + Math.sin(altitude)) / Math.hypot(x, y, 1))
   const ambient = Number.isFinite(lighting.ambient) ? lighting.ambient : 1 - lighting.hillshadeIntensity
   const diffuse = Number.isFinite(lighting.diffuse) ? lighting.diffuse : lighting.hillshadeIntensity
-  return clamp(ambient + diffuse * illumination,
+  // 阴影只削弱直射分量（diffuse），环境光仍然保留，避免背光面变成纯黑。
+  return clamp(ambient + diffuse * illumination * shadow,
     Number.isFinite(lighting.minLight) ? lighting.minLight : 0,
     Number.isFinite(lighting.maxLight) ? lighting.maxLight : Infinity)
+}
+
+function bilinearField(values, width, height, u, v) {
+  const x = u * (width - 1)
+  const y = v * (height - 1)
+  const x0 = Math.floor(x)
+  const y0 = Math.floor(y)
+  const x1 = Math.min(width - 1, x0 + 1)
+  const y1 = Math.min(height - 1, y0 + 1)
+  const fx = x - x0
+  const fy = y - y0
+  const a = values[y0 * width + x0] ?? 0
+  const b = values[y0 * width + x1] ?? 0
+  const c = values[y1 * width + x0] ?? 0
+  const d = values[y1 * width + x1] ?? 0
+  return a * (1 - fx) * (1 - fy) + b * fx * (1 - fy) + c * (1 - fx) * fy + d * fx * fy
+}
+
+function sampleGridHeight(grid, row, col) {
+  const r0 = Math.floor(row)
+  const c0 = Math.floor(col)
+  const r1 = Math.min(grid.height - 1, r0 + 1)
+  const c1 = Math.min(grid.width - 1, c0 + 1)
+  const fr = row - r0
+  const fc = col - c0
+  const value = (r, c) => {
+    const v = grid.values[r * grid.width + c]
+    return Number.isFinite(v) ? v : 0
+  }
+  return value(r0, c0) * (1 - fr) * (1 - fc)
+    + value(r0, c1) * (1 - fr) * fc
+    + value(r1, c0) * fr * (1 - fc)
+    + value(r1, c1) * fr * fc
+}
+
+const shadowMaskCache = new WeakMap()
+const SHADOW_MASK_MAX_SIZE = 160
+
+/**
+ * 方向光的地形自阴影（高度场光线步进）。
+ *
+ * 从每个采样点沿太阳方位水平前进，若前方地形高于“光源射线”，该点即被遮挡。
+ * 竖直夸张会拉伸地形但不会改变光源高度角，因此在原始高程空间中把高度角
+ * 折算为 atan(tan(altitude) / exaggeration)，保证阴影方向与山坡明暗一致。
+ * 结果缓存在网格上，只有光照方位/高度或夸张倍率变化时才重新计算。
+ */
+export function terrainShadowMask(grid, azimuthDeg, altitudeDeg, exaggeration = 1) {
+  if (!grid?.values?.length || !(grid.width > 1) || !(grid.height > 1)) return null
+  const azimuth = ((Number(azimuthDeg) || 0) % 360 + 360) % 360
+  const altitude = clamp(Number(altitudeDeg) || 45, 0.5, 89.5)
+  const vertical = normalizeExaggeration(exaggeration)
+  const key = `${Math.round(azimuth)}:${Math.round(altitude)}:${Math.round(vertical * 10)}`
+
+  let cache = shadowMaskCache.get(grid)
+  if (!cache) {
+    cache = new Map()
+    shadowMaskCache.set(grid, cache)
+  }
+  if (cache.has(key)) {
+    const cached = cache.get(key)
+    cache.delete(key)
+    cache.set(key, cached)
+    return cached
+  }
+
+  const scale = Math.min(1, SHADOW_MASK_MAX_SIZE / Math.max(grid.width, grid.height))
+  const width = Math.max(2, Math.round(grid.width * scale))
+  const height = Math.max(2, Math.round(grid.height * scale))
+  const heights = new Float32Array(width * height)
+  for (let row = 0; row < height; row++) {
+    const srcRow = row / (height - 1) * (grid.height - 1)
+    for (let col = 0; col < width; col++) {
+      const srcCol = col / (width - 1) * (grid.width - 1)
+      heights[row * width + col] = sampleGridHeight(grid, srcRow, srcCol)
+    }
+  }
+
+  const b = grid.bounds
+  const cosLat = Math.max(.1, Math.cos((Number(b.north) + Number(b.south)) * Math.PI / 360))
+  const eastMeters = Math.max(1, (Number(b.east) - Number(b.west)) * 111320 * cosLat)
+  const northMeters = Math.max(1, (Number(b.north) - Number(b.south)) * 110574)
+  const sinAzimuth = Math.sin(azimuth * Math.PI / 180)
+  const cosAzimuth = Math.cos(azimuth * Math.PI / 180)
+  const rise = Math.tan(altitude * Math.PI / 180) / vertical
+  const step = Math.max(1, 0.8 * Math.min(
+    eastMeters / (width - 1),
+    northMeters / (height - 1),
+  ))
+  const maxSteps = Math.min(420, Math.ceil(Math.hypot(eastMeters, northMeters) / step))
+  const values = new Float32Array(width * height)
+
+  for (let row = 0; row < height; row++) {
+    const v0 = row / (height - 1)
+    for (let col = 0; col < width; col++) {
+      const u0 = col / (width - 1)
+      const base = heights[row * width + col]
+      let lit = 1
+      for (let i = 1; i <= maxSteps; i++) {
+        const meters = i * step
+        const u = u0 + (meters * sinAzimuth) / eastMeters
+        const v = v0 - (meters * cosAzimuth) / northMeters
+        if (u < 0 || u > 1 || v < 0 || v > 1) break
+        const occluder = bilinearField(heights, width, height, u, v)
+        // 0.5 m 偏置过滤 DEM 噪声造成的假阴影。
+        if (occluder > base + meters * rise + 0.5) {
+          lit = 0
+          break
+        }
+      }
+      values[row * width + col] = lit
+    }
+  }
+
+  const mask = { width, height, values }
+  cache.set(key, mask)
+  if (cache.size > 6) cache.delete(cache.keys().next().value)
+  return mask
+}
+
+/** 在阴影掩膜上按归一化坐标 (u = 西→东, v = 北→南) 双线性取样。 */
+export function terrainShadowFactor(mask, u, v) {
+  if (!mask) return 1
+  return bilinearField(mask.values, mask.width, mask.height, clamp(u, 0, 1), clamp(v, 0, 1))
 }

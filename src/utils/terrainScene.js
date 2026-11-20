@@ -2,6 +2,7 @@ import {
   TERRAIN_MAX_MESH_SEGMENTS,
   normalizeExaggeration, terrainLighting, terrainMesh, terrainSegments, hillshade,
   pickBandStep, terrainColorAt, screenHeightGradient, contourLineWidth,
+  terrainShadowMask, terrainShadowFactor,
 } from './terrainRendering.js'
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x))
 export function bathymetryColor(height, min = -8000, max = 0) {
@@ -249,7 +250,14 @@ export function drawTerrainScene(canvas, grid, {
       -(Number(depth) || 0),
     )
   }
-  const lighting = { ...terrainLighting, zFactor: normalizeExaggeration(controls.terrainExaggeration) }
+  const lightAzimuth = Number(controls.lightAzimuthDeg)
+  const lightAltitude = Number(controls.lightAltitudeDeg)
+  const lighting = {
+    ...terrainLighting,
+    zFactor: normalizeExaggeration(controls.terrainExaggeration),
+    hillshadeAzimuth: Number.isFinite(lightAzimuth) ? lightAzimuth : terrainLighting.hillshadeAzimuth,
+    hillshadeAltitude: Number.isFinite(lightAltitude) ? lightAltitude : terrainLighting.hillshadeAltitude,
+  }
   const brightness = clamp(Number.isFinite(Number(controls.terrainBrightness))
     ? Number(controls.terrainBrightness) : 1, .5, 4)
   const mesh = terrainMesh(grid, terrainSegments({ width, height }, camera?.zoom || 1, .75, meshMax))
@@ -266,8 +274,19 @@ export function drawTerrainScene(canvas, grid, {
     landBand: showBands ? landBand : 0,
     waterBand: showBands ? waterBand : 0,
   }
+  // 方向光自阴影：与 WebGL 着色器一致，按月亮方位对高度场做光线步进。
+  const shadowMask = paintTerrain && controls.terrainShadows === true
+    ? terrainShadowMask(grid, lighting.hillshadeAzimuth, lighting.hillshadeAltitude, lighting.zFactor)
+    : null
+  const lonSpan = Math.max(1e-9, b.east - b.west)
+  const latSpan = Math.max(1e-9, b.north - b.south)
   // 坡度/坡向光照，保留连续明暗；高程色带按网格面离散。
-  const shades = paintTerrain ? mesh.vertices.map(v => hillshade(v.slopeX, v.slopeY, lighting)) : null
+  const shades = paintTerrain ? mesh.vertices.map(v => {
+    const shadow = shadowMask
+      ? terrainShadowFactor(shadowMask, (v.lon - b.west) / lonSpan, (b.north - v.lat) / latSpan)
+      : 1
+    return hillshade(v.slopeX, v.slopeY, lighting, shadow)
+  }) : null
   const fogColor = Array.isArray(controls.terrainFogColor) && controls.terrainFogColor.length === 3
     ? controls.terrainFogColor.map(value => clamp(Number(value) || 0, 0, 255))
     : [7, 19, 30]

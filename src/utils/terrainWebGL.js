@@ -5,12 +5,14 @@ import {
   terrainColorAt,
   terrainLighting,
   terrainMesh,
+  terrainShadowMask,
 } from './terrainRendering.js'
 
 const VERTEX_SHADER = `#version 300 es
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec2 aSlope;
 layout(location = 2) in float aElevation;
+layout(location = 3) in vec2 aUv;
 
 uniform float uWidth;
 uniform float uHeight;
@@ -28,6 +30,7 @@ uniform float uMaxElevation;
 out vec2 vSlope;
 out float vElevT;
 out float vFogT;
+out vec2 vUv;
 
 void main() {
   float x = aPosition.x;
@@ -51,6 +54,7 @@ void main() {
   vSlope = aSlope;
   vElevT = (aElevation - uMinElevation) / max(1.0, uMaxElevation - uMinElevation);
   vFogT = 1.0 / perspective;
+  vUv = aUv;
 }
 `
 
@@ -60,8 +64,11 @@ precision highp float;
 in vec2 vSlope;
 in float vElevT;
 in float vFogT;
+in vec2 vUv;
 
 uniform sampler2D uColorMap;
+uniform sampler2D uShadowMap;
+uniform float uShadowEnabled;
 uniform vec3 uLightDir;
 uniform float uAmbient;
 uniform float uDiffuse;
@@ -83,7 +90,9 @@ void main() {
   // 因此放大后不会再出现逐面片的明暗台阶。
   vec2 slope = vSlope * uZFactor;
   vec3 normal = normalize(vec3(-slope.x, -slope.y, 1.0));
-  float illumination = max(dot(normal, normalize(uLightDir)), 0.0);
+  // 自阴影只削弱直射分量；未开启时 mix 回 1.0，保持原有明暗。
+  float shadow = mix(1.0, texture(uShadowMap, vUv).r, uShadowEnabled);
+  float illumination = max(dot(normal, normalize(uLightDir)), 0.0) * shadow;
   float shade = clamp(uAmbient + uDiffuse * illumination, uMinLight, uMaxLight);
 
   vec3 lit = clamp(base * shade * uBrightness, 0.0, 1.0);
@@ -104,6 +113,7 @@ const UNIFORM_NAMES = [
   'uMinElevation', 'uMaxElevation',
   'uColorMap', 'uLightDir', 'uAmbient', 'uDiffuse', 'uMinLight', 'uMaxLight',
   'uZFactor', 'uBrightness', 'uFogColor', 'uFogStrength', 'uInvMin', 'uInvMax',
+  'uShadowMap', 'uShadowEnabled',
 ]
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
@@ -181,6 +191,18 @@ export class TerrainWebGLRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 
+    // 自阴影掩膜纹理；默认 1×1 全白，关闭阴影时仍可安全采样。
+    this.shadowMask = null
+    this.shadowTexture = gl.createTexture()
+    gl.bindTexture(gl.TEXTURE_2D, this.shadowTexture)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array([255]),
+    )
+
     gl.clearColor(0, 0, 0, 0)
     gl.enable(gl.DEPTH_TEST)
     gl.depthFunc(gl.LESS)
@@ -209,8 +231,11 @@ export class TerrainWebGLRenderer {
     this.canvas.removeEventListener('webglcontextlost', this.onContextLost, false)
     this.disposeGeometry()
     if (this.colorTexture) this.gl.deleteTexture(this.colorTexture)
+    if (this.shadowTexture) this.gl.deleteTexture(this.shadowTexture)
     if (this.program) this.gl.deleteProgram(this.program)
     this.colorTexture = null
+    this.shadowTexture = null
+    this.shadowMask = null
     this.program = null
   }
 
@@ -239,6 +264,9 @@ export class TerrainWebGLRenderer {
     const position = new Float32Array(count * 3)
     const slope = new Float32Array(count * 2)
     const elevation = new Float32Array(count)
+    const uv = new Float32Array(count * 2)
+    const lonSpan = Math.max(1e-9, b.east - b.west)
+    const latSpan = Math.max(1e-9, b.north - b.south)
 
     mesh.vertices.forEach((vertex, index) => {
       position[index * 3] = (vertex.lon - centerLon) * cosLat / span
@@ -251,6 +279,9 @@ export class TerrainWebGLRenderer {
       elevation[index] = vertex.sea
         ? Math.min(vertex.elevation, 0)
         : Math.max(vertex.elevation, 0)
+      // 阴影掩膜纹理坐标：u 西→东，v 北→南，与 terrainShadowMask 的行列顺序一致。
+      uv[index * 2] = (vertex.lon - b.west) / lonSpan
+      uv[index * 2 + 1] = (b.north - vertex.lat) / latSpan
     })
 
     const indices = new Uint32Array(mesh.faces.length * 6)
@@ -280,6 +311,7 @@ export class TerrainWebGLRenderer {
     addAttribute(0, 3, position)
     addAttribute(1, 2, slope)
     addAttribute(2, 1, elevation)
+    addAttribute(3, 2, uv)
 
     const indexBuffer = gl.createBuffer()
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer)
@@ -322,6 +354,24 @@ export class TerrainWebGLRenderer {
       gl.TEXTURE_2D, 0, gl.RGBA8, size, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data,
     )
     this.colorKey = key
+  }
+
+  ensureShadowTexture(grid, azimuthDeg, altitudeDeg, exaggeration) {
+    const mask = terrainShadowMask(grid, azimuthDeg, altitudeDeg, exaggeration)
+    if (!mask) return false
+    if (mask === this.shadowMask) return true
+    const gl = this.gl
+    const data = new Uint8Array(mask.values.length)
+    for (let index = 0; index < mask.values.length; index++) {
+      data[index] = Math.round(clamp(mask.values[index], 0, 1) * 255)
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.shadowTexture)
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.R8, mask.width, mask.height, 0, gl.RED, gl.UNSIGNED_BYTE, data,
+    )
+    this.shadowMask = mask
+    return true
   }
 
   render(grid, camera, controls = {}) {
@@ -394,10 +444,16 @@ export class TerrainWebGLRenderer {
       ? controls.terrainFogColor
       : [7, 19, 30]
 
-    const azimuth = terrainLighting.hillshadeAzimuth * Math.PI / 180
-    const altitude = terrainLighting.hillshadeAltitude * Math.PI / 180
+    const lightAzimuthDeg = Number.isFinite(Number(controls?.lightAzimuthDeg))
+      ? Number(controls.lightAzimuthDeg) : terrainLighting.hillshadeAzimuth
+    const lightAltitudeDeg = Number.isFinite(Number(controls?.lightAltitudeDeg))
+      ? Number(controls.lightAltitudeDeg) : terrainLighting.hillshadeAltitude
+    const azimuth = lightAzimuthDeg * Math.PI / 180
+    const altitude = lightAltitudeDeg * Math.PI / 180
     const min = Number.isFinite(Number(grid.min)) ? Number(grid.min) : -1
     const max = Number.isFinite(Number(grid.max)) ? Number(grid.max) : 1
+    const shadowEnabled = controls?.terrainShadows === true
+      && this.ensureShadowTexture(grid, lightAzimuthDeg, lightAltitudeDeg, exaggeration)
 
     const u = this.uniforms
     gl.useProgram(this.program)
@@ -439,10 +495,15 @@ export class TerrainWebGLRenderer {
     gl.uniform1f(u.uFogStrength, fogStrength)
     gl.uniform1f(u.uInvMin, invMin)
     gl.uniform1f(u.uInvMax, invMax)
+    gl.uniform1f(u.uShadowEnabled, shadowEnabled ? 1 : 0)
 
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, this.colorTexture)
     gl.uniform1i(u.uColorMap, 0)
+    gl.activeTexture(gl.TEXTURE1)
+    gl.bindTexture(gl.TEXTURE_2D, this.shadowTexture)
+    gl.uniform1i(u.uShadowMap, 1)
+    gl.activeTexture(gl.TEXTURE0)
 
     gl.bindVertexArray(this.geometry.vao)
     gl.drawElements(gl.TRIANGLES, this.geometry.count, gl.UNSIGNED_INT, 0)

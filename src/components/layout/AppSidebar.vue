@@ -121,6 +121,11 @@
               <span class="switch-track"><i></i></span>
               <span class="feature-switch-label"><span aria-hidden="true">◠</span><span>海岸线</span></span>
             </label>
+            <label class="feature-switch">
+              <input v-model="visualControls.terrainShadows" type="checkbox" />
+              <span class="switch-track"><i></i></span>
+              <span class="feature-switch-label"><span aria-hidden="true">☾</span><span>地形阴影</span></span>
+            </label>
           </div>
         </section>
 

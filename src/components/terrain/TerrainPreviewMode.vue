@@ -90,6 +90,7 @@ import { loadBathymetry, acousticTerrainBounds } from '@/utils/bathymetry.js'
 import { BATHYMETRY_SOURCE_OPTIONS, bathymetrySourceState, setBathymetrySource } from '@/modules/terrain/bathymetrySource.js'
 import { drawTerrainScene, terrainMetersPerPixel } from '@/utils/terrainScene.js'
 import { createTerrainWebGLRenderer } from '@/utils/terrainWebGL.js'
+import { moonLightDirection } from '@/utils/moonLight.js'
 import { TERRAIN_MAX_MESH_SEGMENTS, terrainColorAt } from '@/utils/terrainRendering.js'
 import TerrainPreviewDock from './TerrainPreviewDock.vue'
 import TerrainStationCard from './TerrainStationCard.vue'
@@ -338,6 +339,11 @@ const oceanCurrentOverlayOn = computed(() => oceanCurrentOverlayActive(weatherNo
 const oceanCurrentLayer = computed(() => oceanCurrentRegional(
   weatherNoiseState.regionalOceanCurrent, weatherNoiseState.oceanCurrentDepth
 ))
+/** 地形方向光跟随仿真时刻与声源位置处的月球方位。 */
+const moonLight = computed(() => {
+  const center = props.source || props.initialCenter || { lon: 116, lat: 16 }
+  return moonLightDirection(props.time, Number(center.lat), Number(center.lon))
+})
 let regionalWeatherLoadTimer = 0
 let regionalNoiseLoadTimer = 0
 let oceanCurrentLoadTimer = 0
@@ -396,6 +402,8 @@ function sceneControls() {
     ...visualControls,
     colorStops: activeVolumeColorStops(visualControls.colormap),
     clipBody: props.clipBody === true,
+    lightAzimuthDeg: moonLight.value.azimuthDeg,
+    lightAltitudeDeg: moonLight.value.altitudeDeg,
   }
   const seActive = Boolean(props.field?.signalExcess)
     || (props.fields || []).some(layer => layer?.field?.signalExcess)
@@ -1559,6 +1567,10 @@ watch(terrainReceiver, () => {
 }, { deep: true })
 watch(() => props.fields, () => scheduleDraw(), { deep: true })
 watch(() => props.rayData, rebuildRayFlow)
+watch(
+  () => [props.time, props.initialCenter?.lon, props.initialCenter?.lat, props.source?.lon, props.source?.lat],
+  () => scheduleDraw()
+)
 watch(() => [props.rayAzimuthDeg, props.raysVisible, props.raysStatic, props.raysAnimated, props.directionLineVisible, props.directionLineLayerId, props.clipBody], () => {
   scheduleDraw()
   syncRayAnimation()
