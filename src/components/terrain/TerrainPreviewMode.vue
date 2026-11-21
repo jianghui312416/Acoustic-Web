@@ -97,7 +97,11 @@ import { TERRAIN_MAX_MESH_SEGMENTS, terrainColorAt } from '@/utils/terrainRender
 import TerrainPreviewDock from './TerrainPreviewDock.vue'
 import TerrainStationCard from './TerrainStationCard.vue'
 import { pickTerrainPoint } from '@/utils/terrainPicking.js'
-import { activeVolumeColorStops, volumeRenderingControls } from '@/modules/acoustic/volumeRenderingControls.js'
+import {
+  activeVolumeColorStops,
+  opacityControlToAlphaScale,
+  volumeRenderingControls,
+} from '@/modules/acoustic/volumeRenderingControls.js'
 import { parseAnalyse2DRtrd } from '@/sdk'
 import { resolveRayFlow, sampleRayMotion } from '@/utils/rayFlow.js'
 import { rayFlowClockElapsedMs } from '@/utils/rayFlowClock.js'
@@ -404,8 +408,12 @@ function sourceBounds() {
 function sceneControls() {
   const controls = {
     ...visualControls,
+    alphaScale: opacityControlToAlphaScale(visualControls.opacity),
     colorStops: activeVolumeColorStops(visualControls.colormap),
     clipBody: props.clipBody === true,
+    // GPU 纹理只对应当前声场；历史声场仍由 Canvas 按 layerId 单独裁剪。
+    clipGpuVolume: props.clipBody === true && (!props.directionLineLayerId || props.directionLineLayerId === 'current'),
+    clipAzimuthDeg: props.rayAzimuthDeg,
     lightAzimuthDeg: moonLight.value.azimuthDeg,
     lightAltitudeDeg: moonLight.value.altitudeDeg,
   }
@@ -1006,8 +1014,10 @@ function resetCamera() {
   const fullX = spanX / span
   const fullY = spanY / span
   const baseScale = Math.min(width * .72, height * 1.2)
-  const southPerspective = 1 / (1 - fullY / 2 * .35)
-  const northPerspective = 1 / (1 + fullY / 2 * .35)
+  // 正俯视不应再有远小近大的透视缩放；保持与 CPU/GPU 投影公式一致。
+  const perspectiveStrength = .35 * Math.abs(Math.cos(TOP_DOWN_PITCH))
+  const southPerspective = 1 / (1 - fullY / 2 * perspectiveStrength)
+  const northPerspective = 1 / (1 + fullY / 2 * perspectiveStrength)
   const usableWidth = Math.max(1, width * .84)
   const usableHeight = Math.max(1, height * .82)
   const maxWidth = fullX * Math.max(southPerspective, northPerspective) * baseScale

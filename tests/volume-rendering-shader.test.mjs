@@ -21,6 +21,11 @@ test('polar volume shader uses interpolated coverage and step-corrected opacity'
   assert.doesNotMatch(polarClass, /float stepAlphaBase/)
 })
 
+test('polar volume opacity exponent also applies in strict-nearest mode', () => {
+  assert.match(polarClass, /float strictOpacity = 0\.56 \+ 0\.44 \* clamp/)
+  assert.match(polarClass, /opacitySignal = pow\(strictOpacity, max\(0\.1, u_colorInfo\.w\)\)/)
+})
+
 test('polar volume hard-clips below the interpolated seabed before feathering', () => {
   assert.match(polarClass, /uniform int u_hasBottomDepth/)
   assert.match(polarClass, /if \(depthM >= bottomM\) continue/)

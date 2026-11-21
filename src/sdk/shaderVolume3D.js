@@ -1767,7 +1767,9 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
           if (u_strictNearest == 1) {
             // bellhop_gebco 参考工程：低声损失更不透明，但最弱区域仍保留 0.56 的密度，
             // 使外围蓝/青色声场可见，而不是按色标 alpha 直接淡出。
-            opacitySignal = 0.56 + 0.44 * clamp((110.0 - realValue) / 70.0, 0.0, 1.0);
+            float strictOpacity = 0.56 + 0.44 * clamp((110.0 - realValue) / 70.0, 0.0, 1.0);
+            // 透明度指数在默认的严格最近邻模式下也必须生效。
+            opacitySignal = pow(strictOpacity, max(0.1, u_colorInfo.w));
           } else {
             // 将色标透明度逐采样应用：低信息量区域保持可见但更透明，内部特征可透过外层显示。
             float valueAlpha = pow(

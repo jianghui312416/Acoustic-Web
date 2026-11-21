@@ -43,6 +43,7 @@
       :rays-visible="profileTerrainRaysVisible"
       :rays-static="profileTerrainRaysStatic"
       :rays-animated="profileTerrainRaysAnimated"
+      :direction-line-visible="verticalSliceControls.east90Indicator"
       :direction-line-layer-id="profileDirectionLayerId"
       :clip-body="verticalSliceControls.clipBody"
       @arrow-azimuth="onTerrainArrowAzimuth"
@@ -1367,6 +1368,7 @@ import { normalizeTerrainBounds } from '@/utils/terrainPreview.js'
 import {
   acousticSceneState,
   activeVolumeColorStops,
+  opacityControlToAlphaScale,
   volumeRenderingControls,
 } from '@/modules/acoustic/volumeRenderingControls.js'
 import { verticalSliceControls } from '@/modules/acoustic/verticalSliceControls.js'
@@ -1521,11 +1523,13 @@ const globeSelectionToken = ref(0)
 const terrainLeaving = ref(false)
 /** 缩回全球视图后暂时隐藏结果窗口/体渲染，保持与首次进入时一致的干净全球视图。 */
 const cleanGlobeView = ref(false)
-/** 地形缩回全球后，红框表示“返回刚才地形”；转动地球或拖动红框后转为新选区。 */
+/**
+ * 缩回全球后不立即弹出“返回刚才地形”的红框，保持与首次进入一致的干净全球视图；
+ * 用户继续放大到阈值后，选框才出现在刚才的区域中心（由 TerrainGlobeSelector 控制）。
+ */
 const terrainReturnAvailable = ref(false)
 let terrainLeaveTimer = 0
 let terrainWheelBlocker = null
-let returnInteractionCleanup = null
 function setTerrainWheelBlocker(active) {
   const canvas = viewer?.canvas
   if (!canvas) return
@@ -1544,40 +1548,6 @@ function setTerrainWheelBlocker(active) {
 }
 function clearTerrainReturn() {
   terrainReturnAvailable.value = false
-  if (returnInteractionCleanup) {
-    returnInteractionCleanup()
-    returnInteractionCleanup = null
-  }
-}
-function enableTerrainReturn() {
-  clearTerrainReturn()
-  terrainReturnAvailable.value = true
-  const canvas = viewer?.canvas
-  if (!canvas) return
-  const onPointerDown = (event) => {
-    if (event.button !== 0) return
-    const startX = event.clientX
-    const startY = event.clientY
-    const onMove = (move) => {
-      if (Math.abs(move.clientX - startX) + Math.abs(move.clientY - startY) > 6) {
-        cleanup()
-        clearTerrainReturn()
-      }
-    }
-    const onUp = () => cleanup()
-    const cleanup = () => {
-      window.removeEventListener('pointermove', onMove)
-      window.removeEventListener('pointerup', onUp)
-      window.removeEventListener('pointercancel', onUp)
-    }
-    window.addEventListener('pointermove', onMove)
-    window.addEventListener('pointerup', onUp)
-    window.addEventListener('pointercancel', onUp)
-  }
-  canvas.addEventListener('pointerdown', onPointerDown)
-  returnInteractionCleanup = () => {
-    canvas.removeEventListener('pointerdown', onPointerDown)
-  }
 }
 function returnToTerrain() {
   clearTerrainReturn()
@@ -1689,7 +1659,7 @@ function leaveTerrainForGlobe(payload) {
         terrainLeaveTimer = 0
         setTerrainWheelBlocker(false)
         terrainLeaving.value = false
-        if (props.viewMode === 'globe') enableTerrainReturn()
+        clearTerrainReturn()
       }
       // 兜底：即使相机飞行被第三方打断且没有回调，也恢复选框/工具。
       terrainLeaveTimer = window.setTimeout(finish, 3000)
@@ -2980,7 +2950,7 @@ const staticRaySourceDepthM = computed(() => Number(staticRayModel.value?.source
 // 唯一垂直夸张倍率：与侧边栏 terrainExaggeration 双向同步，同时作用于
 // 地形、三维声场、声源、声线与垂直切面。1× 保持真实物理比例。
 const depthExaggeration = ref(3)
-const alphaPercent = ref(Math.round(Math.min(1.25, volumeRenderingControls.opacity / 4) * 100))
+const alphaPercent = ref(Math.round(opacityControlToAlphaScale(volumeRenderingControls.opacity) * 100))
 /** 数据筛选范围（dB）：决定哪些体素参与渲染 */
 const valueRange = ref({ min: VOLUME_TL_COLOR_MIN, max: VOLUME_TL_COLOR_MAX })
 /** 色标映射范围（dB）：决定红（下限）→蓝（上限）的取值映射，与数据筛选无关 */
@@ -3169,6 +3139,12 @@ watch(() => verticalSliceControls.clipBody, (enabled) => {
   setupAzimuthPointer()
   applyPointerVisibility()
   syncSoundField()
+  viewer?.scene?.requestRender?.()
+})
+// 方位方向线开关：开启时体上的箭头可拖动切换方位，关闭时按指针自身开关决定显隐。
+watch(() => verticalSliceControls.east90Indicator, () => {
+  setupAzimuthPointer()
+  applyPointerVisibility()
   viewer?.scene?.requestRender?.()
 })
 watch(() => terrainProfileOpen.value, (val) => {
@@ -3717,7 +3693,7 @@ watch(
     const min = Number.isFinite(rawMin) ? rawMin : VOLUME_TL_COLOR_MIN
     const max = Number.isFinite(rawMax) ? Math.max(min + 1, rawMax) : VOLUME_TL_COLOR_MAX
     colorRange.value = { min, max }
-    alphaPercent.value = Math.round(Math.min(1.25, Math.max(0.05, Number(controls.opacity) / 4)) * 100)
+    alphaPercent.value = Math.round(opacityControlToAlphaScale(controls.opacity) * 100)
     syncSoundField()
     scheduleOmni2dLayer()
   },
@@ -3908,7 +3884,7 @@ watch(
         setupAzimuthPointer()
         startVolumeRayAnimation()
       }
-      if (directTerrainExit && props.viewMode === 'globe') enableTerrainReturn()
+      if (directTerrainExit && props.viewMode === 'globe') clearTerrainReturn()
       viewer.scene?.requestRender?.()
     })
   }
@@ -5590,15 +5566,12 @@ function getWebGL2(context) {
 
 /** 根据当前 UI 状态组装切面裁切参数 */
 function getSliceClipOptions() {
-  // 裁剪体：拖动方位指针箭头时，隐藏箭头所指方向的半个体，保留另一侧，
-  // 从而露出过声源、与箭头方向垂直的竖直切面。关闭后不裁剪，显示完整声场。
+  // 裁剪体：沿方向方位线所在的竖直平面裁掉半个体，只保留另一半。
   if (verticalSliceControls.clipBody) {
     return {
       enabled: true,
       mode: VOLUME_SLICE_MODE.azimuth,
       position: 0.5,
-      // 保留 [箭头方位, 箭头方位+180°] 的半个圆柱：切面落在箭头所在的竖直平面，
-      // 显示该方位的传播损失剖面，而不是与方向线垂直的面。
       azimuthDeg: sliceAzimuthDeg.value,
     }
   }
@@ -5828,17 +5801,107 @@ let azimuthSyncTimer = null
 /** 最近一次「裁剪体」方向（内部角，正东 0°、逆时针），关闭再开启时恢复该裁剪效果。 */
 let lastClipAzimuthDeg = null
 
+/** 方位方向线（Display[4]）：在海平面绘制指向当前方位角的洋红方向线 + 标签 */
+let east90IndicatorEntities = []
+
+/** 罗盘方位角 → 中文八方位 */
+function compassCardinalLabel(bearing) {
+  const dirs = ['北', '东北', '东', '东南', '南', '西南', '西', '西北']
+  const normalized = ((Math.round(bearing) % 360) + 360) % 360
+  return dirs[Math.round(normalized / 45) % 8]
+}
+
+function applyEast90Indicator() {
+  if (viewer?.entities) {
+    for (const entity of east90IndicatorEntities) {
+      try { viewer.entities.remove(entity) } catch {}
+    }
+  }
+  east90IndicatorEntities = []
+  // 区域地形模式由 TerrainPreviewMode 直接绘制方位线；这里只负责全球 Cesium 三维体。
+  const enabled = verticalSliceControls.east90Indicator && props.viewMode !== 'terrain'
+  if (!enabled || !viewer?.entities || !viewer || viewer.isDestroyed?.()) return
+  // 选中历史声场时方向线跟随该声场体，否则用当前实际声源点。
+  const layer = selectedProfileLayer.value
+  const source = layer?.source ?? sourcePoint.value ?? { lon: calcParams.value.coordX, lat: calcParams.value.coordY }
+  const sourceLon = Number(source.lon)
+  const sourceLat = Number(source.lat)
+  if (!Number.isFinite(sourceLon) || !Number.isFinite(sourceLat)) return
+  const radiusM = Number(layer ? (layer.sourceRadiusKm || layer.radiusKm) : sourceRadiusKm.value) * 1000 || 10000
+  // 内部方位（正东 0°、逆时针）转罗盘方位（正北 0°、顺时针）。
+  const bearing = internalAzimuthToCompassBearing(
+    layer ? (Number(layer.sliceAzimuthDeg) || 0) : sliceAzimuthDeg.value
+  )
+  const end = destinationLonLat(sourceLon, sourceLat, bearing, radiusM)
+  const color = Cesium.Color.fromCssColorString('#ff2d95').withAlpha(0.95)
+  const lineAltitude = 5
+  const start = Cesium.Cartesian3.fromDegrees(sourceLon, sourceLat, lineAltitude)
+  const endCart = Cesium.Cartesian3.fromDegrees(end.lon, end.lat, lineAltitude)
+  east90IndicatorEntities.push(
+    viewer.entities.add({
+      polyline: {
+        positions: [start, endCart],
+        width: 2.5,
+        arcType: Cesium.ArcType.NONE,
+        material: new Cesium.ColorMaterialProperty(color),
+        depthFailMaterial: new Cesium.ColorMaterialProperty(color),
+      },
+    })
+  )
+  east90IndicatorEntities.push(
+    viewer.entities.add({
+      position: Cesium.Cartesian3.midpoint(start, endCart, new Cesium.Cartesian3()),
+      label: {
+        text: `${Math.round(bearing)}° ${compassCardinalLabel(bearing)}`,
+        font: '600 13px sans-serif',
+        fillColor: Cesium.Color.fromCssColorString('#ffd6e4'),
+        backgroundColor: Cesium.Color.fromCssColorString('#4a0b2e'),
+        showBackground: true,
+        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+        pixelOffset: new Cesium.Cartesian2(0, -14),
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      },
+    })
+  )
+  east90IndicatorEntities.push(
+    viewer.entities.add({
+      position: endCart,
+      point: {
+        pixelSize: 6,
+        color,
+        outlineColor: Cesium.Color.WHITE,
+        outlineWidth: 1,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      },
+    })
+  )
+  viewer.scene?.requestRender?.()
+}
+watch(
+  () => [
+    verticalSliceControls.east90Indicator,
+    props.viewMode,
+    profileDirectionLayerId.value,
+    profileSourceLon.value,
+    profileSourceLat.value,
+    profileMaxRadiusM.value,
+    profileAzimuthDeg.value,
+  ],
+  () => applyEast90Indicator()
+)
+
 /** 创建 / 更新声源点上方「可拖拽方位指针」 */
 function setupAzimuthPointer() {
   if (!soundField?.loaded) return
   const clipMode = verticalSliceControls.clipBody
-  // 裁剪模式下方位指针也需要可拖动，用于调整切面方位。
-  const interactive = pointerEnabled.value || clipMode
+  const directionLine = verticalSliceControls.east90Indicator
+  // 裁剪模式或方位方向线开启时，方位指针也需要可拖动，用于调整切面方位。
+  const interactive = pointerEnabled.value || clipMode || directionLine
   soundField.setAzimuthPointer({
     azimuths: clipMode ? [] : availableAzimuths.value,
     snapStepDeg: 1,
     azimuthDeg: Number(sliceAzimuthDeg.value),
-    visible: interactive && (!sliceEnabled.value || clipMode),
+    visible: interactive && (!sliceEnabled.value || clipMode || directionLine),
     draggable: interactive,
     // 仅方位方向线驱动时只显示箭头/杆，不显示辅助圈，避免默认多出一整圈刻度。
     ringVisible: pointerRingVisible.value && (pointerEnabled.value || clipMode),
@@ -5846,12 +5909,15 @@ function setupAzimuthPointer() {
     onAzimuthChange: (deg) => {
       sliceAzimuthDeg.value = deg
       if (clipMode) {
-        // 裁剪体：只更新体裁剪与方向线，避免连续拖拽触发声线 / 底质接口。
+        // 裁剪体：先即时更新体裁剪与方向线；声线 / 底质接口在停顿后再补算，
+        // 避免连续拖拽频繁请求门户，同时保证半声场体与动态声线方位一致。
         lastClipAzimuthDeg = deg
         clearTimeout(azimuthSyncTimer)
         azimuthSyncTimer = setTimeout(() => {
           azimuthSyncTimer = null
           syncSoundField()
+          scheduleRayDataForAzimuth(deg)
+          scheduleBottomTypesForAzimuth(deg)
         }, 30)
         return
       }
@@ -5871,8 +5937,9 @@ function setupAzimuthPointer() {
 /** 指针显隐：方位方向线 / 裁剪体开启时保留箭头，可拖拽切换方位。 */
 function applyPointerVisibility() {
   const clipMode = verticalSliceControls.clipBody
-  const interactive = pointerEnabled.value || clipMode
-  const show = interactive && (!sliceEnabled.value || clipMode)
+  const directionLine = verticalSliceControls.east90Indicator
+  const interactive = pointerEnabled.value || clipMode || directionLine
+  const show = interactive && (!sliceEnabled.value || clipMode || directionLine)
   soundField?.setAzimuthPointerVisible(show)
   soundField?.pointer?.setDraggable(interactive)
   soundField?.setAzimuthPointerRingVisible(pointerRingVisible.value && (pointerEnabled.value || clipMode))
@@ -6224,7 +6291,9 @@ function onTerrainArrowAzimuth(deg) {
     if (Math.abs((Number(layer.sliceAzimuthDeg) || 0) - v) < 1e-6) return
     layer.sliceAzimuthDeg = v
     if (verticalSliceControls.clipBody) {
+      // 裁剪体：拖拽时先更新体裁剪；停顿后再按新方位补算动态声线。
       lastClipAzimuthDeg = v
+      scheduleHistoryLayerDynamicRays(layer, 240)
       return
     }
     scheduleHistoryLayerDynamicRays(layer, 0)
@@ -6233,7 +6302,10 @@ function onTerrainArrowAzimuth(deg) {
   if (Math.abs(sliceAzimuthDeg.value - v) < 1e-6) return
   sliceAzimuthDeg.value = v
   if (verticalSliceControls.clipBody) {
+    // 裁剪体：拖拽时先更新体裁剪；停顿后再按新方位补算动态声线与底质。
     lastClipAzimuthDeg = v
+    scheduleRayDataForAzimuth(v)
+    scheduleBottomTypesForAzimuth(v)
     return
   }
   onAzimuthUiChange()
@@ -7546,6 +7618,12 @@ onBeforeUnmount(() => {
   removePickMarker('receiver')
   clearTrackPointFeatures()
   clearTrackPoints()
+  if (viewer?.entities) {
+    for (const entity of east90IndicatorEntities) {
+      try { viewer.entities.remove(entity) } catch {}
+    }
+    east90IndicatorEntities = []
+  }
   soundField?.destroy()
   soundField = null
   if (viewer && !viewer.isDestroyed()) {

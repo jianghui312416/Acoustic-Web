@@ -8,6 +8,18 @@ import {
   terrainShadowMask,
 } from './terrainRendering.js'
 
+const TERRAIN_VOLUME_MIN_SLICES = 35
+const TERRAIN_VOLUME_MAX_SLICES = 251
+const CESIUM_DEFAULT_ALPHA_SCALE = 0.42
+const TERRAIN_DEFAULT_OPACITY = 1.7
+
+/** 将归一化最大采样步长换算为视线方向切片数。 */
+export function terrainVolumeSliceCount(sampling) {
+  const value = Number(sampling)
+  const step = clamp(Number.isFinite(value) ? value : 0.01, 0.004, 0.03)
+  return clamp(Math.ceil(1 / step) + 1, TERRAIN_VOLUME_MIN_SLICES, TERRAIN_VOLUME_MAX_SLICES)
+}
+
 const VERTEX_SHADER = `#version 300 es
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec2 aSlope;
@@ -39,7 +51,10 @@ void main() {
 
   float rx = x * uCosYaw - y * uSinYaw;
   float ry = x * uSinYaw + y * uCosYaw;
-  float perspective = 1.0 / (1.0 - ry * 0.35);
+  // Perspective must disappear in a true top-down view. Keeping a ry-dependent
+  // scale at pitch=90 degrees turns horizontal circles into egg shapes.
+  float perspectiveStrength = 0.35 * abs(uCosPitch);
+  float perspective = 1.0 / (1.0 - ry * perspectiveStrength);
 
   float sx = uWidth * 0.5 + uPanX + rx * uScale * perspective;
   float sy = uHeight * 0.40 + uPanY + (ry * uSinPitch - z * uCosPitch) * uScale * perspective;
@@ -109,7 +124,7 @@ void main() {
 
 const VOLUME_VERTEX_SHADER = `#version 300 es
 layout(location = 0) in vec2 aPosition;
-layout(location = 1) in float aDepthM;
+layout(location = 1) in float aSlice;
 
 uniform float uWidth;
 uniform float uHeight;
@@ -122,25 +137,37 @@ uniform float uCosPitch;
 uniform float uSinPitch;
 uniform float uExaggeration;
 uniform float uHorizontalSpanM;
+uniform vec3 uSliceCenter;
+uniform vec3 uSliceExtents;
 
 out vec2 vLocal;
 out float vDepthM;
 
 void main() {
-  float x = aPosition.x;
-  float y = aPosition.y;
-  float z = -aDepthM / uHorizontalSpanM * uExaggeration;
-  float rx = x * uCosYaw - y * uSinYaw;
-  float ry = x * uSinYaw + y * uCosYaw;
-  float perspective = 1.0 / (1.0 - ry * 0.35);
+  // View-aligned coordinates: rx is screen-horizontal, q is screen-vertical,
+  // and s runs from the back of the volume to the front. This basis rotates
+  // continuously with pitch, becoming horizontal at top-down and vertical at side view.
+  float rx = uSliceCenter.x + aPosition.x * uSliceExtents.x;
+  float q = uSliceCenter.y + aPosition.y * uSliceExtents.y;
+  float s = uSliceCenter.z + aSlice * uSliceExtents.z;
+  float ry = q * uSinPitch + s * uCosPitch;
+  float z = -q * uCosPitch + s * uSinPitch;
+  float x = rx * uCosYaw + ry * uSinYaw;
+  float y = -rx * uSinYaw + ry * uCosYaw;
+  float depthM = -z * uHorizontalSpanM / max(0.0001, uExaggeration);
+  float perspectiveStrength = 0.35 * abs(uCosPitch);
+  float perspective = 1.0 / (1.0 - ry * perspectiveStrength);
   float sx = uWidth * 0.5 + uPanX + rx * uScale * perspective;
   float sy = uHeight * 0.40 + uPanY + (ry * uSinPitch - z * uCosPitch) * uScale * perspective;
   vec2 ndc = vec2(sx / uWidth * 2.0 - 1.0, 1.0 - sy / uHeight * 2.0);
   float order = ry + z * 0.3;
   float depth = clamp(0.5 - order * 0.5, 0.0001, 0.9999) * 2.0 - 1.0;
-  gl_Position = vec4(ndc, depth, 1.0);
+  // Preserve the existing screen projection while allowing perspective-correct
+  // interpolation of volume coordinates across an oblique slice.
+  float clipW = max(0.0001, 1.0 / perspective);
+  gl_Position = vec4(ndc * clipW, depth * clipW, clipW);
   vLocal = vec2(x, y);
-  vDepthM = aDepthM;
+  vDepthM = depthM;
 }
 `
 
@@ -161,16 +188,34 @@ uniform vec4 uPath;
 uniform vec2 uValue;
 uniform vec2 uDb;
 uniform vec2 uAlpha;
-uniform vec2 uHeightRange;
+uniform float uStepLength;
+// x = 是否裁剪半体，y = 罗盘方位角
+uniform vec3 uClipInfo;
+uniform float uFeatherM;
 uniform int uHasBottomDepth;
-uniform int uAngleMode;
-uniform float uAngleCount;
-uniform int uAngleWrap;
+uniform int uStrictNearest;
 uniform int uVolumeMode;
 uniform float uSliceDepthM;
 uniform int uDebugNoTerrain;
 
 out vec4 fragColor;
+
+float sampleTerrainElevation(vec2 uv) {
+  ivec2 size = textureSize(uHeightMap, 0);
+  vec2 texel = clamp(
+    clamp(uv, vec2(0.0), vec2(1.0)) * vec2(size) - 0.5,
+    vec2(0.0),
+    vec2(size - 1)
+  );
+  ivec2 p0 = ivec2(floor(texel));
+  ivec2 p1 = min(p0 + 1, size - 1);
+  vec2 f = fract(texel);
+  float h00 = texelFetch(uHeightMap, p0, 0).r;
+  float h10 = texelFetch(uHeightMap, ivec2(p1.x, p0.y), 0).r;
+  float h01 = texelFetch(uHeightMap, ivec2(p0.x, p1.y), 0).r;
+  float h11 = texelFetch(uHeightMap, p1, 0).r;
+  return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+}
 
 void main() {
   float lon = uGeo.x + vLocal.x * uGeo.z / uGeo.w;
@@ -180,17 +225,31 @@ void main() {
     (uTerrain.w - lat) / max(1e-9, uTerrain.w - uTerrain.z)
   );
   if (terrainUv.x < 0.0 || terrainUv.x > 1.0 || terrainUv.y < 0.0 || terrainUv.y > 1.0) discard;
-  float terrainElev = mix(uHeightRange.x, uHeightRange.y, texture(uHeightMap, terrainUv).r);
+  float terrainElev = sampleTerrainElevation(terrainUv);
   float waterDepth = max(0.0, -terrainElev);
+  // Hard clip first so feathering can never leak the volume below seabed or onto land.
   if (uDebugNoTerrain == 0 && vDepthM >= waterDepth) discard;
 
-  float cosSrcLat = max(0.01, cos(radians(uWedge.y)));
+  float srcLatRad = radians(uWedge.y);
+  float latRad = radians(lat);
+  float dLonRad = radians(lon - uWedge.x);
+  float cosSrcLat = max(0.01, cos(srcLatRad));
   float east = (lon - uWedge.x) * 111320.0 * cosSrcLat;
   float north = (lat - uWedge.y) * 110574.0;
   float rangeM = length(vec2(east, north));
   if (rangeM < uPath.x || rangeM > uPath.y) discard;
-  float bearing = degrees(atan(east, north));
-  if (bearing < 0.0) bearing += 360.0;
+  // Match Cesium's spherical initial-bearing calculation. The previous planar
+  // atan(east, north) drifts enough over a large region to select another sector.
+  float bearingY = sin(dLonRad) * cos(latRad);
+  float bearingX = cos(srcLatRad) * sin(latRad)
+    - sin(srcLatRad) * cos(latRad) * cos(dLonRad);
+  float bearing = degrees(atan(bearingY, bearingX));
+  if (uClipInfo.x > 0.5) {
+    // 内部方位角是正东 0°、逆时针为正；罗盘角方向相反。
+    // 保留内部方位 [箭头, 箭头+180°] 对应的半个体。
+    float compassDelta = mod(bearing - uClipInfo.y + 360.0, 360.0);
+    if (compassDelta > 0.0001 && compassDelta < 180.0) discard;
+  }
   float angleSpan = max(0.001, uWedge.w - uWedge.z);
   float angleNorm = mod(bearing - uWedge.z + 720.0, 360.0) / angleSpan;
   if (angleNorm < 0.0 || angleNorm > 1.0) discard;
@@ -205,67 +264,75 @@ void main() {
     depthNorm = sliceDepthNorm;
   }
 
-  // 纹理行中心在 (i+0.5)/H，而 angleNorm=0 对应纹理边缘。显式选中真实扇区
-  // 中心，保证与 Cesium 的 floor(angle*N+0.5)%N 最近扇区规则一致。
-  int angleRows = textureSize(uVolumeTexture, 0).y;
-  float sectorCount = max(1.0, uAngleCount);
-  float sectorInterp = abs(float(angleRows) - sectorCount) < 0.5
-    ? 1.0
-    : (uAngleWrap == 1
-      ? float(angleRows - 1) / sectorCount
-      : float(angleRows - 1) / max(1.0, sectorCount - 1.0));
+  // 平滑纹理已经包含 CPU 插值后的方位行和 360° 重复尾行，必须像 Cesium
+  // 一样直接按 angleNorm 采样。再次按原始扇区数离散会丢弃插值行并产生巨大扇瓣。
+  ivec3 textureShape = textureSize(uVolumeTexture, 0);
+  int angleRows = textureShape.y;
   vec4 voxel;
-  if (uAngleMode == 1) {
-    // 调试：显式周期混合相邻两个真实扇区。
-    float q;
-    float s0;
-    float s1;
-    if (uAngleWrap == 1) {
-      q = fract(angleNorm) * sectorCount;
-      s0 = floor(q);
-      s1 = mod(s0 + 1.0, sectorCount);
-    } else {
-      q = clamp(angleNorm, 0.0, 1.0) * max(1.0, sectorCount - 1.0);
-      s0 = floor(q);
-      s1 = min(s0 + 1.0, sectorCount - 1.0);
-    }
-    float t = fract(q);
-    float r0 = (s0 * sectorInterp + 0.5) / float(angleRows);
-    float r1 = (s1 * sectorInterp + 0.5) / float(angleRows);
-    vec4 v0 = texture(uVolumeTexture, vec3(pathNorm, r0, depthNorm));
-    vec4 v1 = texture(uVolumeTexture, vec3(pathNorm, r1, depthNorm));
-    float tl0 = mix(uValue.x, uValue.y, v0.r);
-    float tl1 = mix(uValue.x, uValue.y, v1.r);
-    float i0 = pow(10.0, -tl0 / 10.0);
-    float i1 = pow(10.0, -tl1 / 10.0);
-    float ii = mix(i0, i1, t);
-    float tl = -10.0 * log(max(1e-12, ii)) / log(10.0);
-    float rr = clamp((tl - uValue.x) / max(1e-6, uValue.y - uValue.x), 0.0, 1.0);
-    voxel = vec4(rr, mix(v0.g, v1.g, t), mix(v0.b, v1.b, t), mix(v0.a, v1.a, t));
+  if (uStrictNearest == 1) {
+    // 严格最近邻模式复制 Cesium 的逐节点索引规则。
+    int rangeIndex = clamp(
+      int(floor(pathNorm * float(textureShape.x - 1) + 0.5)),
+      0,
+      textureShape.x - 1
+    );
+    int angleIndex = int(floor(angleNorm * float(angleRows) + 0.5)) % angleRows;
+    int depthIndex = clamp(
+      int(floor(depthNorm * float(textureShape.z - 1) + 0.5)),
+      0,
+      textureShape.z - 1
+    );
+    voxel = texelFetch(uVolumeTexture, ivec3(rangeIndex, angleIndex, depthIndex), 0);
   } else {
-    float sector;
-    if (uAngleWrap == 1) {
-      sector = mod(floor(fract(angleNorm) * sectorCount + 0.5), sectorCount);
-    } else {
-      sector = clamp(
-        floor(clamp(angleNorm, 0.0, 1.0) * (sectorCount - 1.0) + 0.5),
-        0.0,
-        sectorCount - 1.0
-      );
-    }
-    float row = (sector * sectorInterp + 0.5) / float(angleRows);
-    voxel = texture(uVolumeTexture, vec3(pathNorm, row, depthNorm));
+    voxel = texture(
+      uVolumeTexture,
+      clamp(vec3(pathNorm, angleNorm, depthNorm), vec3(0.001), vec3(0.999))
+    );
   }
-  if (voxel.a <= 0.0) discard;
+  float coverage = smoothstep(0.015, 0.92, voxel.a);
+  vec3 textureShapeF = max(vec3(textureShape), vec3(1.0));
+  vec3 texUvw = vec3(pathNorm, angleNorm, depthNorm);
+  vec3 edgeWidth = min(vec3(0.12), vec3(1.5) / textureShapeF);
+  vec3 edgeLow = smoothstep(vec3(0.0), edgeWidth, texUvw);
+  vec3 edgeHigh = smoothstep(vec3(0.0), edgeWidth, vec3(1.0) - texUvw);
+  float angleEdge = angleSpan >= 359.5 ? 1.0 : edgeLow.y * edgeHigh.y;
+  coverage *= min(min(edgeLow.x * edgeHigh.x, angleEdge), edgeLow.z * edgeHigh.z);
+
+  float effectiveBottomM = 1e20;
+  if (uDebugNoTerrain == 0) effectiveBottomM = waterDepth;
   if (uHasBottomDepth == 1 && uDebugNoTerrain == 0) {
-    float bottomM = mix(uPath.z, uPath.w, voxel.g);
-    if (vDepthM >= bottomM) discard;
+    effectiveBottomM = min(effectiveBottomM, mix(uPath.z, uPath.w, voxel.g));
   }
+  if (effectiveBottomM < 1e19) {
+    if (vDepthM >= effectiveBottomM) discard;
+    coverage *= smoothstep(0.0, max(8.0, uFeatherM), effectiveBottomM - vDepthM);
+  }
+  if (coverage <= 0.001) discard;
   float tl = mix(uValue.x, uValue.y, voxel.r);
-  float t = clamp((tl - uDb.x) / max(1.0, uDb.y - uDb.x), 0.0, 1.0);
-  vec3 color = texture(uColorLut, vec2(t, 0.5)).rgb;
-  float alpha = voxel.a * uAlpha.x * pow(clamp(1.0 - t * 0.6, 0.0, 1.0), max(0.1, uAlpha.y));
-  if (alpha <= 0.003) discard;
+  // Cesium treats values above the active display maximum as empty space.
+  // Clamping them to the last blue LUT entry fills real cavities after many
+  // blended slices and is the main cause of the solid GPU shell.
+  if (tl > uDb.y) discard;
+  float displayRatio = clamp((tl - uDb.x) / max(1.0, uDb.y - uDb.x), 0.0, 1.0);
+  if (uStrictNearest == 0) displayRatio = pow(displayRatio, 0.82);
+  vec3 color = texture(uColorLut, vec2(displayRatio, 0.5)).rgb;
+  // Match Cesium's strict-nearest density curve and smooth-mode value alpha.
+  float opacitySignal;
+  if (uStrictNearest == 1) {
+    float strictOpacity = 0.56 + 0.44 * clamp((110.0 - tl) / 70.0, 0.0, 1.0);
+    opacitySignal = pow(strictOpacity, max(0.1, uAlpha.y));
+  } else {
+    float valueAlpha = pow(clamp(1.0 - displayRatio, 0.0, 1.0), max(0.1, uAlpha.y));
+    opacitySignal = mix(0.08, 1.0, valueAlpha);
+  }
+  // Match Cesium's step-size-corrected Beer-Lambert integration so opacity
+  // stays stable when the slice count or view direction changes.
+  float density = max(0.0, uAlpha.x) * 5.5;
+  float alpha = clamp(
+    1.0 - exp(-density * coverage * opacitySignal * uStepLength),
+    0.0,
+    0.14
+  );
   fragColor = vec4(color, alpha);
 }
 `
@@ -273,9 +340,10 @@ void main() {
 const VOLUME_UNIFORM_NAMES = [
   'uWidth', 'uHeight', 'uScale', 'uPanX', 'uPanY',
   'uCosYaw', 'uSinYaw', 'uCosPitch', 'uSinPitch', 'uExaggeration',
-  'uHorizontalSpanM', 'uVolumeTexture', 'uHeightMap', 'uColorLut',
-  'uGeo', 'uTerrain', 'uWedge', 'uPath', 'uValue', 'uDb', 'uAlpha',
-  'uHeightRange', 'uHasBottomDepth', 'uAngleMode', 'uAngleCount', 'uAngleWrap',
+  'uHorizontalSpanM', 'uSliceCenter', 'uSliceExtents',
+  'uVolumeTexture', 'uHeightMap', 'uColorLut',
+  'uGeo', 'uTerrain', 'uWedge', 'uPath', 'uValue', 'uDb', 'uAlpha', 'uStepLength', 'uClipInfo',
+  'uFeatherM', 'uHasBottomDepth', 'uStrictNearest',
   'uVolumeMode', 'uSliceDepthM', 'uDebugNoTerrain',
 ]
 
@@ -369,8 +437,10 @@ export class TerrainWebGLRenderer {
     this.volumeDataRef = null
     this.heightTexture = gl.createTexture()
     gl.bindTexture(gl.TEXTURE_2D, this.heightTexture)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    // R32F terrain is sampled with explicit bilinear texelFetch in the volume shader,
+    // avoiding both 8-bit elevation banding and float-linear extension requirements.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
     this.heightGrid = null
@@ -601,18 +671,14 @@ export class TerrainWebGLRenderer {
     const gl = this.gl
     const width = Math.max(1, Number(grid.width) || 1)
     const height = Math.max(1, Number(grid.height) || 1)
-    const min = Number.isFinite(Number(grid.min)) ? Number(grid.min) : 0
-    const max = Number.isFinite(Number(grid.max)) ? Number(grid.max) : 1
-    const span = Math.max(1e-9, max - min)
-    const data = new Uint8Array(width * height)
+    const data = new Float32Array(width * height)
     for (let index = 0; index < data.length; index++) {
       const value = Number(grid.values?.[index])
-      const elevation = Number.isFinite(value) ? value : 0
-      data[index] = Math.round(clamp((elevation - min) / span, 0, 1) * 255)
+      data[index] = Number.isFinite(value) ? value : 0
     }
     gl.bindTexture(gl.TEXTURE_2D, this.heightTexture)
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, data)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, data)
     this.heightGrid = grid
   }
 
@@ -662,61 +728,47 @@ export class TerrainWebGLRenderer {
       volume.width, volume.height, volume.depth, 0,
       gl.RGBA, gl.UNSIGNED_BYTE, volume.data,
     )
-    // 与主三维体一致：严格最近邻时不做任何插值；方位轴在 360° 数据上使用
-    // REPEAT，避免 0°/360° 接缝。
-    const angleSpan = Math.abs((Number(meta.angleMax) || 360) - (Number(meta.angleMin) || 0))
+    // 与主三维体一致：严格最近邻时不做任何插值。平滑纹理已经包含一行
+    // 360° 重复尾值，因此使用 CLAMP_TO_EDGE，避免尾行再次跨边界混合。
     const filter = volume.textureFilter === 'nearest' ? gl.NEAREST : gl.LINEAR
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, filter)
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, filter)
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(
-      gl.TEXTURE_3D,
-      gl.TEXTURE_WRAP_T,
-      angleSpan >= 359.5 ? gl.REPEAT : gl.CLAMP_TO_EDGE,
-    )
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE)
     this.volumeTextureKey = key
     this.volumeDataRef = volume.data
     return true
   }
 
-  ensureVolumeGeometry(grid, volume) {
+  ensureVolumeGeometry(grid, volume, slices) {
     const gl = this.gl
     const meta = volume.wedgeMeta ?? {}
     const b = grid.bounds
     const depthMin = Number(meta.depthMinM) || 0
     const depthMax = Math.max(depthMin + 1, Number(meta.depthMaxM) || depthMin + 1)
-    const key = `${b.west},${b.east},${b.south},${b.north}:${depthMin}:${depthMax}`
+    const key = `${b.west},${b.east},${b.south},${b.north}:${depthMin}:${depthMax}:view-aligned:${slices}`
     if (this.volumeGeometry && this.volumeGeometryKey === key) return
     this.disposeVolumeGeometry()
 
-    const cosLat = Math.max(.1, Math.cos((b.north + b.south) * Math.PI / 360))
-    const spanX = (b.east - b.west) * cosLat
-    const spanY = b.north - b.south
-    const span = Math.max(1e-9, Math.max(spanX, spanY))
-    const xMin = -spanX / (2 * span)
-    const xMax = spanX / (2 * span)
-    const yMin = -spanY / (2 * span)
-    const yMax = spanY / (2 * span)
-
-    const slices = 96
     const vertices = slices * 6 * 3
     const data = new Float32Array(vertices)
     let offset = 0
-    const push = (x, y, depth) => {
-      data[offset++] = x
-      data[offset++] = y
-      data[offset++] = depth
+    const push = (rx, q, slice) => {
+      data[offset++] = rx
+      data[offset++] = q
+      data[offset++] = slice
     }
     for (let index = 0; index < slices; index++) {
-      // 从深到浅排列，配合预乘混合得到近似前向累积。
-      const depth = depthMax - ((depthMax - depthMin) * index) / Math.max(1, slices - 1)
-      push(xMin, yMin, depth)
-      push(xMax, yMin, depth)
-      push(xMax, yMax, depth)
-      push(xMin, yMin, depth)
-      push(xMax, yMax, depth)
-      push(xMin, yMax, depth)
+      // Back-to-front planes in normalized view space. Uniforms rotate and scale
+      // this unit quad continuously for every yaw/pitch without rebuilding it.
+      const slice = -1 + (2 * index) / Math.max(1, slices - 1)
+      push(-1, -1, slice)
+      push(1, -1, slice)
+      push(1, 1, slice)
+      push(-1, -1, slice)
+      push(1, 1, slice)
+      push(-1, 1, slice)
     }
 
     const vao = gl.createVertexArray()
@@ -740,7 +792,8 @@ export class TerrainWebGLRenderer {
     if (!this.ensureVolumeTexture(volume)) return false
     this.ensureHeightTexture(grid)
     this.ensureVolumeColorLut(controls)
-    this.ensureVolumeGeometry(grid, volume)
+    const sliceCount = terrainVolumeSliceCount(controls?.sampling)
+    this.ensureVolumeGeometry(grid, volume, sliceCount)
     if (!this.volumeGeometry) return false
 
     const meta = volume.wedgeMeta ?? {}
@@ -758,6 +811,53 @@ export class TerrainWebGLRenderer {
     gl.uniform1f(u.uSinPitch, view.sinPitch)
     gl.uniform1f(u.uExaggeration, view.exaggeration)
     gl.uniform1f(u.uHorizontalSpanM, view.horizontalSpanM)
+    const centerLon = (b.west + b.east) / 2
+    const centerLat = (b.south + b.north) / 2
+    const lonMin = Number.isFinite(Number(volume.lonMin)) ? Number(volume.lonMin) : b.west
+    const lonMax = Number.isFinite(Number(volume.lonMax)) ? Number(volume.lonMax) : b.east
+    const latMin = Number.isFinite(Number(volume.latMin)) ? Number(volume.latMin) : b.south
+    const latMax = Number.isFinite(Number(volume.latMax)) ? Number(volume.latMax) : b.north
+    const localXMin = (lonMin - centerLon) * view.cosLat / view.span
+    const localXMax = (lonMax - centerLon) * view.cosLat / view.span
+    const localYMin = (centerLat - latMax) / view.span
+    const localYMax = (centerLat - latMin) / view.span
+    const depthMin = Number(meta.depthMinM) || 0
+    const depthMax = Math.max(depthMin + 1, Number(meta.depthMaxM) || depthMin + 1)
+    const zTop = -depthMin / view.horizontalSpanM * view.exaggeration
+    const zBottom = -depthMax / view.horizontalSpanM * view.exaggeration
+    const viewCorners = []
+    for (const x of [localXMin, localXMax]) {
+      for (const y of [localYMin, localYMax]) {
+        for (const z of [zBottom, zTop]) {
+          const rx = x * view.cosYaw - y * view.sinYaw
+          const ry = x * view.sinYaw + y * view.cosYaw
+          viewCorners.push({
+            rx,
+            q: ry * view.sinPitch - z * view.cosPitch,
+            s: ry * view.cosPitch + z * view.sinPitch,
+          })
+        }
+      }
+    }
+    const rxMin = Math.min(...viewCorners.map(point => point.rx))
+    const rxMax = Math.max(...viewCorners.map(point => point.rx))
+    const qMin = Math.min(...viewCorners.map(point => point.q))
+    const qMax = Math.max(...viewCorners.map(point => point.q))
+    const sMin = Math.min(...viewCorners.map(point => point.s))
+    const sMax = Math.max(...viewCorners.map(point => point.s))
+    const rxCenter = (rxMin + rxMax) / 2
+    const qCenter = (qMin + qMax) / 2
+    const sCenter = (sMin + sMax) / 2
+    const rxExtent = (rxMax - rxMin) / 2
+    const qExtent = (qMax - qMin) / 2
+    const sExtent = (sMax - sMin) / 2
+    gl.uniform3f(u.uSliceCenter, rxCenter, qCenter, sCenter)
+    gl.uniform3f(
+      u.uSliceExtents,
+      Math.max(1e-6, rxExtent),
+      Math.max(1e-6, qExtent),
+      Math.max(1e-6, sExtent),
+    )
     gl.uniform4f(u.uGeo, (b.west + b.east) / 2, (b.south + b.north) / 2, view.span, view.cosLat)
     gl.uniform4f(u.uTerrain, b.west, b.east, b.south, b.north)
     gl.uniform4f(
@@ -781,23 +881,27 @@ export class TerrainWebGLRenderer {
       Number.isFinite(Number(controls?.dbMax)) ? Number(controls.dbMax) : 128,
     )
     const opacity = clamp(Number.isFinite(Number(controls?.opacity)) ? Number(controls.opacity) : 1.7, 0.2, 5)
+    const requestedAlphaScale = Number(controls?.alphaScale)
     gl.uniform2f(
       u.uAlpha,
-      opacity * 0.012,
+      Number.isFinite(requestedAlphaScale)
+        ? requestedAlphaScale
+        : CESIUM_DEFAULT_ALPHA_SCALE * Math.pow(opacity / TERRAIN_DEFAULT_OPACITY, 0.55),
       clamp(Number.isFinite(Number(controls?.alphaPower)) ? Number(controls.alphaPower) : 1.3, 0.35, 3),
     )
-    gl.uniform2f(
-      u.uHeightRange,
-      Number.isFinite(Number(grid.min)) ? Number(grid.min) : -1,
-      Number.isFinite(Number(grid.max)) ? Number(grid.max) : 1,
-    )
+    gl.uniform1f(u.uStepLength, 1 / Math.max(1, sliceCount - 1))
+    const internalAzimuth = Number(controls?.clipAzimuthDeg)
+    const compassAzimuth = Number.isFinite(internalAzimuth)
+      ? ((90 - internalAzimuth) % 360 + 360) % 360
+      : 0
+    gl.uniform3f(u.uClipInfo, controls?.clipGpuVolume === true ? 1 : 0, compassAzimuth, 0)
+    const featherDepthMin = Number.isFinite(Number(meta.depthMinM)) ? Number(meta.depthMinM) : 0
+    const featherDepthMax = Number.isFinite(Number(meta.depthMaxM)) ? Number(meta.depthMaxM) : featherDepthMin + 1
+    const featherDepthSpan = Math.max(1, featherDepthMax - featherDepthMin)
+    gl.uniform1f(u.uFeatherM, Math.max(8, Math.min(160, featherDepthSpan * 0.25)))
     gl.uniform1i(u.uHasBottomDepth, volume.hasBottomDepth ? 1 : 0)
-    const angleSpan = Math.abs((Number(meta.angleMax) || 360) - (Number(meta.angleMin) || 0))
     const debug = globalThis.__acousticVolumeDebug ?? {}
-    const sectorCount = Math.max(1, Number(volume.sectorCount) || (volume.textureFilter === 'nearest' ? volume.height : 1))
-    gl.uniform1i(u.uAngleMode, debug.angleMode === 'linear' ? 1 : 0)
-    gl.uniform1f(u.uAngleCount, sectorCount)
-    gl.uniform1i(u.uAngleWrap, angleSpan >= 359.5 ? 1 : 0)
+    gl.uniform1i(u.uStrictNearest, volume.strictNearest === true ? 1 : 0)
     gl.uniform1i(u.uVolumeMode, debug.volumeMode === 'slice' ? 1 : 0)
     gl.uniform1f(u.uSliceDepthM, Number.isFinite(Number(debug.sliceDepthM)) ? Number(debug.sliceDepthM) : 150)
     gl.uniform1i(u.uDebugNoTerrain, debug.disableTerrainClip === true ? 1 : 0)
@@ -875,7 +979,7 @@ export class TerrainWebGLRenderer {
     const sinPitch = Math.sin(pitch)
     const cosPitch = Math.cos(pitch)
 
-    // perspective 只依赖旋转后的 ry，矩形四角即可得到精确的雾浓度范围。
+    // perspective 依赖旋转后的 ry 和俯仰角；正俯视时强度为 0。
     const halfX = spanX / (2 * span)
     const halfY = spanY / (2 * span)
     let invMin = Infinity
@@ -883,7 +987,8 @@ export class TerrainWebGLRenderer {
     for (const x of [-halfX, halfX]) {
       for (const y of [-halfY, halfY]) {
         const ry = x * sinYaw + y * cosYaw
-        const inv = 1 / (1 - ry * .35)
+        const perspectiveStrength = .35 * Math.abs(cosPitch)
+        const inv = 1 / (1 - ry * perspectiveStrength)
         if (inv < invMin) invMin = inv
         if (inv > invMax) invMax = inv
       }
@@ -967,7 +1072,7 @@ export class TerrainWebGLRenderer {
     // 地形深度误判而消失；海底以下仍由片元着色器按真实水深裁剪。
     this.renderVolume(grid, volume, controls, {
       width, height, scale, panX, panY, cosYaw, sinYaw, cosPitch, sinPitch,
-      exaggeration, horizontalSpanM, span, cosLat,
+      exaggeration, horizontalSpanM, span, cosLat, halfX, halfY,
     })
     return true
   }

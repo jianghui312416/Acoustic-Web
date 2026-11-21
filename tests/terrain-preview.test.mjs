@@ -120,6 +120,28 @@ test('terrain and acoustic depths share the same meter-based projection at 1x', 
   assert.ok(terrainBottom.y > project(116, 16, 0).y)
 })
 
+test('true top-down terrain projection keeps horizontal circles circular and depth aligned', () => {
+  const bounds = { west: 115, east: 117, south: 15, north: 17 }
+  const centerLon = 116
+  const centerLat = 16
+  const project = createTerrainProjection(bounds, { width: 1000, height: 800 }, -4000, {
+    pitch: Math.PI / 2,
+    verticalExaggeration: 10,
+  })
+  const centerSurface = project(centerLon, centerLat, 0)
+  const centerDeep = project(centerLon, centerLat, -2000)
+  const deltaLat = 0.25
+  const deltaLon = deltaLat / Math.cos(centerLat * Math.PI / 180)
+  const east = project(centerLon + deltaLon, centerLat, 0)
+  const north = project(centerLon, centerLat + deltaLat, 0)
+
+  assert.ok(Math.abs(Math.abs(east.x - centerSurface.x) - Math.abs(north.y - centerSurface.y)) < 1e-8)
+  assert.ok(Math.abs(centerDeep.x - centerSurface.x) < 1e-8)
+  assert.ok(Math.abs(centerDeep.y - centerSurface.y) < 1e-8)
+  assert.equal(centerSurface.perspective, 1)
+  assert.equal(north.perspective, 1)
+})
+
 test('thumbnail wheel zoom keeps aspect ratio and clamps to the world view', () => {
   const start = createThumbView()
   const zoomed = zoomThumbView(start, 0.5, 0.5, 0.5)

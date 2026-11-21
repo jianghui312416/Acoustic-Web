@@ -130,6 +130,19 @@ export function activeVolumeColorStops(id = volumeRenderingControls.colormap) {
   return palette.stops.map(([position, rgb]) => [position, [...rgb]])
 }
 
+/**
+ * 将侧边栏的“透明度”换算为体积分密度。
+ *
+ * 体绘制使用 Beer-Lambert 累积，直接线性放大密度会很快趋近完全不透明，
+ * 导致滑杆稍微移动画面就发生跳变。这里保留 1.7 的既有默认外观，同时
+ * 压缩两端增益，让整段滑杆的视觉变化更均匀。
+ */
+export function opacityControlToAlphaScale(value) {
+  const number = Number(value)
+  const opacity = Math.min(5, Math.max(0.2, Number.isFinite(number) ? number : 1.7))
+  return 0.42 * Math.pow(opacity / 1.7, 0.55)
+}
+
 export function clampVolumeRenderingControls(controls = volumeRenderingControls) {
   const clamp = (value, min, max, fallback) => {
     const number = Number(value)

@@ -425,9 +425,14 @@
               <span class="feature-switch-label"><span aria-hidden="true">◼️</span><span>海底掩膜</span></span>
             </label>
             <label class="feature-switch">
+              <input v-model="sliceControls.east90Indicator" type="checkbox" />
+              <span class="switch-track"><i></i></span>
+              <span class="feature-switch-label"><span aria-hidden="true">🧭</span><span>方位方向线</span></span>
+            </label>
+            <label class="feature-switch">
               <input v-model="sliceControls.clipBody" type="checkbox" />
               <span class="switch-track"><i></i></span>
-              <span class="feature-switch-label"><span aria-hidden="true">✂</span><span>裁剪体</span></span>
+              <span class="feature-switch-label" title="沿方位方向线所在的竖直平面裁掉半个体，只保留一半"><span aria-hidden="true">✂</span><span>裁剪体</span></span>
             </label>
             <label class="feature-switch">
               <input v-model="sliceControls.sspWindow" type="checkbox" />

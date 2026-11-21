@@ -34,7 +34,10 @@ export function createTerrainProjection(bounds, size, floor, camera = {}) {
     const rx = x * cosYaw - y * sinYaw
     const ry = x * sinYaw + y * cosYaw
     const z = elevation / horizontalSpanM * verticalExaggeration
-    const perspective = 1 / (1 - ry * .35)
+    // 透视只属于斜视视角。此前即使 pitch=90°（正俯视）仍按 ry 做远小近大，
+    // 会把水平圆形压成蛋形，并让不同深度的声源标记看起来偏离体中心。
+    const perspectiveStrength = .35 * Math.abs(cosPitch)
+    const perspective = 1 / (1 - ry * perspectiveStrength)
     return { x: size.width * .5 + panX + rx * scale * perspective,
       y: size.height * .40 + panY + (ry * sinPitch - z * cosPitch) * scale * perspective,
       order: ry + z * .3, perspective }
@@ -540,8 +543,7 @@ export function drawTerrainScene(canvas, grid, {
     }
     if (fieldLayer.primary) rayProjector = projectPolar
 
-    // 裁剪体：仅对方向方位线所在的声场体，沿方向线方位的竖直平面切掉一侧，
-    // 在切口补竖直切面，露出该方位本身的 TL 剖面（而非与其垂直的面）。
+    // 裁剪体：仅对方向方位线所在的声场体裁掉半个体，并在切边补出 TL 竖直切面。
     const directionTargetId = directionLine?.layerId
     const isDirectionLayer = directionTargetId ? fieldLayer.id === directionTargetId : fieldLayer.primary
     const clipAzimuthDeg = Number(directionLine?.azimuthDeg)
@@ -551,8 +553,7 @@ export function drawTerrainScene(canvas, grid, {
     const isRemovedAngle = (angle) => {
       if (clipAngle == null) return false
       const d = Math.atan2(Math.sin(angle - clipAngle), Math.cos(angle - clipAngle))
-      // 保留 [箭头方位, 箭头方位+180°] 一侧，切面正好落在方向线所在的竖直平面，
-      // 而不是与方向线垂直的平面。
+      // 保留 [箭头方位, 箭头方位+180°] 的半个圆柱。
       return d < -1e-6
     }
 
@@ -773,7 +774,7 @@ export function drawTerrainScene(canvas, grid, {
       }
     }
 
-    // 裁剪边界补竖直切面（过声源、沿 ±90° 边界），显示被切开处的 TL 剖面。
+    // 沿半体的两条切边补出传播损失切面。
     if (clipAngle != null) {
       const sectorForAngle = (angle) => {
         let best = 0

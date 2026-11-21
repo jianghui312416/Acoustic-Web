@@ -5,6 +5,7 @@ const {
   VOLUME_COLORMAPS,
   activeVolumeColorStops,
   clampVolumeRenderingControls,
+  opacityControlToAlphaScale,
   volumeRenderingControls,
 } = await import('../src/modules/acoustic/volumeRenderingControls.js')
 
@@ -50,4 +51,10 @@ test('volume menu values are clamped to safe rendering ranges', () => {
   assert.equal(controls.moveX, 100000)
   assert.equal(controls.moveY, -100000)
   assert.equal(controls.strictNearest, true)
+})
+
+test('opacity control keeps the established default while compressing slider extremes', () => {
+  assert.ok(Math.abs(opacityControlToAlphaScale(1.7) - 0.42) < 1e-9)
+  assert.ok(opacityControlToAlphaScale(0.2) > 0.1)
+  assert.ok(opacityControlToAlphaScale(5) < 0.8)
 })

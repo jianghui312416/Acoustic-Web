@@ -9,14 +9,14 @@
  * 复用同一套 API，因此体渲染 / 声线 / 方位指针等无需改动数据渲染逻辑。
  */
 import { installTerrainWorkerCompatibility } from './terrainWorkerCompatibility.js'
+import { baseMapUrlTemplate, baseMapMaxLevel } from '../config/baseMap.js'
 const Cesium = window.GeoVis
 
 // GeoVis 静态资源（Workers/Assets）基路径，与 public/ 下目录对应
 window.CESIUM_BASE_URL = '/'
 
-// 影像底图：与参考工程 Acoustic_Field_Display.html 的 baseImageUrl 一致，
-// 使用本地 /tiles/img/{z}/{x}/{y}.png（已拷贝到 public/tiles/img）。
-const BASE_MAP_URL = '/tiles/img/{z}/{x}/{y}.png'
+// 影像底图：默认在线 XYZ 瓦片（ArcGIS World Imagery，免 Key / 支持 CORS），
+// 可用 VITE_BASE_MAP_URL 覆盖为本地或内网瓦片服务，详见 config/baseMap.js。
 // 近地高清卫星影像：本地 /tiles/img 只缓存到 7 级，可用额外的近距离底图补充。
 // 默认不加载：Google 瓦片既无 CORS 头、在内网/国内环境也普遍不可达（会刷 ETIMEDOUT）。
 // 需要时用 VITE_DETAIL_MAP_URL 指向可达的**同源 / 内网**影像服务
@@ -110,13 +110,24 @@ export function createCesiumViewer(container, options = {}) {
   if (options.starSkyBox !== false) installStarSkyBox(e.scene)
   if (options.assignGlobal !== false) window.earth = e
 
-  // 影像底图
-  if (options.baseMap !== false) {
-    new Cesium.TileLayer(BASE_MAP_URL, {
-      projection: 'EPSG:900913',
-      // public/tiles/img only includes 0–7.
-      maxLevel: 7,
-    }).addTo(e.layers)
+  // 影像底图（默认在线 XYZ 瓦片，可用 options.baseMapUrl 或 VITE_BASE_MAP_URL 覆盖）
+  const baseMapUrl = options.baseMapUrl || baseMapUrlTemplate()
+  if (options.baseMap !== false && baseMapUrl) {
+    try {
+      const provider = new Cesium.UrlTemplateImageryProvider({
+        url: baseMapUrl,
+        tilingScheme: new Cesium.WebMercatorTilingScheme(),
+        minimumLevel: 0,
+        maximumLevel: options.baseMapMaxLevel || baseMapMaxLevel(),
+      })
+      e.imageryLayers.addImageryProvider(provider)
+    } catch (error) {
+      console.warn('[GeoVis] 影像底图加载失败，回退为纯色球体：', error?.message ?? error)
+    }
+  }
+  // 瓦片尚未加载或加载失败时，避免球体显示为刺眼的纯白。
+  if (e.scene?.globe && Cesium.Color) {
+    e.scene.globe.baseColor = Cesium.Color.fromCssColorString('#0b3153')
   }
 
   // Enable high-resolution satellite imagery only when the camera approaches

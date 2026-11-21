@@ -80,6 +80,7 @@ import { loadBathymetry } from '@/utils/bathymetry.js'
 import { bathymetryColor } from '@/utils/terrainScene.js'
 import { aisMonitorState } from '@/modules/ais/aisMonitorStore.js'
 import { bathymetrySourceState } from '@/modules/terrain/bathymetrySource.js'
+import { baseMapUrlTemplate, buildTileUrl } from '@/config/baseMap.js'
 
 const props = defineProps({
   bounds: { type: Object, required: true },
@@ -346,7 +347,7 @@ async function buildWorldThumbnail() {
 
   const loaded = await Promise.all(
     tiles.map(({ x, y }) =>
-      loadImage(`/tiles/img/${zoom}/${x}/${y}.png`)
+      loadImage(buildTileUrl(baseMapUrlTemplate(), zoom, x, y))
         .then((image) => ({ image, x, y }))
         .catch(() => null)
     )
