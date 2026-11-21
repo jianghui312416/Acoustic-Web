@@ -107,6 +107,178 @@ void main() {
 }
 `
 
+const VOLUME_VERTEX_SHADER = `#version 300 es
+layout(location = 0) in vec2 aPosition;
+layout(location = 1) in float aDepthM;
+
+uniform float uWidth;
+uniform float uHeight;
+uniform float uScale;
+uniform float uPanX;
+uniform float uPanY;
+uniform float uCosYaw;
+uniform float uSinYaw;
+uniform float uCosPitch;
+uniform float uSinPitch;
+uniform float uExaggeration;
+uniform float uHorizontalSpanM;
+
+out vec2 vLocal;
+out float vDepthM;
+
+void main() {
+  float x = aPosition.x;
+  float y = aPosition.y;
+  float z = -aDepthM / uHorizontalSpanM * uExaggeration;
+  float rx = x * uCosYaw - y * uSinYaw;
+  float ry = x * uSinYaw + y * uCosYaw;
+  float perspective = 1.0 / (1.0 - ry * 0.35);
+  float sx = uWidth * 0.5 + uPanX + rx * uScale * perspective;
+  float sy = uHeight * 0.40 + uPanY + (ry * uSinPitch - z * uCosPitch) * uScale * perspective;
+  vec2 ndc = vec2(sx / uWidth * 2.0 - 1.0, 1.0 - sy / uHeight * 2.0);
+  float order = ry + z * 0.3;
+  float depth = clamp(0.5 - order * 0.5, 0.0001, 0.9999) * 2.0 - 1.0;
+  gl_Position = vec4(ndc, depth, 1.0);
+  vLocal = vec2(x, y);
+  vDepthM = aDepthM;
+}
+`
+
+const VOLUME_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+precision highp sampler3D;
+
+in vec2 vLocal;
+in float vDepthM;
+
+uniform sampler3D uVolumeTexture;
+uniform sampler2D uHeightMap;
+uniform sampler2D uColorLut;
+uniform vec4 uGeo;
+uniform vec4 uTerrain;
+uniform vec4 uWedge;
+uniform vec4 uPath;
+uniform vec2 uValue;
+uniform vec2 uDb;
+uniform vec2 uAlpha;
+uniform vec2 uHeightRange;
+uniform int uHasBottomDepth;
+uniform int uAngleMode;
+uniform float uAngleCount;
+uniform int uAngleWrap;
+uniform int uVolumeMode;
+uniform float uSliceDepthM;
+uniform int uDebugNoTerrain;
+
+out vec4 fragColor;
+
+void main() {
+  float lon = uGeo.x + vLocal.x * uGeo.z / uGeo.w;
+  float lat = uGeo.y - vLocal.y * uGeo.z;
+  vec2 terrainUv = vec2(
+    (lon - uTerrain.x) / max(1e-9, uTerrain.y - uTerrain.x),
+    (uTerrain.w - lat) / max(1e-9, uTerrain.w - uTerrain.z)
+  );
+  if (terrainUv.x < 0.0 || terrainUv.x > 1.0 || terrainUv.y < 0.0 || terrainUv.y > 1.0) discard;
+  float terrainElev = mix(uHeightRange.x, uHeightRange.y, texture(uHeightMap, terrainUv).r);
+  float waterDepth = max(0.0, -terrainElev);
+  if (uDebugNoTerrain == 0 && vDepthM >= waterDepth) discard;
+
+  float cosSrcLat = max(0.01, cos(radians(uWedge.y)));
+  float east = (lon - uWedge.x) * 111320.0 * cosSrcLat;
+  float north = (lat - uWedge.y) * 110574.0;
+  float rangeM = length(vec2(east, north));
+  if (rangeM < uPath.x || rangeM > uPath.y) discard;
+  float bearing = degrees(atan(east, north));
+  if (bearing < 0.0) bearing += 360.0;
+  float angleSpan = max(0.001, uWedge.w - uWedge.z);
+  float angleNorm = mod(bearing - uWedge.z + 720.0, 360.0) / angleSpan;
+  if (angleNorm < 0.0 || angleNorm > 1.0) discard;
+  float pathNorm = clamp((rangeM - uPath.x) / max(1.0, uPath.y - uPath.x), 0.0, 1.0);
+  if (vDepthM < uPath.z || vDepthM > uPath.w) discard;
+  float depthNorm = (vDepthM - uPath.z) / max(1.0, uPath.w - uPath.z);
+  if (uVolumeMode == 1) {
+    // 调试：只保留目标深度附近的切片，用于和 Cesium 的单深度切片对照。
+    float sliceDepthNorm = clamp((uSliceDepthM - uPath.z) / max(1.0, uPath.w - uPath.z), 0.0, 1.0);
+    float thickness = max(2.0, (uPath.w - uPath.z) / 64.0);
+    if (abs(vDepthM - uSliceDepthM) > thickness) discard;
+    depthNorm = sliceDepthNorm;
+  }
+
+  // 纹理行中心在 (i+0.5)/H，而 angleNorm=0 对应纹理边缘。显式选中真实扇区
+  // 中心，保证与 Cesium 的 floor(angle*N+0.5)%N 最近扇区规则一致。
+  int angleRows = textureSize(uVolumeTexture, 0).y;
+  float sectorCount = max(1.0, uAngleCount);
+  float sectorInterp = abs(float(angleRows) - sectorCount) < 0.5
+    ? 1.0
+    : (uAngleWrap == 1
+      ? float(angleRows - 1) / sectorCount
+      : float(angleRows - 1) / max(1.0, sectorCount - 1.0));
+  vec4 voxel;
+  if (uAngleMode == 1) {
+    // 调试：显式周期混合相邻两个真实扇区。
+    float q;
+    float s0;
+    float s1;
+    if (uAngleWrap == 1) {
+      q = fract(angleNorm) * sectorCount;
+      s0 = floor(q);
+      s1 = mod(s0 + 1.0, sectorCount);
+    } else {
+      q = clamp(angleNorm, 0.0, 1.0) * max(1.0, sectorCount - 1.0);
+      s0 = floor(q);
+      s1 = min(s0 + 1.0, sectorCount - 1.0);
+    }
+    float t = fract(q);
+    float r0 = (s0 * sectorInterp + 0.5) / float(angleRows);
+    float r1 = (s1 * sectorInterp + 0.5) / float(angleRows);
+    vec4 v0 = texture(uVolumeTexture, vec3(pathNorm, r0, depthNorm));
+    vec4 v1 = texture(uVolumeTexture, vec3(pathNorm, r1, depthNorm));
+    float tl0 = mix(uValue.x, uValue.y, v0.r);
+    float tl1 = mix(uValue.x, uValue.y, v1.r);
+    float i0 = pow(10.0, -tl0 / 10.0);
+    float i1 = pow(10.0, -tl1 / 10.0);
+    float ii = mix(i0, i1, t);
+    float tl = -10.0 * log(max(1e-12, ii)) / log(10.0);
+    float rr = clamp((tl - uValue.x) / max(1e-6, uValue.y - uValue.x), 0.0, 1.0);
+    voxel = vec4(rr, mix(v0.g, v1.g, t), mix(v0.b, v1.b, t), mix(v0.a, v1.a, t));
+  } else {
+    float sector;
+    if (uAngleWrap == 1) {
+      sector = mod(floor(fract(angleNorm) * sectorCount + 0.5), sectorCount);
+    } else {
+      sector = clamp(
+        floor(clamp(angleNorm, 0.0, 1.0) * (sectorCount - 1.0) + 0.5),
+        0.0,
+        sectorCount - 1.0
+      );
+    }
+    float row = (sector * sectorInterp + 0.5) / float(angleRows);
+    voxel = texture(uVolumeTexture, vec3(pathNorm, row, depthNorm));
+  }
+  if (voxel.a <= 0.0) discard;
+  if (uHasBottomDepth == 1 && uDebugNoTerrain == 0) {
+    float bottomM = mix(uPath.z, uPath.w, voxel.g);
+    if (vDepthM >= bottomM) discard;
+  }
+  float tl = mix(uValue.x, uValue.y, voxel.r);
+  float t = clamp((tl - uDb.x) / max(1.0, uDb.y - uDb.x), 0.0, 1.0);
+  vec3 color = texture(uColorLut, vec2(t, 0.5)).rgb;
+  float alpha = voxel.a * uAlpha.x * pow(clamp(1.0 - t * 0.6, 0.0, 1.0), max(0.1, uAlpha.y));
+  if (alpha <= 0.003) discard;
+  fragColor = vec4(color, alpha);
+}
+`
+
+const VOLUME_UNIFORM_NAMES = [
+  'uWidth', 'uHeight', 'uScale', 'uPanX', 'uPanY',
+  'uCosYaw', 'uSinYaw', 'uCosPitch', 'uSinPitch', 'uExaggeration',
+  'uHorizontalSpanM', 'uVolumeTexture', 'uHeightMap', 'uColorLut',
+  'uGeo', 'uTerrain', 'uWedge', 'uPath', 'uValue', 'uDb', 'uAlpha',
+  'uHeightRange', 'uHasBottomDepth', 'uAngleMode', 'uAngleCount', 'uAngleWrap',
+  'uVolumeMode', 'uSliceDepthM', 'uDebugNoTerrain',
+]
+
 const UNIFORM_NAMES = [
   'uWidth', 'uHeight', 'uScale', 'uPanX', 'uPanY',
   'uCosYaw', 'uSinYaw', 'uCosPitch', 'uSinPitch', 'uExaggeration',
@@ -179,6 +351,39 @@ export class TerrainWebGLRenderer {
       this.uniforms[name] = gl.getUniformLocation(this.program, name)
     }
 
+    // GPU 体渲染：切片式三维纹理采样，失败时自动回退到 Canvas 声场体。
+    this.volumeProgram = null
+    this.volumeUniforms = {}
+    try {
+      this.volumeProgram = createProgram(gl, VOLUME_VERTEX_SHADER, VOLUME_FRAGMENT_SHADER)
+      for (const name of VOLUME_UNIFORM_NAMES) {
+        this.volumeUniforms[name] = gl.getUniformLocation(this.volumeProgram, name)
+      }
+    } catch (error) {
+      console.warn('[terrain] GPU 体渲染着色器不可用，回退到 Canvas 声场：', error?.message ?? error)
+      this.volumeProgram = null
+    }
+    this.volumeActive = false
+    this.volumeTexture = null
+    this.volumeTextureKey = null
+    this.volumeDataRef = null
+    this.heightTexture = gl.createTexture()
+    gl.bindTexture(gl.TEXTURE_2D, this.heightTexture)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    this.heightGrid = null
+    this.colorLutTexture = gl.createTexture()
+    gl.bindTexture(gl.TEXTURE_2D, this.colorLutTexture)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    this.colorLutKey = null
+    this.volumeGeometry = null
+    this.volumeGeometryKey = null
+
     this.geometry = null
     this.colorKey = null
     this.disposed = false
@@ -230,13 +435,30 @@ export class TerrainWebGLRenderer {
     this.disposed = true
     this.canvas.removeEventListener('webglcontextlost', this.onContextLost, false)
     this.disposeGeometry()
+    this.disposeVolumeGeometry()
     if (this.colorTexture) this.gl.deleteTexture(this.colorTexture)
     if (this.shadowTexture) this.gl.deleteTexture(this.shadowTexture)
+    if (this.volumeTexture) this.gl.deleteTexture(this.volumeTexture)
+    if (this.heightTexture) this.gl.deleteTexture(this.heightTexture)
+    if (this.colorLutTexture) this.gl.deleteTexture(this.colorLutTexture)
     if (this.program) this.gl.deleteProgram(this.program)
+    if (this.volumeProgram) this.gl.deleteProgram(this.volumeProgram)
     this.colorTexture = null
     this.shadowTexture = null
+    this.volumeTexture = null
+    this.heightTexture = null
+    this.colorLutTexture = null
     this.shadowMask = null
     this.program = null
+    this.volumeProgram = null
+  }
+
+  disposeVolumeGeometry() {
+    const gl = this.gl
+    if (!this.volumeGeometry) return
+    gl.deleteVertexArray(this.volumeGeometry.vao)
+    gl.deleteBuffer(this.volumeGeometry.buffer)
+    this.volumeGeometry = null
   }
 
   buildGeometry(grid) {
@@ -374,7 +596,238 @@ export class TerrainWebGLRenderer {
     return true
   }
 
-  render(grid, camera, controls = {}) {
+  ensureHeightTexture(grid) {
+    if (this.heightGrid === grid) return
+    const gl = this.gl
+    const width = Math.max(1, Number(grid.width) || 1)
+    const height = Math.max(1, Number(grid.height) || 1)
+    const min = Number.isFinite(Number(grid.min)) ? Number(grid.min) : 0
+    const max = Number.isFinite(Number(grid.max)) ? Number(grid.max) : 1
+    const span = Math.max(1e-9, max - min)
+    const data = new Uint8Array(width * height)
+    for (let index = 0; index < data.length; index++) {
+      const value = Number(grid.values?.[index])
+      const elevation = Number.isFinite(value) ? value : 0
+      data[index] = Math.round(clamp((elevation - min) / span, 0, 1) * 255)
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.heightTexture)
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, data)
+    this.heightGrid = grid
+  }
+
+  ensureVolumeColorLut(controls) {
+    const gl = this.gl
+    const stops = Array.isArray(controls?.colorStops) && controls.colorStops.length >= 2
+      ? controls.colorStops
+      : [[0, [255, 40, 0]], [1, [0, 0, 127]]]
+    const key = JSON.stringify(stops)
+    if (this.colorLutKey === key) return
+    const size = 256
+    const data = new Uint8Array(size * 4)
+    for (let index = 0; index < size; index++) {
+      const t = index / (size - 1)
+      let color = stops[stops.length - 1][1]
+      for (let segment = 0; segment < stops.length - 1; segment++) {
+        const [start, startColor] = stops[segment]
+        const [end, endColor] = stops[segment + 1]
+        if (t > end && segment < stops.length - 2) continue
+        const ratio = clamp((t - start) / Math.max(1e-6, end - start), 0, 1)
+        color = startColor.map((channel, channelIndex) =>
+          Math.round(channel + (endColor[channelIndex] - channel) * ratio))
+        break
+      }
+      data[index * 4] = clamp(Number(color?.[0]) || 0, 0, 255)
+      data[index * 4 + 1] = clamp(Number(color?.[1]) || 0, 0, 255)
+      data[index * 4 + 2] = clamp(Number(color?.[2]) || 0, 0, 255)
+      data[index * 4 + 3] = 255
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.colorLutTexture)
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, size, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data)
+    this.colorLutKey = key
+  }
+
+  ensureVolumeTexture(volume) {
+    if (!volume?.data || !(volume.width > 0) || !(volume.height > 0) || !(volume.depth > 0)) return false
+    const gl = this.gl
+    const meta = volume.wedgeMeta ?? {}
+    const key = `${volume.width}x${volume.height}x${volume.depth}:${volume.textureFilter}:${volume.valueMin}:${volume.valueMax}:${meta.sourceLon},${meta.sourceLat},${meta.pathMinM},${meta.pathMaxM},${meta.angleMin},${meta.angleMax},${meta.depthMinM},${meta.depthMaxM}`
+    if (this.volumeTexture && this.volumeTextureKey === key && this.volumeDataRef === volume.data) return true
+    if (!this.volumeTexture) this.volumeTexture = gl.createTexture()
+    gl.bindTexture(gl.TEXTURE_3D, this.volumeTexture)
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+    gl.texImage3D(
+      gl.TEXTURE_3D, 0, gl.RGBA8,
+      volume.width, volume.height, volume.depth, 0,
+      gl.RGBA, gl.UNSIGNED_BYTE, volume.data,
+    )
+    // 与主三维体一致：严格最近邻时不做任何插值；方位轴在 360° 数据上使用
+    // REPEAT，避免 0°/360° 接缝。
+    const angleSpan = Math.abs((Number(meta.angleMax) || 360) - (Number(meta.angleMin) || 0))
+    const filter = volume.textureFilter === 'nearest' ? gl.NEAREST : gl.LINEAR
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, filter)
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, filter)
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(
+      gl.TEXTURE_3D,
+      gl.TEXTURE_WRAP_T,
+      angleSpan >= 359.5 ? gl.REPEAT : gl.CLAMP_TO_EDGE,
+    )
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE)
+    this.volumeTextureKey = key
+    this.volumeDataRef = volume.data
+    return true
+  }
+
+  ensureVolumeGeometry(grid, volume) {
+    const gl = this.gl
+    const meta = volume.wedgeMeta ?? {}
+    const b = grid.bounds
+    const depthMin = Number(meta.depthMinM) || 0
+    const depthMax = Math.max(depthMin + 1, Number(meta.depthMaxM) || depthMin + 1)
+    const key = `${b.west},${b.east},${b.south},${b.north}:${depthMin}:${depthMax}`
+    if (this.volumeGeometry && this.volumeGeometryKey === key) return
+    this.disposeVolumeGeometry()
+
+    const cosLat = Math.max(.1, Math.cos((b.north + b.south) * Math.PI / 360))
+    const spanX = (b.east - b.west) * cosLat
+    const spanY = b.north - b.south
+    const span = Math.max(1e-9, Math.max(spanX, spanY))
+    const xMin = -spanX / (2 * span)
+    const xMax = spanX / (2 * span)
+    const yMin = -spanY / (2 * span)
+    const yMax = spanY / (2 * span)
+
+    const slices = 96
+    const vertices = slices * 6 * 3
+    const data = new Float32Array(vertices)
+    let offset = 0
+    const push = (x, y, depth) => {
+      data[offset++] = x
+      data[offset++] = y
+      data[offset++] = depth
+    }
+    for (let index = 0; index < slices; index++) {
+      // 从深到浅排列，配合预乘混合得到近似前向累积。
+      const depth = depthMax - ((depthMax - depthMin) * index) / Math.max(1, slices - 1)
+      push(xMin, yMin, depth)
+      push(xMax, yMin, depth)
+      push(xMax, yMax, depth)
+      push(xMin, yMin, depth)
+      push(xMax, yMax, depth)
+      push(xMin, yMax, depth)
+    }
+
+    const vao = gl.createVertexArray()
+    gl.bindVertexArray(vao)
+    const buffer = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW)
+    gl.enableVertexAttribArray(0)
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 12, 0)
+    gl.enableVertexAttribArray(1)
+    gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 12, 8)
+    gl.bindVertexArray(null)
+    this.volumeGeometry = { vao, buffer, count: vertices / 3 }
+    this.volumeGeometryKey = key
+  }
+
+  renderVolume(grid, volume, controls, view) {
+    const gl = this.gl
+    this.volumeActive = false
+    if (!this.volumeProgram || !volume) return false
+    if (!this.ensureVolumeTexture(volume)) return false
+    this.ensureHeightTexture(grid)
+    this.ensureVolumeColorLut(controls)
+    this.ensureVolumeGeometry(grid, volume)
+    if (!this.volumeGeometry) return false
+
+    const meta = volume.wedgeMeta ?? {}
+    const b = grid.bounds
+    const u = this.volumeUniforms
+    gl.useProgram(this.volumeProgram)
+    gl.uniform1f(u.uWidth, view.width)
+    gl.uniform1f(u.uHeight, view.height)
+    gl.uniform1f(u.uScale, view.scale)
+    gl.uniform1f(u.uPanX, view.panX)
+    gl.uniform1f(u.uPanY, view.panY)
+    gl.uniform1f(u.uCosYaw, view.cosYaw)
+    gl.uniform1f(u.uSinYaw, view.sinYaw)
+    gl.uniform1f(u.uCosPitch, view.cosPitch)
+    gl.uniform1f(u.uSinPitch, view.sinPitch)
+    gl.uniform1f(u.uExaggeration, view.exaggeration)
+    gl.uniform1f(u.uHorizontalSpanM, view.horizontalSpanM)
+    gl.uniform4f(u.uGeo, (b.west + b.east) / 2, (b.south + b.north) / 2, view.span, view.cosLat)
+    gl.uniform4f(u.uTerrain, b.west, b.east, b.south, b.north)
+    gl.uniform4f(
+      u.uWedge,
+      Number(meta.sourceLon) || 0,
+      Number(meta.sourceLat) || 0,
+      Number.isFinite(Number(meta.angleMin)) ? Number(meta.angleMin) : 0,
+      Number.isFinite(Number(meta.angleMax)) ? Number(meta.angleMax) : 360,
+    )
+    gl.uniform4f(
+      u.uPath,
+      Number.isFinite(Number(meta.pathMinM)) ? Number(meta.pathMinM) : 0,
+      Number.isFinite(Number(meta.pathMaxM)) ? Number(meta.pathMaxM) : 1,
+      Number.isFinite(Number(meta.depthMinM)) ? Number(meta.depthMinM) : 0,
+      Number.isFinite(Number(meta.depthMaxM)) ? Number(meta.depthMaxM) : 1,
+    )
+    gl.uniform2f(u.uValue, Number(volume.valueMin) || 0, Number(volume.valueMax) || 1)
+    gl.uniform2f(
+      u.uDb,
+      Number.isFinite(Number(controls?.dbMin)) ? Number(controls.dbMin) : 45,
+      Number.isFinite(Number(controls?.dbMax)) ? Number(controls.dbMax) : 128,
+    )
+    const opacity = clamp(Number.isFinite(Number(controls?.opacity)) ? Number(controls.opacity) : 1.7, 0.2, 5)
+    gl.uniform2f(
+      u.uAlpha,
+      opacity * 0.012,
+      clamp(Number.isFinite(Number(controls?.alphaPower)) ? Number(controls.alphaPower) : 1.3, 0.35, 3),
+    )
+    gl.uniform2f(
+      u.uHeightRange,
+      Number.isFinite(Number(grid.min)) ? Number(grid.min) : -1,
+      Number.isFinite(Number(grid.max)) ? Number(grid.max) : 1,
+    )
+    gl.uniform1i(u.uHasBottomDepth, volume.hasBottomDepth ? 1 : 0)
+    const angleSpan = Math.abs((Number(meta.angleMax) || 360) - (Number(meta.angleMin) || 0))
+    const debug = globalThis.__acousticVolumeDebug ?? {}
+    const sectorCount = Math.max(1, Number(volume.sectorCount) || (volume.textureFilter === 'nearest' ? volume.height : 1))
+    gl.uniform1i(u.uAngleMode, debug.angleMode === 'linear' ? 1 : 0)
+    gl.uniform1f(u.uAngleCount, sectorCount)
+    gl.uniform1i(u.uAngleWrap, angleSpan >= 359.5 ? 1 : 0)
+    gl.uniform1i(u.uVolumeMode, debug.volumeMode === 'slice' ? 1 : 0)
+    gl.uniform1f(u.uSliceDepthM, Number.isFinite(Number(debug.sliceDepthM)) ? Number(debug.sliceDepthM) : 150)
+    gl.uniform1i(u.uDebugNoTerrain, debug.disableTerrainClip === true ? 1 : 0)
+
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_3D, this.volumeTexture)
+    gl.uniform1i(u.uVolumeTexture, 0)
+    gl.activeTexture(gl.TEXTURE1)
+    gl.bindTexture(gl.TEXTURE_2D, this.heightTexture)
+    gl.uniform1i(u.uHeightMap, 1)
+    gl.activeTexture(gl.TEXTURE2)
+    gl.bindTexture(gl.TEXTURE_2D, this.colorLutTexture)
+    gl.uniform1i(u.uColorLut, 2)
+
+    gl.disable(gl.DEPTH_TEST)
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+    gl.depthMask(false)
+    gl.bindVertexArray(this.volumeGeometry.vao)
+    gl.drawArrays(gl.TRIANGLES, 0, this.volumeGeometry.count)
+    gl.bindVertexArray(null)
+    gl.depthMask(true)
+    gl.disable(gl.BLEND)
+    gl.enable(gl.DEPTH_TEST)
+    gl.activeTexture(gl.TEXTURE0)
+    this.volumeActive = true
+    return true
+  }
+
+  render(grid, camera, controls = {}, volume = null) {
     if (this.disposed) return
     if (this.contextLost || this.gl.isContextLost()) {
       throw new Error('地形 WebGL 上下文已丢失')
@@ -408,6 +861,7 @@ export class TerrainWebGLRenderer {
     const spanX = (b.east - b.west) * cosLat
     const spanY = b.north - b.south
     const span = Math.max(1e-9, Math.max(spanX, spanY))
+    const horizontalSpanM = Math.max(1, span * 110574)
 
     const yaw = Number(camera?.yaw) || 0
     const pitch = Number.isFinite(Number(camera?.pitch)) ? Number(camera.pitch) : 0.68
@@ -508,6 +962,13 @@ export class TerrainWebGLRenderer {
     gl.bindVertexArray(this.geometry.vao)
     gl.drawElements(gl.TRIANGLES, this.geometry.count, gl.UNSIGNED_INT, 0)
     gl.bindVertexArray(null)
+
+    // 地形之后绘制体，并关闭伪深度测试：避免不同拖拽角度下整块声场被
+    // 地形深度误判而消失；海底以下仍由片元着色器按真实水深裁剪。
+    this.renderVolume(grid, volume, controls, {
+      width, height, scale, panX, panY, cosYaw, sinYaw, cosPitch, sinPitch,
+      exaggeration, horizontalSpanM, span, cosLat,
+    })
     return true
   }
 }

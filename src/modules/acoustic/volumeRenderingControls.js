@@ -104,7 +104,7 @@ export const volumeRenderingControls = reactive({
   sampling: 0.01,
   alphaPower: 1.3,
   colormap: 'bellhop',
-  /** 严格最近邻：与 bellhop_gebco 参考工程一致，方位/距离/深度均取最近节点、不插值。 */
+  /** 默认三轴严格最近邻：方位/距离/深度均取最近原始节点，不做插值。 */
   strictNearest: true,
   /** 参考工程 fieldColor 的 TL 映射域为 45–128 dB，默认 dB 范围与之对齐。 */
   dbMin: 45,

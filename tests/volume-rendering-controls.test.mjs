@@ -5,7 +5,12 @@ const {
   VOLUME_COLORMAPS,
   activeVolumeColorStops,
   clampVolumeRenderingControls,
+  volumeRenderingControls,
 } = await import('../src/modules/acoustic/volumeRenderingControls.js')
+
+test('strict nearest-neighbor volume rendering is the default display mode', () => {
+  assert.equal(volumeRenderingControls.strictNearest, true)
+})
 
 test('volume menu exposes translated color maps and returns isolated SDK stops', () => {
   assert.deepEqual(VOLUME_COLORMAPS.map((item) => item.label), [
@@ -44,4 +49,5 @@ test('volume menu values are clamped to safe rendering ranges', () => {
   assert.equal(controls.rotationY, 0)
   assert.equal(controls.moveX, 100000)
   assert.equal(controls.moveY, -100000)
+  assert.equal(controls.strictNearest, true)
 })

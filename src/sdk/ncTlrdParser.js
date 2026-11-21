@@ -22,8 +22,8 @@
  *   - 值 = 传播损失 TL（dB）
  *
  * 无效值语义：
- *   - 200  ：水体未覆盖（声线未覆盖 / 未参与解算）。保留为有限值，显示层映射到
- *            当前色标的最大值；valueMin/valueMax 统计仍剔除它。
+ *   - 200  ：水体未覆盖（声线未覆盖 / 未参与解算）。保留在 CPU 原始结果中供诊断，
+ *            但体纹理解码时始终作为透明 NoData，禁止参与插值。
  *   - 9999 ：海底以下与陆地部分（超出该扇区海深范围），渲染前剔除。
  *
  * 数据本身不含经纬度，声源位置与方位基准由调用方指定。
@@ -66,6 +66,22 @@ export function isTlrdValidValue(v) {
  */
 export function normalizeTlrdValue(v) {
   return isTlrdValidValue(v) ? Number(v) : NaN
+}
+
+/**
+ * 在声强域插值两个传播损失值，再转换回 dB。
+ * 原始 Bellhop TL 不变；该函数仅用于连续方位显示，避免直接在对数 dB 域混合。
+ */
+export function interpolateTlIntensityDb(tl0, tl1, fraction) {
+  const a = Number(tl0)
+  const b = Number(tl1)
+  const t = Math.max(0, Math.min(1, Number(fraction) || 0))
+  if (!Number.isFinite(a)) return Number.isFinite(b) ? b : NaN
+  if (!Number.isFinite(b)) return a
+  if (t <= 0) return a
+  if (t >= 1) return b
+  const intensity = (1 - t) * Math.pow(10, -a / 10) + t * Math.pow(10, -b / 10)
+  return intensity > 0 ? -10 * Math.log10(intensity) : NaN
 }
 
 /** 解析后的三维声场数据（标准格式） */
@@ -482,19 +498,24 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
     s1Arr[y] = s1
   }
 
-  // 严格最近邻：每列海底深度（米，0–255 归一化）写入 G 通道，用于着色器近底平滑羽化。
-  const bottomNorm = strictNearest ? new Float32Array(height * col) : null
-  if (bottomNorm) {
-    for (let y = 0; y < height; y++) {
-      const s = s0Arr[y]
-      for (let ix = 0; ix < col; ix++) {
-        const depth = parsed.seabedDepthAt(s, ix)
-        // 缺测海底写 255（最深）→ 着色器不会误把整列羽化掉；有效深度按 0–255 归一化。
-        const norm = Number.isFinite(depth) && depthMaxM > depthMinM
-          ? Math.max(0, Math.min(255, Math.round(((depth - depthMinM) / (depthMaxM - depthMinM)) * 255)))
-          : 255
-        bottomNorm[y * col + ix] = norm
-      }
+  // 每列海底深度写入 G 通道。连续模式在相邻真实方位之间插值海深，随后由 GPU
+  // 沿距离轴继续线性采样；严格模式则精确保存原扇区海深。这样海底裁剪不再依赖
+  // 离散深度层的 A 通道边界，可先硬裁剪，再在海底上方做透明羽化。
+  const bottomNorm = new Uint8Array(height * col)
+  for (let y = 0; y < height; y++) {
+    const s0 = s0Arr[y]
+    const s1 = s1Arr[y]
+    const fraction = fracArr[y]
+    for (let ix = 0; ix < col; ix++) {
+      const d0 = parsed.seabedDepthAt(s0, ix)
+      const d1 = parsed.seabedDepthAt(s1, ix)
+      const depth = Number.isFinite(d0) && Number.isFinite(d1)
+        ? d0 + (d1 - d0) * fraction
+        : Number.isFinite(d0) ? d0 : Number.isFinite(d1) ? d1 : depthMaxM
+      const norm = depthMaxM > depthMinM
+        ? Math.max(0, Math.min(255, Math.round(((depth - depthMinM) / (depthMaxM - depthMinM)) * 255)))
+        : 255
+      bottomNorm[y * col + ix] = norm
     }
   }
 
@@ -517,10 +538,11 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
         const v1 = tl[base1 + ix]
         let v
         let coverage = 0
-        const valid0 = v0 === v0
-        const valid1 = v1 === v1
+        // 200 是水体未覆盖哨兵，任何模式都不得当成 200 dB 有效声场参与插值。
+        const valid0 = v0 === v0 && v0 !== TLRD_INVALID_WATER
+        const valid1 = v1 === v1 && v1 !== TLRD_INVALID_WATER
         if (valid0 && valid1) {
-          v = v0 + (v1 - v0) * frac
+          v = strictNearest ? v0 : interpolateTlIntensityDb(v0, v1, frac)
           coverage = 1
         } else if (valid0) {
           v = v0
@@ -532,9 +554,6 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
           v = NaN
         }
 
-        // 参考工程把缺测节点显示为透明；严格最近邻模式下 200（水体未覆盖）同样按缺测处理。
-        // 平滑模式仍保留旧行为：200 映射到色标最大值。
-        if (strictNearest && v === TLRD_INVALID_WATER) v = NaN
         const o = outRow + ix * 4
         if (v === v) {
           // 归一化到 0–255（NaN 已排除，v0/v1 的自比较即 isFinite 判定）
@@ -542,8 +561,8 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
           if (n < 0) n = 0
           else if (n > 255) n = 255
           data[o] = n
-          // G 通道：严格最近邻时存每列海底深度（近底羽化用），否则保持灰度 R=G=B
-          data[o + 1] = bottomNorm ? bottomNorm[y * col + ix] : n
+          // 回填阶段暂时保持灰度；海底深度会在回填完成后统一写入 G 通道。
+          data[o + 1] = n
           data[o + 2] = n
           // 不再把“一个扇区有效、相邻扇区为陆地”的插值格强行设为完全有效；
           // 覆盖率会向陆地扇区平滑衰减，并在陆地扇区中心严格为 0。
@@ -564,6 +583,17 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
     fillInvalidVoxelRgb(data, col, height, row, { wrapY: wrapTheta })
   }
 
+  // G 通道独立保存连续海底深度，包括 A=0 的边界体素；这样硬件三线性采样时
+  // TL 覆盖率与海底几何约束互不污染。
+  for (let iz = 0; iz < row; iz++) {
+    const depthOffset = iz * rowStride
+    for (let y = 0; y < height; y++) {
+      const bottomOffset = y * col
+      const rowOffset = depthOffset + y * col * 4
+      for (let ix = 0; ix < col; ix++) data[rowOffset + ix * 4 + 1] = bottomNorm[bottomOffset + ix]
+    }
+  }
+
   const distance = grid.distance
   const pathMaxM = Math.max(1, distance.length ? distance[distance.length - 1] : col)
 
@@ -579,7 +609,9 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
     // 平滑模式保持 sampler3D 三线性过滤。
     textureFilter: strictNearest ? 'nearest' : 'linear',
     strictNearest,
-    hasBottomDepth: strictNearest,
+    /** 真实计算方位数；纹理高度可能因方位插值而更大。 */
+    sectorCount: sector,
+    hasBottomDepth: true,
     valueMin: vMin,
     valueMax: vMax,
     lonMin: sourceLon - degLon,

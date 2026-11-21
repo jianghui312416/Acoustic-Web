@@ -68,6 +68,17 @@ function averageRgb(colors) {
   ))
 }
 
+/** 方位显示只在声强域插值，避免直接平均对数 dB；不改写原始 TL 数据。 */
+function interpolateTlDbByIntensity(a, b, t) {
+  if (!Number.isFinite(a)) return Number.isFinite(b) ? b : NaN
+  if (!Number.isFinite(b)) return a
+  const fraction = clamp(t, 0, 1)
+  if (fraction <= 0) return a
+  if (fraction >= 1) return b
+  const intensity = (1 - fraction) * Math.pow(10, -a / 10) + fraction * Math.pow(10, -b / 10)
+  return intensity > 0 ? -10 * Math.log10(intensity) : NaN
+}
+
 /**
  * Canvas 没有逐顶点着色；用共享顶点颜色构造面内线性渐变，避免每个网格单元
  * 使用一个常量色而产生棋盘边界。渐变只作用于显示，不改写 TL 数据。
@@ -94,10 +105,8 @@ function gradientPolygon(ctx, points, colors, alpha) {
   ctx.closePath()
   ctx.fillStyle = gradient
   ctx.fill()
-  // 相邻面各自抗锯齿会在网格线上留下暗缝；用同一渐变描 1px 覆盖接缝。
-  ctx.strokeStyle = gradient
-  ctx.lineWidth = 1
-  ctx.stroke()
+  // 半透明面不能逐格描边：共享边会被重复混合成明亮的横竖网笼。相邻面只填充，
+  // 浏览器的子像素覆盖负责公共边抗锯齿，不额外叠加任何网格线。
 }
 
 const terrainLineGeometryCache = new WeakMap()
@@ -224,6 +233,8 @@ export function drawTerrainScene(canvas, grid, {
   receiver = null,
   meshMax = TERRAIN_MAX_MESH_SEGMENTS,
   paintTerrain = true,
+  fullResolution = false,
+  skipPrimaryVolume = false,
 } = {}) {
   if (!canvas || !grid) return null
   const { width, height } = canvas.getBoundingClientRect()
@@ -438,10 +449,10 @@ export function drawTerrainScene(canvas, grid, {
     const source = fieldLayer.source
     const { sector, row, col, depth, distance, compassBearings } = field.grid
     const volumeFaces = []
-    // sampling 是显示采样上限：减小时提高表面细分，但不再用它抽取独立水平圆盘。
-    const samplingQuality = clamp(.01 / (Number(controls.sampling) || .01), .75, 2.25)
-    const radialStep = Math.max(1, Math.ceil(Math.max(1, col - 1) / Math.round(54 * samplingQuality)))
-    const depthStep = Math.max(1, Math.ceil(Math.max(1, row - 1) / Math.round(44 * samplingQuality)))
+    // 静止时按接口返回的全部距离/深度节点绘制，不做抽稀；拖动/缩放期间临时降采样，
+    // 松手后自动恢复完整分辨率，避免交互被数万面片拖慢。
+    const radialStep = fullResolution ? 1 : Math.max(1, Math.ceil(Math.max(1, col - 1) / 54))
+    const depthStep = fullResolution ? 1 : Math.max(1, Math.ceil(Math.max(1, row - 1) / 44))
     const opacity = clamp((Number(controls.opacity) || 1.7) / 5, .04, 1)
     const alphaPower = clamp(Number(controls.alphaPower) || 1.3, .35, 3)
     const dbMin = Number.isFinite(Number(controls.dbMin)) ? Number(controls.dbMin) : 60
@@ -471,14 +482,44 @@ export function drawTerrainScene(canvas, grid, {
         z: z2 + offsets[2],
       }
     }
+    // 地形高程双线性采样：海底裁剪和声场底边都使用同一条连续高程曲线，
+    // 避免最近邻网格单元把声场底部切成阶梯或整块缺失。
+    const terrainWidth = Math.max(1, Number(grid.width) || 1)
+    const terrainHeight = Math.max(1, Number(grid.height) || 1)
+    const terrainValues = grid.values
+    const terrainLonSpan = Math.max(1e-9, b.east - b.west)
+    const terrainLatSpan = Math.max(1e-9, b.north - b.south)
+    const elevationAtLonLat = (lon, lat) => {
+      if (lon < b.west || lon > b.east || lat < b.south || lat > b.north) return null
+      const fx = ((lon - b.west) / terrainLonSpan) * (terrainWidth - 1)
+      const fy = ((b.north - lat) / terrainLatSpan) * (terrainHeight - 1)
+      const x0 = Math.max(0, Math.min(terrainWidth - 1, Math.floor(fx)))
+      const y0 = Math.max(0, Math.min(terrainHeight - 1, Math.floor(fy)))
+      const x1 = Math.min(terrainWidth - 1, x0 + 1)
+      const y1 = Math.min(terrainHeight - 1, y0 + 1)
+      const tx = fx - x0
+      const ty = fy - y0
+      const corners = [
+        [terrainValues[y0 * terrainWidth + x0], (1 - tx) * (1 - ty)],
+        [terrainValues[y0 * terrainWidth + x1], tx * (1 - ty)],
+        [terrainValues[y1 * terrainWidth + x0], (1 - tx) * ty],
+        [terrainValues[y1 * terrainWidth + x1], tx * ty],
+      ]
+      let sum = 0
+      let weight = 0
+      for (const [value, w] of corners) {
+        if (!Number.isFinite(value) || w <= 0) continue
+        sum += value * w
+        weight += w
+      }
+      return weight > 0 ? sum / weight : null
+    }
     const polar = (angle, radius, z) => {
       const local = rotate(Math.cos(angle) * radius, Math.sin(angle) * radius, -z)
       const lon = source.lon + local.x / (111320 * Math.cos(source.lat * Math.PI / 180))
       const lat = source.lat + local.y / 110574
       if (lon < b.west || lon > b.east || lat < b.south || lat > b.north) return null
-      const col = Math.round((lon - b.west) / (b.east - b.west) * (grid.width - 1))
-      const row = Math.round((b.north - lat) / (b.north - b.south) * (grid.height - 1))
-      const floor = grid.values[row * grid.width + col]
+      const floor = elevationAtLonLat(lon, lat)
       if (!Number.isFinite(floor) || floor >= 0 || local.z < floor) return null
       return project(lon, lat, local.z)
     }
@@ -487,6 +528,15 @@ export function drawTerrainScene(canvas, grid, {
       const lon = source.lon + local.x / (111320 * Math.max(.01, Math.cos(source.lat * Math.PI / 180)))
       const lat = source.lat + local.y / 110574
       return project(lon, lat, local.z)
+    }
+    /** 某极坐标位置的水深（米，正）；陆地/越界返回 null，浅水返回 0。 */
+    const terrainWaterDepthAt = (angle, radius) => {
+      const local = rotate(Math.cos(angle) * radius, Math.sin(angle) * radius, 0)
+      const lon = source.lon + local.x / (111320 * Math.max(.01, Math.cos(source.lat * Math.PI / 180)))
+      const lat = source.lat + local.y / 110574
+      const elevation = elevationAtLonLat(lon, lat)
+      if (!Number.isFinite(elevation)) return null
+      return elevation >= 0 ? 0 : -elevation
     }
     if (fieldLayer.primary) rayProjector = projectPolar
 
@@ -537,12 +587,14 @@ export function drawTerrainScene(canvas, grid, {
       const value = field.at(si, zi, ri)
       return Number.isFinite(value) ? value : NaN
     }
-    const averageFinite = (...values) => {
+    const averageFiniteIntensity = (...values) => {
       const valid = values.filter(Number.isFinite)
-      return valid.length ? valid.reduce((sum, value) => sum + value, 0) / valid.length : NaN
+      if (!valid.length) return NaN
+      const intensity = valid.reduce((sum, value) => sum + Math.pow(10, -value / 10), 0) / valid.length
+      return intensity > 0 ? -10 * Math.log10(intensity) : NaN
     }
-    // 公共角边取两侧扇区均值；相邻表面因此使用完全相同的边界 TL 值。
-    const boundaryTl = (boundary, z, r) => averageFinite(
+    // 公共角边在声强域取两侧扇区均值；相邻表面使用完全相同的边界 TL 值。
+    const boundaryTl = (boundary, z, r) => averageFiniteIntensity(
       rawTl(boundary - 1, z, r),
       rawTl(boundary, z, r)
     )
@@ -556,11 +608,11 @@ export function drawTerrainScene(canvas, grid, {
       return a + (bValue - a) * (z - lo)
     }
     const angularTl = (sectorIndex, t, z, r) => {
+      // 原始节点检查模式下，一个真实方位负责其中心两侧的整个角区，不做方位混合。
+      if (controls.strictNearest === true) return rawTl(sectorIndex, z, r)
       const a = boundaryTlAtDepth(sectorIndex, z, r)
       const bValue = boundaryTlAtDepth(sectorIndex + 1, z, r)
-      if (!Number.isFinite(a)) return bValue
-      if (!Number.isFinite(bValue)) return a
-      return a + (bValue - a) * t
+      return interpolateTlDbByIntensity(a, bValue, t)
     }
     const depthAt = index => {
       const z = clamp(index, 0, row - 1)
@@ -568,7 +620,9 @@ export function drawTerrainScene(canvas, grid, {
       const hi = Math.min(row - 1, lo + 1)
       return Number(depth[lo]) + (Number(depth[hi]) - Number(depth[lo])) * (z - lo)
     }
+    const skipVolumeFaces = fieldLayer.primary && skipPrimaryVolume
     const pushFace = (points, values, baseAlpha) => {
+      if (skipVolumeFaces) return
       if (points.some(point => !point) || values.some(value => !Number.isFinite(value))) return
       const ratios = values.map(value => clamp((value - dbMin) / (dbMax - dbMin), 0, 1))
       const colors = ratios.map(colorAt)
@@ -589,6 +643,7 @@ export function drawTerrainScene(canvas, grid, {
       return { a0, a1, subdivisions }
     }
 
+    if (!skipVolumeFaces) {
     // 顶面：只绘制一个由共享顶点连接的 TL 表面，不再堆叠独立水平圆盘。
     // 信号余量场在目标最小深度取顶面；普通场仍在 0 m（海面）取顶面。
     const topZ = Number.isFinite(field.topDepthIndex) ? clamp(field.topDepthIndex, 0, row - 1) : 0
@@ -616,72 +671,103 @@ export function drawTerrainScene(canvas, grid, {
       }
     }
 
-    // 外侧壁：相邻深度节点直接连接，颜色从真实三维 TL 外缘连续插值。
+    // 地形贴合：声场底边不再按离散深度层整块裁剪，而是沿双线性采样的真实
+    // 海底高程连续收边。这样海山/陡坡处不会出现矩形缺口或阶梯。
     const outerR = col - 1
+    const maxTlDepthM = depthAt(row - 1)
+    const terrainAngleStep = Math.PI / 30
+    const bottomRadialNodes = radialNodes
+    const wallSegments = Math.max(2, depthNodes.length - 1)
+    const depthIndexNearest = (depthM) => {
+      let best = 0
+      let bestDiff = Infinity
+      for (let index = 0; index < row; index++) {
+        const diff = Math.abs((Number(depth[index]) || 0) - depthM)
+        if (diff < bestDiff) { bestDiff = diff; best = index }
+      }
+      return best
+    }
+    // 在声场底部取当前角度/距离列上仍有效的 TL；地形比 Bellhop 海深更深时
+    // 向浅处回退，避免把缺失值当成有效声场。
+    const bottomTl = (s, t, depthM, r) => {
+      const start = depthIndexNearest(depthM)
+      for (let z = start; z >= 0; z--) {
+        const value = angularTl(s, t, z, r)
+        if (Number.isFinite(value)) return value
+      }
+      for (let z = start + 1; z < row; z++) {
+        const value = angularTl(s, t, z, r)
+        if (Number.isFinite(value)) return value
+      }
+      return NaN
+    }
+    const bottomDepthAt = (angle, radius) => {
+      const waterDepth = terrainWaterDepthAt(angle, radius)
+      if (!Number.isFinite(waterDepth)) return null
+      return Math.min(waterDepth, maxTlDepthM)
+    }
+
+    // 外侧壁：从海面一直连到该方位的真实海底深度，底边连续变化。
     for (let s = 0; s < sector; s++) {
-      const { a0, a1, subdivisions } = sectorGeometry(s)
+      const { a0, a1 } = sectorGeometry(s)
+      const subdivisions = Math.max(1, Math.ceil(Math.abs(a1 - a0) / terrainAngleStep))
       for (let subdivision = 0; subdivision < subdivisions; subdivision++) {
         const t0 = subdivision / subdivisions
         const t1 = (subdivision + 1) / subdivisions
         const angle0 = a0 + (a1 - a0) * t0
         const angle1 = a0 + (a1 - a0) * t1
         if (isRemovedAngle((angle0 + angle1) / 2)) continue
-        for (let layer = 0; layer < depthNodes.length - 1; layer++) {
-          const z0 = depthNodes[layer]
-          const z1 = depthNodes[layer + 1]
+        const bottom0 = bottomDepthAt(angle0, distance[outerR])
+        const bottom1 = bottomDepthAt(angle1, distance[outerR])
+        if (bottom0 == null || bottom1 == null) continue
+        if (bottom0 <= 0 && bottom1 <= 0) continue
+        for (let segment = 0; segment < wallSegments; segment++) {
+          const f0 = segment / wallSegments
+          const f1 = (segment + 1) / wallSegments
+          const z00 = bottom0 * f0
+          const z01 = bottom0 * f1
+          const z10 = bottom1 * f0
+          const z11 = bottom1 * f1
           pushFace([
-            polar(angle0, distance[outerR], depthAt(z0)),
-            polar(angle1, distance[outerR], depthAt(z0)),
-            polar(angle1, distance[outerR], depthAt(z1)),
-            polar(angle0, distance[outerR], depthAt(z1)),
+            projectPolar(angle0, distance[outerR], z00),
+            projectPolar(angle1, distance[outerR], z10),
+            projectPolar(angle1, distance[outerR], z11),
+            projectPolar(angle0, distance[outerR], z01),
           ], [
-            angularTl(s, t0, z0, outerR), angularTl(s, t1, z0, outerR),
-            angularTl(s, t1, z1, outerR), angularTl(s, t0, z1, outerR),
+            bottomTl(s, t0, z00, outerR), bottomTl(s, t1, z10, outerR),
+            bottomTl(s, t1, z11, outerR), bottomTl(s, t0, z01, outerR),
           ], .32 + opacity * .42)
         }
       }
     }
 
-    // 底面随每个角度/距离列的最深有效 TL 层变化，保持海底裁剪而非伪造实体底盖。
-    const deepestCache = new Map()
-    const deepestBoundaryLayer = (boundary, r) => {
-      const key = `${wrapSector(boundary)}:${r}`
-      if (deepestCache.has(key)) return deepestCache.get(key)
-      let found = NaN
-      for (let z = row - 1; z >= 0; z--) {
-        if (Number.isFinite(boundaryTl(boundary, z, r))) { found = z; break }
-      }
-      deepestCache.set(key, found)
-      return found
-    }
+    // 底面：直接铺在真实海底高程上，四角各自跟随水深，避免整面丢弃。
     for (let s = 0; s < sector; s++) {
-      const { a0, a1, subdivisions } = sectorGeometry(s)
+      const { a0, a1 } = sectorGeometry(s)
+      const subdivisions = Math.max(1, Math.ceil(Math.abs(a1 - a0) / terrainAngleStep))
       for (let subdivision = 0; subdivision < subdivisions; subdivision++) {
         const t0 = subdivision / subdivisions
         const t1 = (subdivision + 1) / subdivisions
         const angle0 = a0 + (a1 - a0) * t0
         const angle1 = a0 + (a1 - a0) * t1
         if (isRemovedAngle((angle0 + angle1) / 2)) continue
-        for (let radial = 0; radial < radialNodes.length - 1; radial++) {
-          const r0 = radialNodes[radial]
-          const r1 = radialNodes[radial + 1]
-          const z00 = deepestBoundaryLayer(s, r0)
-          const z10 = deepestBoundaryLayer(s + 1, r0)
-          const z01 = deepestBoundaryLayer(s, r1)
-          const z11 = deepestBoundaryLayer(s + 1, r1)
-          if (![z00, z10, z01, z11].every(Number.isFinite)) continue
-          const za0 = z00 + (z10 - z00) * t0
-          const za1 = z00 + (z10 - z00) * t1
-          const zb0 = z01 + (z11 - z01) * t0
-          const zb1 = z01 + (z11 - z01) * t1
+        for (let radial = 0; radial < bottomRadialNodes.length - 1; radial++) {
+          const r0 = bottomRadialNodes[radial]
+          const r1 = bottomRadialNodes[radial + 1]
+          const d00 = bottomDepthAt(angle0, distance[r0])
+          const d10 = bottomDepthAt(angle1, distance[r0])
+          const d11 = bottomDepthAt(angle1, distance[r1])
+          const d01 = bottomDepthAt(angle0, distance[r1])
+          if ([d00, d10, d11, d01].some(value => value == null)) continue
+          if (Math.max(d00, d10, d11, d01) <= 0) continue
           pushFace([
-            polar(angle0, distance[r0], depthAt(za0)),
-            polar(angle1, distance[r0], depthAt(za1)),
-            polar(angle1, distance[r1], depthAt(zb1)),
-            polar(angle0, distance[r1], depthAt(zb0)),
+            projectPolar(angle0, distance[r0], d00),
+            projectPolar(angle1, distance[r0], d10),
+            projectPolar(angle1, distance[r1], d11),
+            projectPolar(angle0, distance[r1], d01),
           ], [
-            angularTl(s, t0, za0, r0), angularTl(s, t1, za1, r0),
-            angularTl(s, t1, zb1, r1), angularTl(s, t0, zb0, r1),
+            bottomTl(s, t0, d00, r0), bottomTl(s, t1, d10, r0),
+            bottomTl(s, t1, d11, r1), bottomTl(s, t0, d01, r1),
           ], .22 + opacity * .28)
         }
       }
@@ -728,6 +814,7 @@ export function drawTerrainScene(canvas, grid, {
 
     volumeFaces.sort((a, bValue) => a.order - bValue.order)
       .forEach(face => gradientPolygon(ctx, face.p, face.colors, face.alpha))
+    }
     if (controls.rangeRings) {
       ctx.save()
       ctx.strokeStyle = 'rgba(102,226,255,.65)'

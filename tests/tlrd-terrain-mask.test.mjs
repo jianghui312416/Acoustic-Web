@@ -3,7 +3,11 @@ import assert from 'node:assert/strict'
 
 globalThis.window = { GeoVis: {} }
 
-const { parseAnalyse3DTlrd, decodeTlrdPolarVolume } = await import('../src/sdk/ncTlrdParser.js')
+const {
+  parseAnalyse3DTlrd,
+  decodeTlrdPolarVolume,
+  interpolateTlIntensityDb,
+} = await import('../src/sdk/ncTlrdParser.js')
 
 function fixture() {
   return {
@@ -102,5 +106,31 @@ test('keeps land-sector alpha zero and only feathers the water boundary', () => 
   assert.ok(alpha(0, 1, 0) >= 127 && alpha(0, 1, 0) <= 128, 'coast boundary is feathered')
   assert.equal(alpha(0, 2, 0), 0, 'land-sector center remains fully hidden')
   assert.equal(alpha(0, 4, 0), 255, '0°/360° seam closes on the first water sector')
+})
+
+test('continuous bearing rows interpolate TL in intensity space and keep NoData transparent', () => {
+  const json = fixture()
+  json.Data.Units[0].Response.altitudeList.pairedDataVS[1].y = [-50, -50]
+  const parsed = parseAnalyse3DTlrd(json)
+  const texture = decodeTlrdPolarVolume(parsed, {
+    sourceLon: 116,
+    sourceLat: 16,
+    angleInterp: 2,
+  })
+  const offset = (((0 * texture.height + 1) * texture.width + 0) * 4)
+  const expectedTl = interpolateTlIntensityDb(70, 90, 0.5)
+  const decodedTl = texture.valueMin + (texture.data[offset] / 255) * (texture.valueMax - texture.valueMin)
+  assert.ok(Math.abs(decodedTl - expectedTl) < 0.2, 'middle bearing uses intensity-domain interpolation')
+  assert.equal(texture.hasBottomDepth, true)
+
+  const noDataJson = fixture()
+  noDataJson.Data.Units[0].Response.altitudeList.pairedDataVS[1].y = [-50, -50]
+  noDataJson.Data.Units[0].Response.loadingTlv.profile.data[0][0] = 200
+  const withNoData = decodeTlrdPolarVolume(parseAnalyse3DTlrd(noDataJson), {
+    sourceLon: 116,
+    sourceLat: 16,
+    angleInterp: 2,
+  })
+  assert.equal(withNoData.data[3], 0, '200 sentinel is transparent in continuous mode')
 })
 

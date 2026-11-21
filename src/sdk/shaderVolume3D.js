@@ -513,6 +513,7 @@ export class ShaderVolume3DPrimitive {
       cameraUvw: new Cesium.Cartesian3(),
       sampleStep: 0.01,
       strictNearest: 0,
+      hasBottomDepth: 0,
       featherM: 160,
     }
     this.ncUniforms = u
@@ -529,6 +530,7 @@ export class ShaderVolume3DPrimitive {
       u_alphaByValue: () => u.alphaByValue,
       u_sampleStep: () => u.sampleStep,
       u_strictNearest: () => u.strictNearest,
+      u_hasBottomDepth: () => u.hasBottomDepth,
       u_featherM: () => u.featherM,
       u_valueInfo: () => u.valueInfo,
       u_colorInfo: () => u.colorInfo,
@@ -1573,6 +1575,8 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
       uniform float u_sampleStep;
       // 严格最近邻（bellhop_gebco 参考模式）：1 = 逐节点 texelFetch、不做三线性插值。
       uniform int u_strictNearest;
+      // G 通道是否保存物理海底深度；存在时先硬裁剪海底以下样本，再对海底上方羽化。
+      uniform int u_hasBottomDepth;
       // 近底平滑羽化宽度（米）：海底之上 featerM 米内透明度渐变到 0。
       uniform float u_featherM;
 
@@ -1738,10 +1742,12 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
             ? 1.0
             : edgeLow.y * edgeHigh.y;
           coverage *= min(min(edgeLow.x * edgeHigh.x, angleEdge), edgeLow.z * edgeHigh.z);
-          // 近底平滑羽化：严格最近邻模式下按原始海底深度（G 通道）渐变，消除海底硬边缘。
-          if (u_strictNearest == 1 && voxel.g > 0.0) {
+          // 连续海底约束：G 通道是独立的海底深度纹理。先执行硬裁剪，确保任何
+          // 羽化或三线性过滤都不会把声场带到海底以下；随后仅在海底上方渐隐。
+          if (u_hasBottomDepth == 1) {
             float depthM = mix(u_wedgeMeta2.z, u_wedgeMeta2.w, texUvw.z);
             float bottomM = mix(u_wedgeMeta2.z, u_wedgeMeta2.w, voxel.g);
+            if (depthM >= bottomM) continue;
             coverage *= smoothstep(0.0, max(8.0, u_featherM), bottomM - depthM);
           }
           if (coverage <= 0.001) continue;
@@ -1919,6 +1925,7 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
       // sampling 是归一化纹理坐标的最大步长；shader 会结合纹理三轴分辨率进一步缩小。
       uniforms.sampleStep = clamp(Number(sampling) || 0.01, 0.001, 0.05)
       uniforms.strictNearest = volume.strictNearest ? 1 : 0
+      uniforms.hasBottomDepth = volume.hasBottomDepth ? 1 : 0
       // 近底羽化宽度：参考工程默认 160 m，浅水时按深度跨度的 25% 上限自适应缩小。
       const featherDepthSpan = Math.max(1, meta.depthMaxM - meta.depthMinM)
       uniforms.featherM = Math.max(8, Math.min(160, featherDepthSpan * 0.25))

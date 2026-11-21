@@ -745,6 +745,7 @@
       <span>纬度：<b>{{ coordStatus.lat }}</b></span>
       <span>高度：<b>{{ coordStatus.height }}</b></span>
       <span>层级：<b>{{ coordStatus.level }}</b></span>
+      <span>帧率：<b>{{ fps }}</b></span>
     </div>
 
     <!-- 旧布局保留在源码中作为兼容参考，不参与渲染。 -->
@@ -1274,6 +1275,7 @@
 
 <script setup>
 import { ref, shallowRef, shallowReactive, computed, watch, onMounted, onActivated, onDeactivated, onBeforeUnmount, nextTick } from 'vue'
+import { useFrameRate } from '@/composables/useFrameRate.js'
 import { Cesium, createCesiumViewer } from '@/utils/cesium.js'
 import {
   SoundField,
@@ -1585,7 +1587,7 @@ function returnToTerrain() {
  * 缩回全球时恢复“刚进入网页”的状态：关闭结果窗口，隐藏三维体、二维投影、
  * 剖面帘、声线、方位指针和图例/剖面图；保留已算出的数据供再次进入地形使用。
  */
-function enterCleanGlobeView() {
+function enterCleanGlobeView({ skipRendererSync = false } = {}) {
   cleanGlobeView.value = true
   resultPanelOpen.value = false
   renderControlsOpen.value = false
@@ -1599,7 +1601,16 @@ function enterCleanGlobeView() {
   if (earthRaysVisibleBeforeGlobe === null) {
     earthRaysVisibleBeforeGlobe = earthRaysVisible.value
   }
-  setEarthRaysVisible(false)
+  if (skipRendererSync) {
+    // 侧栏直接切换时，全球端的体渲染器已在进入地形模式时释放。
+    // 此处只同步显隐状态，不能再调用 syncSoundField() 把 GPU 资源重建回来。
+    earthRaysVisible.value = false
+    twoDRayFlowRenderer?.setVisible(false)
+    stopVolumeRayAnimation()
+    stopSliceRayAnimation()
+  } else {
+    setEarthRaysVisible(false)
+  }
   pointerEnabled.value = false
   applyPointerVisibility()
   sliceDisplayMode.value = 'off'
@@ -1712,8 +1723,14 @@ function leaveTerrainForGlobe(payload) {
     })
   }, 360)
 }
+// 地形预览的 GPU 体纹理；必须早于 immediate 监听声明，避免 setup 时的暂时性死区。
+const terrainTexture = shallowRef(null)
 const terrainField = computed(() => {
-  if (analysisMode.value !== '3d' || !volumeData.value || !raySourceData.value || loading.value) return null
+  // 地形预览使用自己解码并上传到 WebGL 的 terrainTexture；全球视图才依赖
+  // Cesium 的 volumeData。因此只要有一份可渲染的体数据即可，不能强制要求
+  // volumeData，否则地形模式会一直显示“无计算结果”。
+  if (analysisMode.value !== '3d' || !raySourceData.value || loading.value) return null
+  if (!volumeData.value && !terrainTexture.value) return null
   try { return parseAnalyse3DTlrd(raySourceData.value) } catch { return null }
 })
 const hasTerrainVolume = computed(() => Boolean(terrainField.value) || terrainJobFields.value.some(
@@ -2082,28 +2099,18 @@ async function ensureHistoryLayerDynamicRays(layer) {
 
   const params = layer.params
   const request = (async () => {
+    // 历史声场同样默认调用二维动态声线：只请求当前切面对应方位。
+    const portalBearing = internalAzimuthToCompassBearing(desiredAzimuth)
     const payload = portalParamsFor(params, {
       range: Number(params.range),
-      sector: Number(params.sector),
       lineCount: Number(params.lineCount),
+      azimuth: portalBearing,
+      rtimeRes: 0,
     })
     const ice = params.regionType === 'ice'
-    const response = ice
-      ? await analyseIce3dDynamicRTRD(payload)
-      : await analyse3dDynamicRTRD(payload)
-    // 三维动态声线一次返回全部扇面：取与当前切面最接近的方位。
-    const adapted = adapt3dRayResponseToAzimuths(response)
-    const portalBearing = internalAzimuthToCompassBearing(desiredAzimuth)
-    let selected = null
-    let selectedDelta = Infinity
-    for (const [azimuth, entry] of adapted?.byAzimuth ?? []) {
-      const delta = azimuthDeltaDeg(azimuth, portalBearing)
-      if (delta < selectedDelta) {
-        selectedDelta = delta
-        selected = entry
-      }
-    }
-    const rayData = selected?.dynamicResponse ?? null
+    const rayData = ice
+      ? await analyseIce2dDynamicRTRD(payload)
+      : await analyse2dDynamicRTRD(payload)
     if (!rayData) return null
     // 方位已变化时丢弃过期结果，避免把旧方位的声线画到新切面上。
     if (azimuthDeltaDeg(layer.sliceAzimuthDeg, desiredAzimuth) > 1e-6) {
@@ -2627,6 +2634,8 @@ const chartRefreshToken = ref(0)
 
 /** 底部状态栏：鼠标所在经纬度 / 高程(水下为负) / 层级 */
 const coordStatus = ref({ lon: '-', lat: '-', height: '-', level: '-' })
+/** 底部状态栏帧率：采样 requestAnimationFrame 间隔，反映主线程/渲染压力。 */
+const { fps } = useFrameRate()
 let coordHandler = null
 let coordRaf = 0
 
@@ -2907,7 +2916,7 @@ const BOTTOM_TYPE_ROUTE_SAMPLE_COUNT = 180
  */
 const staticRayData = shallowRef(null)
 const rayDataByAzimuth = new Map()
-/** 三维动态声线：一次请求返回全部扇面，按方位拆分后缓存。 */
+/** 三维动态声线缓存：保留给可选模式；当前默认走二维动态声线。 */
 const ray3dByAzimuth = { static: new Map(), dynamic: new Map() }
 let ray3dRequest = null
 let ray3dToken = 0
@@ -2999,8 +3008,6 @@ let omni2dTimer = 0
 let omni2dLayerToken = 0
 /** 当前三维极坐标纹理；海面投影复用其 A 通道，保证与体渲染采用同一地形掩膜 */
 let currentVolumeTexture = null
-/** 暴露给「地形」模式的同一份已裁剪纹理，避免沙盘重复解码与地形掩膜 */
-const terrainTexture = shallowRef(null)
 /** 三维切面显示模式：off | single | multi */
 const sliceDisplayMode = ref('off')
 /** 是否启用了任意切面（单方位 / 多方位） */
@@ -3479,15 +3486,12 @@ const isRayModel = computed(() => calcParams.value.model === 'bellhop')
 /** 是否使用后端动态声线接口 */
 const useDynamicRays = computed(() => calcParams.value.rayInterface === 'dynamic')
 /**
- * 普通三维仿真可使用三维声线接口；完整信号传输的移动声源固定按当前
- * 切面调用二维动态声线，避免每个 500 m 声场站位重复计算 24 个方位面。
+ * 当前计算声场默认使用二维动态声线接口：按当前方位独立请求声线，
+ * 避免三维动态声线接口一次返回全部扇面造成的大请求与额外等待。
+ * 三维声线实现仍保留，需要时把该开关改为 true 即可恢复。
  */
-const use3dRays = computed(
-  () => isRayModel.value && !signalPlaybackMode.value && (
-    calcParams.value.regionType === 'ice' ||
-    (useDynamicRays.value && analysisMode.value === '3d')
-  )
-)
+const USE_3D_RAY_INTERFACE = false
+const use3dRays = computed(() => USE_3D_RAY_INTERFACE)
 const selectedModelLabel = computed(() => ({
   bellhop: '射线模型',
   ram: 'RAM 模型',
@@ -3627,6 +3631,13 @@ function restoreSoundResult(mode) {
   bottomTypeByAzimuth.clear()
   cached.bottomTypeByAzimuth.forEach((value, key) => bottomTypeByAzimuth.set(key, value))
   if (mode === '3d') {
+    if (cached.sourcePoint) {
+      terrainSource.value = {
+        lon: Number(cached.sourcePoint.lon),
+        lat: Number(cached.sourcePoint.lat),
+        depth: Number(cached.sourcePoint.depth_m ?? cached.sourcePoint.depth ?? calcParams.value.srcDepth),
+      }
+    }
     volumeData.value = soundField?.volume || cached.volumeData
     volumeVisible.value = true
     applyVolumeVisible(true)
@@ -3733,8 +3744,9 @@ watch(depthExaggeration, (value) => {
   }
 })
 
-// 严格最近邻开关切换时重建三维体纹理：默认不插值（bellhop_gebco 参考模式），
-// 关闭后恢复 8 倍方位插值。仅重建纹理与几何，不动声线/方位/散射点等状态。
+// 插值开关切换时重建三维体纹理：默认按 Bellhop 原始方位/距离/深度节点
+// 严格最近邻显示（每个扇区在其角区内数值一致）；关闭后使用连续体采样。
+// 仅重建纹理与几何，不动声线等状态。
 watch(
   () => volumeRenderingControls.strictNearest,
   async (strictNearest) => {
@@ -3744,8 +3756,8 @@ watch(
       const texture = decodeTlrdPolarVolume(parsed, {
         sourceLon: Number(calcParams.value.coordX),
         sourceLat: Number(calcParams.value.coordY),
-        angleInterp: strictNearest !== false ? 1 : TLRD_ANGLE_INTERP,
-        strictNearest: strictNearest !== false,
+        angleInterp: strictNearest === true ? 1 : TLRD_ANGLE_INTERP,
+        strictNearest: strictNearest === true,
       })
       try {
         await maskVolumeByTerrain(texture, viewer?.scene?.terrainProvider)
@@ -3852,7 +3864,7 @@ watch(viewerReady, (ready) => {
 // 从地形预览返回全球视图时恢复画布尺寸并触发一次重绘。
 watch(
   () => props.viewMode,
-  (mode) => {
+  (mode, previousMode) => {
     if (mode === 'terrain') {
       // 过渡途中重新进入地形时取消尚未完成的全球缩放，避免视口被淡出。
       clearTimeout(terrainLeaveTimer)
@@ -3878,6 +3890,12 @@ watch(
       return
     }
     if (!viewer || viewer.isDestroyed?.()) return
+    const directTerrainExit = previousMode === 'terrain' && !terrainLeaving.value
+    if (directTerrainExit && !cleanGlobeView.value) {
+      // 侧栏“全球视图”与滚轮缩出使用同一干净全球状态；全球端渲染资源保持释放，
+      // 避免切换瞬间重建三维纹理、历史声场和声线对象。
+      enterCleanGlobeView({ skipRendererSync: true })
+    }
     nextTick(() => {
       // 地形→全球的过渡已在起飞前 resize；避免动画开始后再次 resize 造成顿挫。
       if (!terrainLeaving.value && typeof viewer.resize === 'function') viewer.resize()
@@ -3890,6 +3908,7 @@ watch(
         setupAzimuthPointer()
         startVolumeRayAnimation()
       }
+      if (directTerrainExit && props.viewMode === 'globe') enableTerrainReturn()
       viewer.scene?.requestRender?.()
     })
   }
@@ -6961,7 +6980,7 @@ async function activateDynamicRaysForCurrentAzimuth() {
     statusText.value = ''
     chartRefreshToken.value += 1
   } catch (error) {
-    console.warn('[三维动态声线]', error?.message ?? error)
+    console.warn('[动态声线]', error?.message ?? error)
     errorText.value = `动态声线计算失败：${error?.message ?? error}`
     staticRayData.value = null
   } finally {
@@ -7160,9 +7179,9 @@ async function loadTlrdData() {
     compassBearingToInternalAzimuth(Number(calcParams.value.azimuth))
   )
   // 声源经纬度使用表单输入的 coordX / coordY
-  // 严格最近邻（默认）与 bellhop_gebco 参考工程一致：不插值、逐节点取最近原始值；
-  // 关闭后恢复 8 倍方位插值，扇区之间平滑过渡。
-  const strictNearest = volumeRenderingControls.strictNearest !== false
+  // 默认严格最近邻：方位/距离/深度均逐节点取最近原始值，方位插值关闭后
+  // 4 个扇区各自的 90° 角区内数值一致；关闭该开关才启用连续体采样。
+  const strictNearest = volumeRenderingControls.strictNearest === true
   const texture = decodeTlrdPolarVolume(parsed, {
     sourceLon: Number(calcParams.value.coordX),
     sourceLat: Number(calcParams.value.coordY),
@@ -7184,8 +7203,9 @@ async function loadTlrdData() {
   // 不再根据水深自动改写倍率，因此 1× 始终代表真实物理比例。
   depthExaggeration.value = Math.min(50, Math.max(0.5, Number(volumeRenderingControls.terrainExaggeration) || 3))
   soundField.depthExaggeration = depthExaggeration.value
-  // SoundField.setVolume 会调用 decodeFn(texture) 得到纹理再 finalize；
-  // 这里传入恒等函数，因为 texture 已经是解码结果。
+  // 地形预览使用自己的 WebGL GPU 体渲染；全球视图的 Cesium 体渲染器在
+  // 地形模式下由 syncSoundField() 释放，不会常驻 GPU。这里仍保留 CPU 侧的
+  // 体对象，供 UI 就绪状态、切面和返回全球视图时复用。
   soundField.setVolume(texture, (raw) => raw)
 
   // 模拟运行阶段只计算三维传播损失。动态声线延迟到用户点击

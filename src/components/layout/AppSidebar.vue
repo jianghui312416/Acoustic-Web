@@ -304,11 +304,11 @@
               </select>
             </label>
 
-            <!-- <label class="feature-switch">
+            <label class="feature-switch">
               <input v-model="visualControls.strictNearest" type="checkbox" @change="normalizeControls" />
               <span class="switch-track"><i></i></span>
-              <span>严格最近邻（不插值）</span>
-            </label> -->
+              <span title="默认方位/距离/深度均取最近计算节点、不插值；关闭后使用连续三维体采样">不插值（严格最近邻）</span>
+            </label>
 
             <p class="feature-section-title">dB 范围</p>
             <div class="db-control-grid">

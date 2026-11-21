@@ -77,7 +77,8 @@ test('signal arrivals stay at 50 m while the displayed sound field moves every 5
 
 test('signal playback invalidates old-depth rays and requests one dynamic 2d slice', async () => {
   assert.match(source, /function invalidateMovingSourceRayData\(\)[\s\S]*?rayLoadToken \+= 1[\s\S]*?rayDataByAzimuth\.clear\(\)[\s\S]*?staticRayData\.value = null/)
-  assert.match(source, /const use3dRays = computed\([\s\S]*?!signalPlaybackMode\.value/)
+  assert.match(source, /const USE_3D_RAY_INTERFACE = false/)
+  assert.match(source, /const use3dRays = computed\(\(\) => USE_3D_RAY_INTERFACE\)/)
   assert.match(source, /function applyVesselFieldRecord\(record\)[\s\S]*?invalidateMovingSourceRayData\(\)[\s\S]*?calcParams\.value\.srcDepth = vesselPlaybackSpectrum\.value\?\.sourceDepthM[\s\S]*?calcParams\.value\.rayInterface = 'dynamic'/)
   assert.match(source, /routePlaybackKind\.value === 'signal'[\s\S]*?scheduleRayDataForAzimuth\(sliceAzimuthDeg\.value, 0\)/)
   assert.match(source, /function request2dRay\([\s\S]*?analyse2dDynamicRTRD/)

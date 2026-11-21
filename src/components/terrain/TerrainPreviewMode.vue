@@ -72,6 +72,7 @@
       <span v-if="hover">经度 {{ hover.lon.toFixed(4) }}°　纬度 {{ hover.lat.toFixed(4) }}°　{{ hover.elevation < 0 ? '水深' : '高程' }} {{ Math.abs(hover.elevation).toFixed(0) }} m</span>
       <span v-else-if="error" class="terrain-warn">{{ error }}</span>
       <span v-else>{{ status === 'loading' ? '正在加载地形' : grid ? '地形已就绪' : '等待加载地形' }}</span>
+      <span class="terrain-fps">帧率 {{ fps }}</span>
       <div class="terrain-source" role="group" aria-label="海底高程数据源">
         <button v-for="option in BATHYMETRY_SOURCE_OPTIONS" :key="option.value" type="button"
           :class="{ active: bathymetrySourceState.source === option.value }" :title="option.title"
@@ -85,6 +86,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { useFrameRate } from '@/composables/useFrameRate.js'
 import { normalizeTerrainBounds } from '@/utils/terrainPreview.js'
 import { loadBathymetry, acousticTerrainBounds } from '@/utils/bathymetry.js'
 import { BATHYMETRY_SOURCE_OPTIONS, bathymetrySourceState, setBathymetrySource } from '@/modules/terrain/bathymetrySource.js'
@@ -290,6 +292,8 @@ const compassTicks = computed(() => {
   return ticks
 })
 
+const { fps } = useFrameRate()
+
 let resizeObserver = null
 let drawRaf = 0
 let interactionActive = false
@@ -445,10 +449,24 @@ function draw() {
   drawRaf = 0
   if (!props.active || !canvasEl.value || !grid.value) return
   const controls = sceneControls()
+  // 当前声场使用与 Cesium 完全相同的 terrainTexture 做 GPU 体渲染；
+  // 信号余量等非 TL 场仍由 Canvas 绘制。
+  const volume = props.field && !props.field.signalExcess && props.texture?.data ? props.texture : null
+  // 声源标记跟随“已经渲染出来的这份体纹理”的声源，避免旧结果与当前点选错位。
+  const volumeSource = volume?.wedgeMeta
+  const sceneSource = Number.isFinite(Number(volumeSource?.sourceLon)) && Number.isFinite(Number(volumeSource?.sourceLat))
+    ? {
+        lon: Number(volumeSource.sourceLon),
+        lat: Number(volumeSource.sourceLat),
+        depth: Number(props.source?.depth) || 0,
+      }
+    : props.source
   let paintTerrain = true
+  let gpuVolume = false
   if (terrainGl) {
     try {
-      paintTerrain = !terrainGl.render(grid.value, camera.value, controls)
+      paintTerrain = !terrainGl.render(grid.value, camera.value, controls, volume)
+      gpuVolume = terrainGl.volumeActive === true && !!volume
     } catch (error) {
       console.warn('[terrain] WebGL 地形渲染失败，回退到 Canvas 渲染：', error)
       terrainGl.dispose()
@@ -458,11 +476,13 @@ function draw() {
   lastScene = drawTerrainScene(canvasEl.value, grid.value, {
     field: props.field,
     fields: props.fields,
-    source: props.source,
+    source: sceneSource,
     receiver: terrainReceiver.value,
     camera: camera.value,
     controls,
     paintTerrain,
+    skipPrimaryVolume: gpuVolume,
+    fullResolution: true,
     meshMax: interactionActive ? INTERACTIVE_MESH_SEGMENTS : TERRAIN_MAX_MESH_SEGMENTS,
     rayScene: null,
     raySource: props.raySource,
@@ -1677,6 +1697,7 @@ onBeforeUnmount(() => {
 .terrain-legend-ticks { display: flex; justify-content: space-between; margin-top: 3px; color: #8fb8cc; font: 9px ui-monospace, monospace; }
 .terrain-status { position: absolute; bottom: 0; left: 0; right: 0; z-index: 6; height: 24px; display: flex; align-items: center; gap: 8px; padding: 0 14px; box-sizing: border-box; background: #101e30; border-top: 1px solid #304256; font-size: 10px; }
 .terrain-status i { width: 6px; height: 6px; border-radius: 50%; background: #00c8b0; }.terrain-status a { margin-left: 8px; color: #83a9c0; text-decoration: none; }.terrain-warn { color: #f1c38c; }
+.terrain-fps { color: #8fd8ff; white-space: nowrap; }
 .terrain-source { display: flex; gap: 2px; margin-left: auto; }
 .terrain-source button { padding: 1px 7px; border: 1px solid #35516a; border-radius: 3px; background: #14283c; color: #9bbdd3; font: inherit; font-size: 10px; line-height: 16px; cursor: pointer; }
 .terrain-source button:hover { border-color: #5c90b3; color: #dff6ff; }

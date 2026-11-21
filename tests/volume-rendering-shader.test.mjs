@@ -21,6 +21,13 @@ test('polar volume shader uses interpolated coverage and step-corrected opacity'
   assert.doesNotMatch(polarClass, /float stepAlphaBase/)
 })
 
+test('polar volume hard-clips below the interpolated seabed before feathering', () => {
+  assert.match(polarClass, /uniform int u_hasBottomDepth/)
+  assert.match(polarClass, /if \(depthM >= bottomM\) continue/)
+  assert.match(polarClass, /smoothstep\(0\.0, max\(8\.0, u_featherM\), bottomM - depthM\)/)
+  assert.match(polarClass, /uniforms\.hasBottomDepth = volume\.hasBottomDepth \? 1 : 0/)
+})
+
 test('polar volume integrates once per pixel and converts premultiplied accumulation for alpha blend', () => {
   assert.match(polarClass, /cull:\s*\{ enabled: true \}/)
   assert.match(polarClass, /cameraInside \? this\.renderStateInside : this\.renderState/)
