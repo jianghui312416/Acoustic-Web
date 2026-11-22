@@ -115,7 +115,7 @@ import {
   oceanCurrentOverlayActive, oceanCurrentRegional, OCEAN_CURRENT_OVERLAY_FIELD,
   regionalNoiseOverlayActive, weatherOverlayActive,
 } from '@/utils/weatherOverlay.js'
-import { SIGNAL_EXCESS_COLOR_STOPS } from '@/utils/signalExcess.js'
+import { SIGNAL_EXCESS_COLOR_STOPS, resolveSignalExcessDepthRange, resolveSignalExcessOffset } from '@/utils/signalExcess.js'
 import { signalExcessState } from '@/modules/acoustic/signalExcessState.js'
 import {
   addTrackPoint,
@@ -165,6 +165,8 @@ const props = defineProps({
   directionLineLayerId: { type: String, default: '' },
   /** 裁剪体：隐藏方位方向线箭头所指方向的半个体，露出切面。 */
   clipBody: { type: Boolean, default: false },
+  /** 信号余量渲染参数（含 NL、SE/Pd 与目标深度区间）；为空表示按普通 TL 渲染。 */
+  signalExcessParams: { type: Object, default: null },
   /** 全球视图红框选中的区域；token 变化时才重新加载，避免覆盖运行后的声源取景。 */
   initialBounds: { type: Object, default: null },
   initialBoundsToken: { type: Number, default: 0 },
@@ -417,7 +419,9 @@ function sceneControls() {
     lightAzimuthDeg: moonLight.value.azimuthDeg,
     lightAltitudeDeg: moonLight.value.altitudeDeg,
   }
-  const seActive = Boolean(props.field?.signalExcess)
+  const seParams = props.signalExcessParams
+  const seActive = Boolean(seParams)
+    || Boolean(props.field?.signalExcess)
     || (props.fields || []).some(layer => layer?.field?.signalExcess)
   if (seActive) {
     const pdMode = signalExcessState.displayMode === 'pd'
@@ -428,6 +432,20 @@ function sceneControls() {
       controls.dbMax = dbMax
     }
     controls.colorStops = SIGNAL_EXCESS_COLOR_STOPS
+    if (seParams) {
+      const depths = props.field?.grid?.depth
+        || (props.fields || []).find(layer => layer?.field)?.field?.grid?.depth
+        || []
+      const { low, high } = resolveSignalExcessDepthRange(seParams, depths)
+      controls.signalExcess = {
+        enabled: true,
+        offset: resolveSignalExcessOffset(seParams),
+        low,
+        high,
+        pd: pdMode,
+        sigma: Math.max(1e-6, Number(seParams.sigma) || 6),
+      }
+    }
   }
   return controls
 }
@@ -457,9 +475,9 @@ function draw() {
   drawRaf = 0
   if (!props.active || !canvasEl.value || !grid.value) return
   const controls = sceneControls()
-  // 当前声场使用与 Cesium 完全相同的 terrainTexture 做 GPU 体渲染；
-  // 信号余量等非 TL 场仍由 Canvas 绘制。
-  const volume = props.field && !props.field.signalExcess && props.texture?.data ? props.texture : null
+  // 当前声场（含信号余量派生模式）都使用与 Cesium 相同的 terrainTexture 做 GPU 体渲染；
+  // 信号余量在着色器里由 TL 体按 SE/Pd 变换得到，不再回退到 Canvas/Cesium。
+  const volume = props.field && props.texture?.data ? props.texture : null
   // 声源标记跟随“已经渲染出来的这份体纹理”的声源，避免旧结果与当前点选错位。
   const volumeSource = volume?.wedgeMeta
   const sceneSource = Number.isFinite(Number(volumeSource?.sourceLon)) && Number.isFinite(Number(volumeSource?.sourceLat))
@@ -470,17 +488,42 @@ function draw() {
       }
     : props.source
   let paintTerrain = true
-  let gpuVolume = false
+  // GPU 体渲染现在同时覆盖当前声场与所有可见历史声场，避免历史结果回退到
+  // Canvas 面片后出现块状/硬边，并与当前声场保持一致的透明度与海底贴合。
+  const activeLayerId = props.directionLineLayerId || 'current'
+  const clipBody = props.clipBody === true
+  const gpuVolumes = []
+  const seenVolumes = new Set()
+  if (volume) {
+    seenVolumes.add(volume)
+    gpuVolumes.push({
+      id: 'current',
+      volume,
+      clip: clipBody && activeLayerId === 'current',
+    })
+  }
+  for (const layer of (props.fields || [])) {
+    if (!layer || layer.visible === false) continue
+    if (!layer.texture?.data || seenVolumes.has(layer.texture)) continue
+    seenVolumes.add(layer.texture)
+    gpuVolumes.push({
+      id: layer.id,
+      volume: layer.texture,
+      clip: clipBody && layer.id === activeLayerId,
+    })
+  }
   if (terrainGl) {
     try {
-      paintTerrain = !terrainGl.render(grid.value, camera.value, controls, volume)
-      gpuVolume = terrainGl.volumeActive === true && !!volume
+      paintTerrain = !terrainGl.render(grid.value, camera.value, controls, gpuVolumes)
     } catch (error) {
       console.warn('[terrain] WebGL 地形渲染失败，回退到 Canvas 渲染：', error)
       terrainGl.dispose()
       terrainGl = null
     }
   }
+  const gpuLayerIds = Array.isArray(terrainGl?.renderedVolumeIds)
+    ? terrainGl.renderedVolumeIds
+    : []
   lastScene = drawTerrainScene(canvasEl.value, grid.value, {
     field: props.field,
     fields: props.fields,
@@ -489,7 +532,8 @@ function draw() {
     camera: camera.value,
     controls,
     paintTerrain,
-    skipPrimaryVolume: gpuVolume,
+    skipPrimaryVolume: gpuLayerIds.includes('current'),
+    skipLayerIds: gpuLayerIds.filter(id => id !== 'current'),
     fullResolution: true,
     meshMax: interactionActive ? INTERACTIVE_MESH_SEGMENTS : TERRAIN_MAX_MESH_SEGMENTS,
     rayScene: null,

@@ -111,6 +111,13 @@ test('disabled seabed mask replaces the lower region with the maximum dB color',
   assert.match(source, /!props\.showSeabed \|\| !props\.showSeabedMask \? createSeabedFillSeries\(p\)/)
 })
 
+test('seabed profile keeps fractional physical depth and all range samples', async () => {
+  const source = await readSource('../src/components/TransmissionLossProfileChart.vue')
+  assert.match(source, /fractionalAxisIndex\(axisDepths, depthM\)/)
+  assert.doesNotMatch(source, /nearestIndex\(axisDepths, depthM\)/)
+  assert.doesNotMatch(source, /Math\.ceil\(\(end - start\) \/ (?:36|48)\)/)
+})
+
 test('uncovered water below the TL grid is diagnosed and filled only in the display layer', async () => {
   const source = await readSource('../src/components/TransmissionLossProfileChart.vue')
   assert.match(source, /const hasUncoveredWater = Number\.isFinite\(seabedMax\) && seabedMax > tlDepthMax/)
@@ -176,6 +183,36 @@ test('a new 3d calculation archives the previous sound field as an independent l
   assert.match(source, /const terrainJobFields = computed\(\(\) => runHistoryLayers\.value\.map/)
   assert.match(source, /runHistoryLayers\.value = \[\.\.\.runHistoryLayers\.value, layer\]/)
   assert.match(source, /function syncHistoricalSoundFields\(\)/)
+})
+
+test('recomputation keeps the original field active and history fields GPU-rendered', async () => {
+  const source = await readSource('../src/views/AcousticFieldView.vue')
+  const terrain = await readSource('../src/components/terrain/TerrainPreviewMode.vue')
+  // 归档声场保留 GPU 纹理；历史图层列表把纹理传给地形 WebGL。
+  assert.match(source, /texture: currentVolumeTexture \|\| null/)
+  assert.match(source, /texture: layer\.texture \|\| null/)
+  // 再次计算后未选中其它声场时，活动声场保持为刚归档的原声场。
+  assert.match(source, /if \(!selectedProfileLayerId\.value\) \{\s*selectedProfileLayerId\.value = id/)
+  // 当前面板的二维切面按钮在查看其它声场时切到当前声场并打开。
+  assert.match(source, /const alreadyCurrent = !selectedProfileLayerId\.value/)
+  // 地形 GPU 渲染接收当前 + 历史多体，并跳过已由 GPU 绘制的 Canvas 面片。
+  assert.match(terrain, /const gpuVolumes = \[\]/)
+  assert.match(terrain, /skipLayerIds: gpuLayerIds\.filter/)
+})
+
+test('signal excess renders through the terrain GPU volume pass', async () => {
+  const terrain = await readSource('../src/components/terrain/TerrainPreviewMode.vue')
+  const view = await readSource('../src/views/AcousticFieldView.vue')
+  const shader = await readSource('../src/utils/terrainWebGL.js')
+  assert.match(view, /:signal-excess-params="signalExcessParams"/)
+  assert.match(terrain, /signalExcessParams: \{ type: Object, default: null \}/)
+  // 信号余量不再被排除在 GPU 体渲染之外。
+  assert.match(terrain, /const volume = props\.field && props\.texture\?\.data \? props\.texture : null/)
+  assert.doesNotMatch(terrain, /if \(layer\.field\?\.signalExcess\) continue/)
+  assert.match(terrain, /controls\.signalExcess = \{/)
+  // 着色器由 TL 体按 SE/Pd 变换。
+  assert.match(shader, /uniform vec4 uExcess/)
+  assert.match(shader, /float se = uExcess\.y - tl/)
 })
 
 test('drawing additional sound fields never auto-expands an already loaded terrain range', async () => {

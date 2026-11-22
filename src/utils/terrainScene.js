@@ -238,6 +238,7 @@ export function drawTerrainScene(canvas, grid, {
   paintTerrain = true,
   fullResolution = false,
   skipPrimaryVolume = false,
+  skipLayerIds = [],
 } = {}) {
   if (!canvas || !grid) return null
   const { width, height } = canvas.getBoundingClientRect()
@@ -446,6 +447,9 @@ export function drawTerrainScene(canvas, grid, {
     ...(field && source ? [{ id: 'current', field, source, visible: controls.volumeVisible !== false, primary: true }] : []),
     ...(Array.isArray(fields) ? fields : []),
   ]
+  // Layers already rendered by the GPU volume pass must not be painted again by
+  // the Canvas mesher, otherwise the blocky faces stack over the ray-marched body.
+  const gpuLayerIds = new Set(Array.isArray(skipLayerIds) ? skipLayerIds : [])
   for (const fieldLayer of fieldLayers) {
     if (!fieldLayer?.field || !fieldLayer?.source || fieldLayer.visible === false) continue
     const field = fieldLayer.field
@@ -621,7 +625,7 @@ export function drawTerrainScene(canvas, grid, {
       const hi = Math.min(row - 1, lo + 1)
       return Number(depth[lo]) + (Number(depth[hi]) - Number(depth[lo])) * (z - lo)
     }
-    const skipVolumeFaces = fieldLayer.primary && skipPrimaryVolume
+    const skipVolumeFaces = (fieldLayer.primary && skipPrimaryVolume) || gpuLayerIds.has(fieldLayer.id)
     const pushFace = (points, values, baseAlpha) => {
       if (skipVolumeFaces) return
       if (points.some(point => !point) || values.some(value => !Number.isFinite(value))) return

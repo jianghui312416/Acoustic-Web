@@ -126,7 +126,7 @@ import {
   bottomTypeLabel,
 } from '@/utils/bottomTypeModel.js'
 import RayFlowOverlay from './RayFlowOverlay.vue'
-import { resolveRayFlow, rayChartViewport } from '@/utils/rayFlow.js'
+import { fractionalAxisIndex, resolveRayFlow, rayChartViewport } from '@/utils/rayFlow.js'
 import { parseAnalyse2DRtrd } from '@/sdk/ncFieldModel.js'
 import {
   SIGNAL_EXCESS_COLOR_STOPS,
@@ -391,10 +391,12 @@ const profile = computed(() => {
     const targetMax = Math.max(currentMax, seabedMax / 0.76)
     for (let depth = currentMax + step; depth <= targetMax + step * 0.5; depth += step) axisDepths.push(depth)
   }
-  const seabed = rawSeabed.map(([i, depthM]) => [i, nearestIndex(axisDepths, depthM), depthM])
+  // Y 轴虽然仍使用 TL 深度类目，但海底边界必须保留真实物理水深在相邻
+  // 深度层之间的位置。吸附到 nearestIndex 会把连续地形量化成明显台阶。
+  const seabed = rawSeabed.map(([i, depthM]) => [i, fractionalAxisIndex(axisDepths, depthM), depthM])
   const finiteTlDepths = depthVals.map(Number).filter(Number.isFinite)
   const tlDepthMax = finiteTlDepths.length ? Math.max(...finiteTlDepths) : 0
-  const tlDepthMaxIndex = axisDepths.length ? nearestIndex(axisDepths, tlDepthMax) : 0
+  const tlDepthMaxIndex = axisDepths.length ? fractionalAxisIndex(axisDepths, tlDepthMax) : 0
   // altitudeList 的海底深度可能大于后端 profile.z 的最大 TL 深度。该区域是
   // “水体存在但没有 TL 采样”，不是海底掩膜，也不是前端 depthBottomIndex 截断。
   const hasUncoveredWater = Number.isFinite(seabedMax) && seabedMax > tlDepthMax + 1e-6
@@ -754,10 +756,8 @@ function createUncoveredWaterSeries(profileData) {
     renderItem(_params, api) {
       const topPoints = []
       const bottomPoints = []
-      const step = Math.max(1, Math.ceil((end - start) / 48))
       const indices = []
-      for (let i = start; i <= end; i += step) indices.push(i)
-      if (indices[indices.length - 1] !== end) indices.push(end)
+      for (let i = start; i <= end; i++) indices.push(i)
       for (const index of indices) {
         const bottom = Math.max(top, seabedCategoryAt(profileData, index))
         topPoints.push(api.coord([index, top]))
@@ -786,6 +786,8 @@ function createBottomMaskSeries(profileData) {
     name: '海底底质',
     type: 'custom',
     coordinateSystem: 'cartesian2d',
+    // 缩放后顶点的 api.coord 会外推到网格之外；必须裁剪，否则色块会盖住坐标轴。
+    clip: true,
     data: segments.map((segment) => ({
       value: [segment.startIndex, segment.endIndex, segment.id],
       segment,
@@ -799,10 +801,8 @@ function createBottomMaskSeries(profileData) {
       const end = Math.max(start, Math.min(profileData.dists.length - 1, segment.endIndex))
       const topPoints = []
       const bottomPoints = []
-      const step = Math.max(1, Math.ceil((end - start) / 36))
       const indices = []
-      for (let i = start; i <= end; i += step) indices.push(i)
-      if (indices[indices.length - 1] !== end) indices.push(end)
+      for (let i = start; i <= end; i++) indices.push(i)
       for (const index of indices) {
         const top = seabedCategoryAt(profileData, index)
         topPoints.push(api.coord([index, top]))
@@ -871,6 +871,8 @@ function createSeabedFillSeries(profileData) {
     name: '海底掩膜填充',
     type: 'custom',
     coordinateSystem: 'cartesian2d',
+    // 缩放/平移后同样需要裁剪到绘图区，避免填充溢出。
+    clip: true,
     data: [{ value: [0, dists.length - 1] }],
     z: 1.5,
     animation: false,
@@ -879,10 +881,8 @@ function createSeabedFillSeries(profileData) {
       const end = dists.length - 1
       const topPoints = []
       const bottomPoints = []
-      const step = Math.max(1, Math.ceil((end - start) / 36))
       const indices = []
-      for (let i = start; i <= end; i += step) indices.push(i)
-      if (indices[indices.length - 1] !== end) indices.push(end)
+      for (let i = start; i <= end; i++) indices.push(i)
       for (const index of indices) {
         const top = seabedCategoryAt(profileData, index)
         topPoints.push(api.coord([index, top]))

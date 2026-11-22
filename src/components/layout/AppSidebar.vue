@@ -304,12 +304,6 @@
               </select>
             </label>
 
-            <label class="feature-switch">
-              <input v-model="visualControls.strictNearest" type="checkbox" @change="normalizeControls" />
-              <span class="switch-track"><i></i></span>
-              <span title="开启后按原始方位/距离/深度节点显示；默认关闭以匹配二维 TL 图的连续伪彩效果">检查原始节点（最近邻）</span>
-            </label>
-
             <p class="feature-section-title">dB 范围</p>
             <div class="db-control-grid">
               <span>最小值</span><span>最大值</span>

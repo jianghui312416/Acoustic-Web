@@ -46,6 +46,7 @@
       :direction-line-visible="verticalSliceControls.east90Indicator"
       :direction-line-layer-id="profileDirectionLayerId"
       :clip-body="verticalSliceControls.clipBody"
+      :signal-excess-params="signalExcessParams"
       @arrow-azimuth="onTerrainArrowAzimuth"
       :initial-bounds="globeSelection"
       :initial-bounds-token="globeSelectionToken"
@@ -1495,6 +1496,8 @@ const JOB_LAYER_ACCENTS = Object.freeze(['#bb62ff', '#39e6d1', '#ff9d5c', '#65a8
 const terrainJobFields = computed(() => runHistoryLayers.value.map(layer => ({
   id: layer.id,
   field: layer.field,
+  // 历史声场同样携带自己的 GPU 体纹理，供地形 WebGL 多体渲染。
+  texture: layer.texture || null,
   source: layer.source,
   visible: layer.visible,
   accent: layer.accent,
@@ -1827,11 +1830,31 @@ async function openWorkspaceJob(jobId) {
     const distanceMaxKm = Math.max(...parsed.grid.distance.map(Number).filter(Number.isFinite), 0) / 1000
     const radiusKm = Math.max(0.1, Number(job.radius_km) || distanceMaxKm || 20)
     const initialAzimuth = compassBearingToInternalAzimuth(Number(parsed.grid.compassBearings?.[0]) || 0)
+    // 工作记录同样构建一份 GPU 体纹理，使历史声场也用光线步进而非 Canvas 面片。
+    let texture = null
+    try {
+      const strictNearest = volumeRenderingControls.strictNearest === true
+      texture = decodeTlrdPolarVolume(parsed, {
+        sourceLon: source.lon,
+        sourceLat: source.lat,
+        angleInterp: strictNearest ? 1 : TLRD_ANGLE_INTERP,
+        strictNearest,
+      })
+      try {
+        await maskVolumeByTerrain(texture, viewer?.scene?.terrainProvider)
+      } catch (error) {
+        console.warn('[工作声场地形掩膜] 保留接口海底裁剪：', error?.message ?? error)
+      }
+    } catch (error) {
+      console.warn('[工作声场 GPU 纹理] 构建失败，将回退到 Canvas：', error?.message ?? error)
+      texture = null
+    }
     const layer = shallowReactive({
       id,
       jobId: id,
       origin: 'workspace',
       field: parsed,
+      texture,
       source,
       radiusKm,
       visible: true,
@@ -1944,12 +1967,10 @@ function closeTerrainWindow(id) {
   if (id === 'slice') {
     terrainSliceOpen.value = false
     terrainSliceMinimized.value = false
-    // 声速剖面窗口仍打开时保留所选声场，避免关闭切面后剖面数据丢失。
-    if (!terrainProfileOpen.value) selectedProfileLayerId.value = ''
+    // 关闭窗口不改变活动声场：方向方位线仍跟随当前选中的（可能是归档的原始）声场。
   } else if (id === 'profile') {
     terrainProfileOpen.value = false
     terrainProfileMinimized.value = false
-    if (!terrainSliceOpen.value) selectedProfileLayerId.value = ''
   } else if (id === 'waveform') {
     signalTransmissionControls.showWaveform = false
     vesselWaveformMinimized.value = false
@@ -2215,8 +2236,11 @@ function toggleTerrainSettings() {
   simulationControls.sidebarOpen = !simulationControls.sidebarOpen
 }
 function toggleTerrainSlice() {
+  const alreadyCurrent = !selectedProfileLayerId.value
   selectedProfileLayerId.value = ''
-  const open = !terrainSliceOpen.value || !terrainProfileOpen.value
+  // 正在查看其它声场时，点击当前运行面板的「二维切面」应切到当前声场并打开切面，
+  // 而不是把已打开的切面窗口直接关掉。
+  const open = !(alreadyCurrent && terrainSliceOpen.value && terrainProfileOpen.value)
   terrainSliceOpen.value = open; terrainProfileOpen.value = open
   if (open) void activateDynamicRaysForCurrentAzimuth()
 }
@@ -6449,6 +6473,8 @@ function archiveCurrent3dRun() {
   const layer = shallowReactive({
     id,
     field,
+    // 保留本次声场的 GPU 体纹理，归档后仍由 GPU 光线步进渲染，不再退回 Canvas 面片。
+    texture: currentVolumeTexture || null,
     source,
     radiusKm: Math.max(.1, Number(sourceRadiusKm.value) || Number(terrainRadiusKm.value) || 20),
     visible: true,
@@ -6476,9 +6502,9 @@ function archiveCurrent3dRun() {
   }
   // 用户未主动关闭前始终保留；不按数量自动淘汰状态窗口或对应声场。
   runHistoryLayers.value = [...runHistoryLayers.value, layer]
-  // 切面 / 动态声线已打开时，让它们继续停留在刚归档的声场上，
-  // 直到用户切换到其他声场胶囊的二维传播损失。
-  if (!selectedProfileLayerId.value && terrainSliceOpen.value) {
+  // 再次计算后保持原声场为活动对象：方向方位线 / 剖切继续落在刚归档的声场上，
+  // 新结果作为独立图层显示；只有点击该图层的「二维切面」按钮才切到新声场。
+  if (!selectedProfileLayerId.value) {
     selectedProfileLayerId.value = id
   }
   soundField = viewer ? new SoundField(viewer, { depthExaggeration: depthExaggeration.value }) : null

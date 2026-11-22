@@ -121,7 +121,23 @@ void main() {
 }
 `
 
-const MAX_VOLUME_STEPS = 160
+const MAX_VOLUME_STEPS = 1024
+
+/**
+ * Conservative upper bound for the number of cells crossed by a view ray.
+ * Matching the Cesium marcher here prevents range/azimuth cells from being
+ * skipped when the depth dimension happens to be much smaller.
+ */
+export function terrainVolumeMarchStepCount(volume = {}) {
+  const rangeCells = Math.max(1, (Number(volume.width) || 2) - 1)
+  const angleCells = Math.max(1, (Number(volume.height) || 2) - 1)
+  const depthCells = Math.max(1, (Number(volume.depth) || 2) - 1)
+  const crossedCells = Math.hypot(rangeCells, angleCells, depthCells)
+  const strictNearest = volume.strictNearest === true
+  const cellStep = strictNearest ? 0.48 : 0.72
+  const maxSteps = strictNearest ? MAX_VOLUME_STEPS : 512
+  return clamp(Math.ceil(crossedCells / cellStep), 64, maxSteps)
+}
 
 const VOLUME_VERTEX_SHADER = `#version 300 es
 layout(location = 0) in vec2 aPosition;
@@ -167,11 +183,27 @@ uniform vec2 uDb;
 uniform vec2 uAlpha;
 uniform vec3 uClipInfo;
 uniform float uFeatherM;
+// 信号余量派生模式：x=启用, y=常数偏移(SL-NL-DT+AG), z=目标最小深度, w=最大深度
+uniform vec4 uExcess;
+// x=Pd 模式(0/1), y=σ
+uniform vec2 uExcessMode;
 uniform int uHasBottomDepth;
 uniform int uStrictNearest;
 uniform int uDebugNoTerrain;
 
 out vec4 fragColor;
+
+/** 标准正态累积分布 Φ(z)，与 utils/signalExcess.js 的近似式一致。 */
+float normalCdf(float z) {
+  float t = 1.0 / (1.0 + 0.2316419 * abs(z));
+  float d = 0.3989422804014327 * exp(-z * z * 0.5);
+  float cdf = 1.0 - d * t * (0.319381530
+    + t * (-0.356563782
+      + t * (1.781477937
+        + t * (-1.821255978
+          + t * 1.330274429))));
+  return z >= 0.0 ? cdf : 1.0 - cdf;
+}
 
 float sampleTerrainElevation(vec2 uv) {
   ivec2 size = textureSize(uHeightMap, 0);
@@ -190,42 +222,161 @@ float sampleTerrainElevation(vec2 uv) {
   return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
 }
 
-void main() {
-  vec2 screen = vec2((vNdc.x * 0.5 + 0.5) * uWidth, (0.5 - vNdc.y * 0.5) * uHeight);
-  if (screen.x < uScreenMin.x || screen.x > uScreenMax.x ||
-      screen.y < uScreenMin.y || screen.y > uScreenMax.y) discard;
-
+bool projectSample(float s, vec2 screen, out vec3 geoDepth) {
   float cx = uWidth * 0.5 + uPanX;
   float cy = uHeight * 0.40 + uPanY;
   float k = 0.35 * abs(uCosPitch);
   float sx = screen.x - cx;
   float sy = screen.y - cy;
+  float denom = max(0.0001, 1.0 + k * sy * uSinPitch / max(0.0001, uScale));
+  float d = (1.0 - k * s * uCosPitch) / denom;
+  if (d <= 0.0) return false;
+  float rx = sx * d / max(0.0001, uScale);
+  float q = sy * d / max(0.0001, uScale);
+  float ry = s * uCosPitch + q * uSinPitch;
+  float z = s * uSinPitch - q * uCosPitch;
+  float x = rx * uCosYaw + ry * uSinYaw;
+  float y = -rx * uSinYaw + ry * uCosYaw;
+  geoDepth = vec3(
+    uGeo.x + x * uGeo.z / max(1e-9, uGeo.w),
+    uGeo.y - y * uGeo.z,
+    -z * uHorizontalSpanM / max(0.0001, uExaggeration)
+  );
+  return true;
+}
+
+float sampleBearing(float lon, float lat) {
+  float srcLatRad = radians(uWedge.y);
+  float latRad = radians(lat);
+  float dLonRad = radians(lon - uWedge.x);
+  float bearingY = sin(dLonRad) * cos(latRad);
+  float bearingX = cos(srcLatRad) * sin(latRad)
+    - sin(srcLatRad) * cos(latRad) * cos(dLonRad);
+  return degrees(atan(bearingY, bearingX));
+}
+
+float sampleRangeM(float lon, float lat) {
+  float cosSrcLat = max(0.01, cos(radians(uWedge.y)));
+  float east = (lon - uWedge.x) * 111320.0 * cosSrcLat;
+  float north = (lat - uWedge.y) * 110574.0;
+  return length(vec2(east, north));
+}
+
+bool isClippedBearing(float bearing) {
+  float compassDelta = mod(bearing - uClipInfo.y + 360.0, 360.0);
+  return uClipInfo.x > 0.5 && compassDelta > 0.0001 && compassDelta < 180.0;
+}
+
+void main() {
+  vec2 screen = vec2((vNdc.x * 0.5 + 0.5) * uWidth, (0.5 - vNdc.y * 0.5) * uHeight);
+  if (screen.x < uScreenMin.x || screen.x > uScreenMax.x ||
+      screen.y < uScreenMin.y || screen.y > uScreenMax.y) discard;
 
   float steps = max(8.0, uSteps);
-  float ds = (uSMax - uSMin) / steps;
-  float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+  float span = max(1e-6, uSMax - uSMin);
+  float ds = span / steps;
+  float blueNoiseJitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+  // Random per-pixel offsets turn nearest-neighbor range rings into a visible
+  // stipple pattern. Sample cell centres in strict mode; retain de-correlation
+  // only for the continuously interpolated display mode.
+  float jitter = uStrictNearest == 1 ? 0.5 : blueNoiseJitter;
   ivec3 textureShape = textureSize(uVolumeTexture, 0);
   int angleRows = textureShape.y;
+  bool hasClippedSample = false;
+  float clippedS = uSMax;
+  bool hasRangeOutsideSample = false;
+  float rangeOutsideS = uSMax;
 
-  // March from near (uSMax) to far (uSMin): first valid voxel wins, like Cesium.
+  // March from near (uSMax) to far (uSMin) and composite front-to-back like
+  // Cesium's wedge renderer. A first-hit opaque shell made the acoustic body
+  // look like a solid slab; accumulating small per-step alpha instead reads as
+  // a translucent cloud and lets the seabed transition fade out naturally.
+  vec3 accumColor = vec3(0.0);
+  float accumAlpha = 0.0;
+  float nearOrder = 0.0;
+  bool hasNearDepth = false;
+  float opacity = clamp(uAlpha.x, 0.0, 1.0);
+  if (opacity <= 0.003) discard;
+  // Optical density per full ray length; keeps opacity stable across zoom/angle.
+  const float STEP_DENSITY = 2.4;
+
   for (int i = 0; i < ${MAX_VOLUME_STEPS}; i++) {
     if (float(i) >= steps) break;
     float s = uSMax - (float(i) + jitter) * ds;
 
-    // Invert the terrain pseudo-perspective projection for parameter s.
-    float denom = max(0.0001, 1.0 + k * sy * uSinPitch / max(0.0001, uScale));
-    float d = (1.0 - k * s * uCosPitch) / denom;
-    if (d <= 0.0) continue;
-    float rx = sx * d / max(0.0001, uScale);
-    float q = sy * d / max(0.0001, uScale);
-    float ry = s * uCosPitch + q * uSinPitch;
-    float z = s * uSinPitch - q * uCosPitch;
-    float x = rx * uCosYaw + ry * uSinYaw;
-    float y = -rx * uSinYaw + ry * uCosYaw;
+    vec3 geoDepth;
+    if (!projectSample(s, screen, geoDepth)) continue;
+    float lon = geoDepth.x;
+    float lat = geoDepth.y;
+    float depthM = geoDepth.z;
 
-    float lon = uGeo.x + x * uGeo.z / max(1e-9, uGeo.w);
-    float lat = uGeo.y - y * uGeo.z;
-    float depthM = -z * uHorizontalSpanM / max(0.0001, uExaggeration);
+    float bearing = sampleBearing(lon, lat);
+    if (isClippedBearing(bearing)) {
+      clippedS = s;
+      hasClippedSample = true;
+      continue;
+    }
+
+    // The first retained sample after the discarded half is moved to the
+    // mathematical clip plane. Without this bracket search, a nearest-neighbor
+    // ray step leaves a jagged radial seam at oblique camera angles.
+    if (uClipInfo.x > 0.5 && hasClippedSample) {
+      float outsideS = clippedS;
+      float insideS = s;
+      for (int cutStep = 0; cutStep < 8; cutStep++) {
+        float middleS = mix(outsideS, insideS, 0.5);
+        vec3 middleGeoDepth;
+        if (!projectSample(middleS, screen, middleGeoDepth)) {
+          outsideS = middleS;
+          continue;
+        }
+        if (isClippedBearing(sampleBearing(middleGeoDepth.x, middleGeoDepth.y))) {
+          outsideS = middleS;
+        } else {
+          insideS = middleS;
+        }
+      }
+      s = insideS;
+      if (!projectSample(s, screen, geoDepth)) continue;
+      lon = geoDepth.x;
+      lat = geoDepth.y;
+      depthM = geoDepth.z;
+      bearing = sampleBearing(lon, lat);
+      hasClippedSample = false;
+    }
+
+    float rangeM = sampleRangeM(lon, lat);
+    if (rangeM > uPath.y) {
+      rangeOutsideS = s;
+      hasRangeOutsideSample = true;
+      continue;
+    }
+
+    // Locate the cylindrical entry surface instead of coloring the first
+    // arbitrary march sample after it. This keeps nearest depth/range indices
+    // stable across adjacent pixels and removes contour-like side-wall noise.
+    if (hasRangeOutsideSample) {
+      float outsideS = rangeOutsideS;
+      float insideS = s;
+      for (int rangeStep = 0; rangeStep < 8; rangeStep++) {
+        float middleS = mix(outsideS, insideS, 0.5);
+        vec3 middleGeoDepth;
+        if (!projectSample(middleS, screen, middleGeoDepth)
+            || sampleRangeM(middleGeoDepth.x, middleGeoDepth.y) > uPath.y) {
+          outsideS = middleS;
+        } else {
+          insideS = middleS;
+        }
+      }
+      s = insideS;
+      if (!projectSample(s, screen, geoDepth)) continue;
+      lon = geoDepth.x;
+      lat = geoDepth.y;
+      depthM = geoDepth.z;
+      bearing = sampleBearing(lon, lat);
+      rangeM = sampleRangeM(lon, lat);
+      hasRangeOutsideSample = false;
+    }
 
     vec2 terrainUv = vec2(
       (lon - uTerrain.x) / max(1e-9, uTerrain.y - uTerrain.x),
@@ -236,21 +387,6 @@ void main() {
     float waterDepth = max(0.0, -terrainElev);
     if (uDebugNoTerrain == 0 && depthM >= waterDepth) continue;
 
-    float srcLatRad = radians(uWedge.y);
-    float latRad = radians(lat);
-    float dLonRad = radians(lon - uWedge.x);
-    float cosSrcLat = max(0.01, cos(srcLatRad));
-    float east = (lon - uWedge.x) * 111320.0 * cosSrcLat;
-    float north = (lat - uWedge.y) * 110574.0;
-    float rangeM = length(vec2(east, north));
-    if (rangeM > uPath.y) continue;
-    float bearingY = sin(dLonRad) * cos(latRad);
-    float bearingX = cos(srcLatRad) * sin(latRad) - sin(srcLatRad) * cos(latRad) * cos(dLonRad);
-    float bearing = degrees(atan(bearingY, bearingX));
-    if (uClipInfo.x > 0.5) {
-      float compassDelta = mod(bearing - uClipInfo.y + 360.0, 360.0);
-      if (compassDelta > 0.0001 && compassDelta < 180.0) continue;
-    }
     float angleSpan = max(0.001, uWedge.w - uWedge.z);
     float angleNorm = mod(bearing - uWedge.z + 720.0, 360.0) / angleSpan;
     if (angleNorm < 0.0 || angleNorm > 1.0) continue;
@@ -261,21 +397,23 @@ void main() {
       angleNorm = 0.0;
     }
     if (depthM < uPath.z || depthM > uPath.w) continue;
+    // Signal-excess mode only keeps the target depth band, matching the SE field.
+    if (uExcess.x > 0.5 && (depthM < uExcess.z || depthM > uExcess.w)) continue;
     float depthNorm = (depthM - uPath.z) / max(1.0, uPath.w - uPath.z);
 
+    int rangeIndex = clamp(
+      int(floor(pathNorm * float(textureShape.x - 1) + 0.5)),
+      0,
+      textureShape.x - 1
+    );
+    int angleIndex = int(floor(angleNorm * float(angleRows) + 0.5)) % angleRows;
+    int depthIndex = clamp(
+      int(floor(depthNorm * float(textureShape.z - 1) + 0.5)),
+      0,
+      textureShape.z - 1
+    );
     vec4 voxel;
     if (uStrictNearest == 1) {
-      int rangeIndex = clamp(
-        int(floor(pathNorm * float(textureShape.x - 1) + 0.5)),
-        0,
-        textureShape.x - 1
-      );
-      int angleIndex = int(floor(angleNorm * float(angleRows) + 0.5)) % angleRows;
-      int depthIndex = clamp(
-        int(floor(depthNorm * float(textureShape.z - 1) + 0.5)),
-        0,
-        textureShape.z - 1
-      );
       voxel = texelFetch(uVolumeTexture, ivec3(rangeIndex, angleIndex, depthIndex), 0);
     } else {
       voxel = texture(
@@ -283,29 +421,112 @@ void main() {
         clamp(vec3(pathNorm, angleNorm, depthNorm), vec3(0.001), vec3(0.999))
       );
     }
-    float coverage = smoothstep(0.015, 0.92, voxel.a);
-    float effectiveBottomM = 1e20;
-    if (uDebugNoTerrain == 0) effectiveBottomM = waterDepth;
-    if (uHasBottomDepth == 1 && uDebugNoTerrain == 0) {
-      effectiveBottomM = min(effectiveBottomM, mix(uPath.z, uPath.w, voxel.g));
+
+    // The acoustic bottom (G channel) can sit above the displayed seabed, which
+    // made the body stop in mid-water and look like it was floating. Drape the
+    // visual bottom onto the sampled seabed instead, capped at the data depth.
+    // Where the terrain is deeper than the acoustic bottom, reuse the last valid
+    // TL layer (the Canvas renderer's bottomTl fallback) and taper it so the
+    // extended part reads as a soft seafloor contact rather than a solid column.
+    float dataBottomM = uHasBottomDepth == 1
+      ? mix(uPath.z, uPath.w, voxel.g)
+      : uPath.w;
+    float visualBottomM = dataBottomM;
+    float bottomTaper = 1.0;
+    if (uDebugNoTerrain == 0) {
+      visualBottomM = min(waterDepth, uPath.w);
+      if (depthM > dataBottomM) {
+        float bottomNorm = clamp(
+          (dataBottomM - uPath.z) / max(1.0, uPath.w - uPath.z), 0.0, 1.0
+        );
+        int bottomIndex = clamp(
+          int(floor(bottomNorm * float(textureShape.z - 1) + 0.5)),
+          0,
+          textureShape.z - 1
+        );
+        if (uStrictNearest == 1) {
+          voxel = texelFetch(uVolumeTexture, ivec3(rangeIndex, angleIndex, bottomIndex), 0);
+        } else {
+          voxel = texture(
+            uVolumeTexture,
+            clamp(vec3(pathNorm, angleNorm, bottomNorm), vec3(0.001), vec3(0.999))
+          );
+        }
+        bottomTaper = mix(
+          1.0, 0.35,
+          smoothstep(dataBottomM, max(dataBottomM + 1.0, visualBottomM), depthM)
+        );
+      }
     }
-    if (effectiveBottomM < 1e19) {
-      if (depthM >= effectiveBottomM) continue;
-      coverage *= smoothstep(0.0, max(8.0, uFeatherM), effectiveBottomM - depthM);
+    if (depthM >= visualBottomM) continue;
+
+    float coverage = smoothstep(0.015, 0.92, voxel.a);
+    vec3 volumeCoord = vec3(pathNorm, angleNorm, depthNorm);
+    vec3 edgeWidth = min(
+      vec3(0.12),
+      vec3(1.5) / max(vec3(textureShape), vec3(1.0))
+    );
+    vec3 edgeLow = smoothstep(vec3(0.0), edgeWidth, volumeCoord);
+    vec3 edgeHigh = smoothstep(vec3(0.0), edgeWidth, vec3(1.0) - volumeCoord);
+    float angleEdge = angleSpan >= 359.5 ? 1.0 : edgeLow.y * edgeHigh.y;
+    float rangeEdge = uStrictNearest == 1 ? 1.0 : edgeHigh.x;
+    // Feather both depth ends like Cesium so the water-surface cap and the deep
+    // cap are soft slices instead of hard discs.
+    coverage *= min(min(rangeEdge, angleEdge), edgeLow.z * edgeHigh.z);
+    // Feather the draped bottom into the seabed so the contact is soft and free
+    // of z-fighting while still reaching the terrain.
+    coverage *= bottomTaper * smoothstep(0.0, max(8.0, uFeatherM), visualBottomM - depthM);
+    // Signal-excess band edges: keep only the target depth window but soften the
+    // top/bottom so the switched-on SE body does not look like a hard slab.
+    if (uExcess.x > 0.5) {
+      float bandFeather = max(8.0, uFeatherM);
+      coverage *= smoothstep(0.0, bandFeather, depthM - uExcess.z);
+      coverage *= smoothstep(0.0, bandFeather, uExcess.w - depthM);
     }
     if (coverage <= 0.001) continue;
     float tl = mix(uValue.x, uValue.y, voxel.r);
+    // Signal excess is a per-voxel transform of TL: SE = offset - TL, optionally
+    // mapped to detection probability Pd = Φ(SE/σ). Derived in-shader so the
+    // existing GPU TL texture can be reused without a second 3D texture.
+    float value = tl;
+    if (uExcess.x > 0.5) {
+      float se = uExcess.y - tl;
+      if (uExcessMode.x > 0.5) {
+        value = normalCdf(se / max(1e-6, uExcessMode.y)) * 100.0;
+      } else {
+        value = se;
+      }
+    }
     // uDb is a color-mapping range, not a visibility filter. Values above the
     // selected upper bound remain visible and use the last LUT color.
-    float displayRatio = clamp((tl - uDb.x) / max(1.0, uDb.y - uDb.x), 0.0, 1.0);
+    float displayRatio = clamp((value - uDb.x) / max(1.0, uDb.y - uDb.x), 0.0, 1.0);
     if (uStrictNearest == 0) displayRatio = pow(displayRatio, 0.82);
     vec3 color = texture(uColorLut, vec2(displayRatio, 0.5)).rgb;
-    float alpha = clamp(uAlpha.x, 0.0, 1.0) * 0.85;
-    if (alpha <= 0.003) continue;
-    fragColor = vec4(color, alpha);
-    return;
+
+    // Remember the first contributing sample's projected depth so the terrain
+    // depth buffer can still let foreground ridges occlude the acoustic body.
+    if (!hasNearDepth) {
+      float hitX = (lon - uGeo.x) * uGeo.w / max(1e-9, uGeo.z);
+      float hitY = (uGeo.y - lat) / max(1e-9, uGeo.z);
+      float hitZ = -depthM * uExaggeration / max(1.0, uHorizontalSpanM);
+      nearOrder = hitX * uSinYaw + hitY * uCosYaw + hitZ * 0.3;
+      hasNearDepth = true;
+    }
+
+    // Alpha is normalised by the marched span, so the total optical depth stays
+    // constant regardless of zoom or camera angle.
+    float stepAlpha = clamp(opacity * coverage * STEP_DENSITY * ds / span, 0.0, 1.0);
+    accumColor += (1.0 - accumAlpha) * color * stepAlpha;
+    accumAlpha += (1.0 - accumAlpha) * stepAlpha;
+    if (accumAlpha >= 0.985) break;
   }
-  discard;
+  if (accumAlpha <= 0.002) discard;
+  // Terrain has already populated the depth buffer. Writing the near-entry
+  // pseudo-depth keeps foreground relief in front while the composited body
+  // stays visible through open water.
+  gl_FragDepth = clamp(0.5 - nearOrder * 0.5, 0.0001, 0.9999);
+  // Un-premultiply for straight-alpha blending.
+  fragColor = vec4(accumColor / accumAlpha, accumAlpha);
 }
 `
 
@@ -316,7 +537,7 @@ const VOLUME_UNIFORM_NAMES = [
   'uExaggeration', 'uHorizontalSpanM',
   'uScreenMin', 'uScreenMax', 'uSMin', 'uSMax', 'uSteps',
   'uGeo', 'uTerrain', 'uWedge', 'uPath', 'uValue', 'uDb', 'uAlpha',
-  'uClipInfo', 'uFeatherM', 'uHasBottomDepth', 'uStrictNearest', 'uDebugNoTerrain',
+  'uClipInfo', 'uFeatherM', 'uExcess', 'uExcessMode', 'uHasBottomDepth', 'uStrictNearest', 'uDebugNoTerrain',
 ]
 const UNIFORM_NAMES = [
   'uWidth', 'uHeight', 'uScale', 'uPanX', 'uPanY',
@@ -403,9 +624,11 @@ export class TerrainWebGLRenderer {
       this.volumeProgram = null
     }
     this.volumeActive = false
-    this.volumeTexture = null
-    this.volumeTextureKey = null
-    this.volumeDataRef = null
+    // Per-layer 3D textures (keyed by the volume descriptor object) so the
+    // current field and every visible historical field can be ray-marched with
+    // the GPU instead of falling back to the blocky Canvas mesh.
+    this.volumeTextures = new Map()
+    this.renderedVolumeIds = []
     this.heightTexture = gl.createTexture()
     gl.bindTexture(gl.TEXTURE_2D, this.heightTexture)
     // R32F terrain is sampled with explicit bilinear texelFetch in the volume shader,
@@ -479,14 +702,17 @@ export class TerrainWebGLRenderer {
     this.disposeVolumeGeometry()
     if (this.colorTexture) this.gl.deleteTexture(this.colorTexture)
     if (this.shadowTexture) this.gl.deleteTexture(this.shadowTexture)
-    if (this.volumeTexture) this.gl.deleteTexture(this.volumeTexture)
+    if (this.volumeTextures) {
+      for (const entry of this.volumeTextures.values()) this.gl.deleteTexture(entry.texture)
+      this.volumeTextures.clear()
+    }
     if (this.heightTexture) this.gl.deleteTexture(this.heightTexture)
     if (this.colorLutTexture) this.gl.deleteTexture(this.colorLutTexture)
     if (this.program) this.gl.deleteProgram(this.program)
     if (this.volumeProgram) this.gl.deleteProgram(this.volumeProgram)
     this.colorTexture = null
     this.shadowTexture = null
-    this.volumeTexture = null
+    this.volumeTextures = null
     this.heightTexture = null
     this.colorLutTexture = null
     this.shadowMask = null
@@ -686,13 +912,18 @@ export class TerrainWebGLRenderer {
   }
 
   ensureVolumeTexture(volume) {
-    if (!volume?.data || !(volume.width > 0) || !(volume.height > 0) || !(volume.depth > 0)) return false
+    if (!volume?.data || !(volume.width > 0) || !(volume.height > 0) || !(volume.depth > 0)) return null
+    if (!this.volumeTextures) this.volumeTextures = new Map()
     const gl = this.gl
     const meta = volume.wedgeMeta ?? {}
     const key = `${volume.width}x${volume.height}x${volume.depth}:${volume.textureFilter}:${volume.valueMin}:${volume.valueMax}:${meta.sourceLon},${meta.sourceLat},${meta.pathMinM},${meta.pathMaxM},${meta.angleMin},${meta.angleMax},${meta.depthMinM},${meta.depthMaxM}`
-    if (this.volumeTexture && this.volumeTextureKey === key && this.volumeDataRef === volume.data) return true
-    if (!this.volumeTexture) this.volumeTexture = gl.createTexture()
-    gl.bindTexture(gl.TEXTURE_3D, this.volumeTexture)
+    let entry = this.volumeTextures.get(volume)
+    if (!entry) {
+      entry = { texture: gl.createTexture(), key: null, dataRef: null }
+      this.volumeTextures.set(volume, entry)
+    }
+    if (entry.key === key && entry.dataRef === volume.data) return entry.texture
+    gl.bindTexture(gl.TEXTURE_3D, entry.texture)
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
     gl.texImage3D(
       gl.TEXTURE_3D, 0, gl.RGBA8,
@@ -707,9 +938,9 @@ export class TerrainWebGLRenderer {
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE)
-    this.volumeTextureKey = key
-    this.volumeDataRef = volume.data
-    return true
+    entry.key = key
+    entry.dataRef = volume.data
+    return entry.texture
   }
 
   ensureVolumeGeometry() {
@@ -733,21 +964,31 @@ export class TerrainWebGLRenderer {
     this.volumeGeometryKey = 'fullscreen'
   }
 
-  renderVolume(grid, volume, controls, view) {
+  renderVolume(grid, volume, controls, view, clip = null) {
     const gl = this.gl
-    this.volumeActive = false
     if (!this.volumeProgram || !volume) return false
+    // TerrainPreviewMode computes alphaScale with the same 0..1 normalizer used
+    // by the Cesium renderer. Prefer that shared runtime value so switching
+    // views cannot leave the regional GPU pass one opacity update behind.
+    const opacityValue = Number.isFinite(Number(controls?.alphaScale))
+      ? Number(controls.alphaScale)
+      : Number(controls?.opacity)
     const opacity = clamp(
-      Number.isFinite(Number(controls?.opacity)) ? Number(controls.opacity) : 1,
+      Number.isFinite(opacityValue) ? opacityValue : 1,
       0,
       1,
     )
     if (opacity <= 0) return false
-    if (!this.ensureVolumeTexture(volume)) return false
+    const volumeTexture = this.ensureVolumeTexture(volume)
+    if (!volumeTexture) return false
     this.ensureHeightTexture(grid)
     this.ensureVolumeColorLut(controls)
     this.ensureVolumeGeometry()
     if (!this.volumeGeometry) return false
+
+    // Only the active field (the one carrying the direction line) is clipped
+    // when the body is cut in half; other visible fields stay whole.
+    const clipVolume = clip === null ? controls?.clipGpuVolume === true : clip === true
 
     const meta = volume.wedgeMeta ?? {}
     const b = grid.bounds
@@ -806,7 +1047,7 @@ export class TerrainWebGLRenderer {
     gl.uniform2f(u.uScreenMax, sxMax + 2, syMax + 2)
     gl.uniform1f(u.uSMin, sMin)
     gl.uniform1f(u.uSMax, sMax)
-    const stepCount = Math.min(160, Math.max(64, (Number(volume.depth) || 64) * 2))
+    const stepCount = terrainVolumeMarchStepCount(volume)
     gl.uniform1f(u.uSteps, stepCount)
     gl.uniform4f(u.uGeo, centerLon, centerLat, view.span, view.cosLat)
     gl.uniform4f(u.uTerrain, b.west, b.east, b.south, b.north)
@@ -835,16 +1076,37 @@ export class TerrainWebGLRenderer {
     const compassAzimuth = Number.isFinite(internalAzimuth)
       ? ((90 - internalAzimuth) % 360 + 360) % 360
       : 0
-    gl.uniform3f(u.uClipInfo, controls?.clipGpuVolume === true ? 1 : 0, compassAzimuth, 0)
+    gl.uniform3f(u.uClipInfo, clipVolume ? 1 : 0, compassAzimuth, 0)
+    // Seabed contact feather. Keep it tight so the draped bottom actually
+    // reaches the terrain; compositing already provides the soft falloff.
     const featherSpan = Math.max(1, depthMax - depthMin)
-    gl.uniform1f(u.uFeatherM, Math.max(8, Math.min(160, featherSpan * 0.25)))
+    gl.uniform1f(u.uFeatherM, Math.max(8, Math.min(60, featherSpan * 0.12)))
+    // Signal-excess derivation uniforms (disabled => plain TL rendering).
+    const excess = controls?.signalExcess
+    if (excess?.enabled) {
+      const low = Number.isFinite(Number(excess.low)) ? Number(excess.low) : depthMin
+      const high = Number.isFinite(Number(excess.high)) ? Number(excess.high) : depthMax
+      gl.uniform4f(
+        u.uExcess, 1,
+        Number.isFinite(Number(excess.offset)) ? Number(excess.offset) : 0,
+        low, Math.max(low, high),
+      )
+      gl.uniform2f(
+        u.uExcessMode,
+        excess.pd === true ? 1 : 0,
+        Math.max(1e-6, Number(excess.sigma) || 6),
+      )
+    } else {
+      gl.uniform4f(u.uExcess, 0, 0, 0, 0)
+      gl.uniform2f(u.uExcessMode, 0, 6)
+    }
     gl.uniform1i(u.uHasBottomDepth, volume.hasBottomDepth ? 1 : 0)
     const debug = globalThis.__acousticVolumeDebug ?? {}
     gl.uniform1i(u.uStrictNearest, volume.strictNearest === true ? 1 : 0)
     gl.uniform1i(u.uDebugNoTerrain, debug.disableTerrainClip === true ? 1 : 0)
 
     gl.activeTexture(gl.TEXTURE0)
-    gl.bindTexture(gl.TEXTURE_3D, this.volumeTexture)
+    gl.bindTexture(gl.TEXTURE_3D, volumeTexture)
     gl.uniform1i(u.uVolumeTexture, 0)
     gl.activeTexture(gl.TEXTURE1)
     gl.bindTexture(gl.TEXTURE_2D, this.heightTexture)
@@ -853,7 +1115,11 @@ export class TerrainWebGLRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.colorLutTexture)
     gl.uniform1i(u.uColorLut, 2)
 
-    gl.disable(gl.DEPTH_TEST)
+    // Terrain has already populated the depth buffer. Volume fragments write
+    // matching projected depths in the shader, so foreground relief remains
+    // in front while the acoustic body is visible through open water.
+    gl.enable(gl.DEPTH_TEST)
+    gl.depthFunc(gl.LESS)
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
     gl.depthMask(false)
@@ -862,9 +1128,7 @@ export class TerrainWebGLRenderer {
     gl.bindVertexArray(null)
     gl.depthMask(true)
     gl.disable(gl.BLEND)
-    gl.enable(gl.DEPTH_TEST)
     gl.activeTexture(gl.TEXTURE0)
-    this.volumeActive = true
     return true
   }
 
@@ -1007,10 +1271,38 @@ export class TerrainWebGLRenderer {
 
     // 地形之后绘制体，并关闭伪深度测试：避免不同拖拽角度下整块声场被
     // 地形深度误判而消失；海底以下仍由片元着色器按真实水深裁剪。
-    this.renderVolume(grid, volume, controls, {
+    const view = {
       width, height, scale, panX, panY, cosYaw, sinYaw, cosPitch, sinPitch,
       exaggeration, horizontalSpanM, span, cosLat, halfX, halfY,
-    })
+    }
+    // Accept a single volume (legacy) or a list of { id, volume, clip } entries.
+    const entries = Array.isArray(volume)
+      ? volume.map(item => (item && item.volume ? item : { volume: item })).filter(item => item.volume)
+      : (volume ? [{ volume, clip: controls?.clipGpuVolume === true }] : [])
+    // Release textures for fields that are no longer visible so a long session
+    // with many archived fields does not leak 3D textures.
+    if (this.volumeTextures) {
+      const active = new Set(entries.map(entry => entry.volume))
+      for (const [textureVolume, entry] of this.volumeTextures) {
+        if (active.has(textureVolume)) continue
+        gl.deleteTexture(entry.texture)
+        this.volumeTextures.delete(textureVolume)
+      }
+    }
+    this.volumeActive = false
+    this.renderedVolumeIds = []
+    for (const entry of entries) {
+      if (this.renderVolume(
+        grid,
+        entry.volume,
+        controls,
+        view,
+        entry.clip === undefined ? null : entry.clip === true,
+      )) {
+        this.volumeActive = true
+        if (entry.id != null) this.renderedVolumeIds.push(entry.id)
+      }
+    }
     return true
   }
 }

@@ -105,8 +105,8 @@ export const volumeRenderingControls = reactive({
   sampling: 0.01,
   alphaPower: 1.3,
   colormap: 'bellhop',
-  /** 默认连续采样，与二维 TL 图的平滑伪彩显示一致；需要检查原始节点时可手动开启最近邻。 */
-  strictNearest: false,
+  /** 体绘制固定按原始方位/距离/深度节点（最近邻）显示，不再提供插值开关。 */
+  strictNearest: true,
   /** 参考工程 fieldColor 的 TL 映射域为 45–128 dB，默认 dB 范围与之对齐。 */
   dbMin: 45,
   dbMax: 128,
@@ -152,7 +152,8 @@ export function clampVolumeRenderingControls(controls = volumeRenderingControls)
   controls.opacity = clamp(controls.opacity, 0, 1, 1)
   controls.sampling = clamp(controls.sampling, 0.004, 0.03, 0.01)
   controls.alphaPower = clamp(controls.alphaPower, 0.35, 3, 1.3)
-  controls.strictNearest = controls.strictNearest === true
+  // 最近邻为固定行为（接口已移除开关），这里强制保持，避免旧设置残留为插值模式。
+  controls.strictNearest = true
   controls.dbMin = clamp(controls.dbMin, 0, 199, 45)
   controls.dbMax = clamp(controls.dbMax, controls.dbMin + 1, 200, 128)
   controls.rotationX = clamp(controls.rotationX, 0, 359, 0)
