@@ -9,8 +9,8 @@ const {
   volumeRenderingControls,
 } = await import('../src/modules/acoustic/volumeRenderingControls.js')
 
-test('strict nearest-neighbor volume rendering is the default display mode', () => {
-  assert.equal(volumeRenderingControls.strictNearest, true)
+test('smooth volume sampling is the default display mode', () => {
+  assert.equal(volumeRenderingControls.strictNearest, false)
 })
 
 test('volume menu exposes translated color maps and returns isolated SDK stops', () => {
@@ -41,7 +41,7 @@ test('volume menu values are clamped to safe rendering ranges', () => {
   clampVolumeRenderingControls(controls)
   assert.equal(controls.terrainExaggeration, 50)
   assert.equal(controls.terrainBrightness, 4)
-  assert.equal(controls.opacity, 0.2)
+  assert.equal(controls.opacity, 0)
   assert.equal(controls.sampling, 0.03)
   assert.equal(controls.alphaPower, 0.35)
   assert.equal(controls.dbMin, 199)
@@ -50,11 +50,13 @@ test('volume menu values are clamped to safe rendering ranges', () => {
   assert.equal(controls.rotationY, 0)
   assert.equal(controls.moveX, 100000)
   assert.equal(controls.moveY, -100000)
-  assert.equal(controls.strictNearest, true)
+  assert.equal(controls.strictNearest, false)
 })
 
-test('opacity control keeps the established default while compressing slider extremes', () => {
-  assert.ok(Math.abs(opacityControlToAlphaScale(1.7) - 0.42) < 1e-9)
-  assert.ok(opacityControlToAlphaScale(0.2) > 0.1)
-  assert.ok(opacityControlToAlphaScale(5) < 0.8)
+test('opacity control has exact zero-to-one semantics', () => {
+  assert.equal(opacityControlToAlphaScale(-1), 0)
+  assert.equal(opacityControlToAlphaScale(0), 0)
+  assert.equal(opacityControlToAlphaScale(0.45), 0.45)
+  assert.equal(opacityControlToAlphaScale(1), 1)
+  assert.equal(opacityControlToAlphaScale(5), 1)
 })

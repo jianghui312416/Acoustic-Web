@@ -285,8 +285,8 @@
 
             <p class="feature-section-title">外观</p>
             <label class="feature-slider">
-              <span>透明度 <b>{{ formatControl(visualControls.opacity, 1) }}</b></span>
-              <input v-model.number="visualControls.opacity" type="range" min="0.2" max="5" step="0.1" @input="normalizeControls" />
+              <span>透明度 α <b>{{ formatControl(visualControls.opacity, 2) }}</b></span>
+              <input v-model.number="visualControls.opacity" type="range" min="0" max="1" step="0.01" @input="normalizeControls" />
             </label>
             <label class="feature-slider">
               <span title="归一化纹理坐标中的最大步长；实际步长会按三维体素分辨率自适应缩小">最大采样步长 <b>{{ formatControl(visualControls.sampling, 3) }}</b></span>
@@ -307,7 +307,7 @@
             <label class="feature-switch">
               <input v-model="visualControls.strictNearest" type="checkbox" @change="normalizeControls" />
               <span class="switch-track"><i></i></span>
-              <span title="默认方位/距离/深度均取最近计算节点、不插值；关闭后使用连续三维体采样">不插值（严格最近邻）</span>
+              <span title="开启后按原始方位/距离/深度节点显示；默认关闭以匹配二维 TL 图的连续伪彩效果">检查原始节点（最近邻）</span>
             </label>
 
             <p class="feature-section-title">dB 范围</p>

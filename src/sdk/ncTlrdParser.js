@@ -21,9 +21,8 @@
  *   - 每行 col 个值，对应 profile.x（水平距离，米）
  *   - 值 = 传播损失 TL（dB）
  *
- * 无效值语义：
- *   - 200  ：水体未覆盖（声线未覆盖 / 未参与解算）。保留在 CPU 原始结果中供诊断，
- *            但体纹理解码时始终作为透明 NoData，禁止参与插值。
+ * 显示值语义：
+ *   - 200  ：保留在 CPU 原始结果与体纹理中，按当前色标上限颜色显示。
  *   - 9999 ：海底以下与陆地部分（超出该扇区海深范围），渲染前剔除。
  *
  * 数据本身不含经纬度，声源位置与方位基准由调用方指定。
@@ -35,7 +34,7 @@ export const TLRD_DEFAULT_SOURCE = { lon: 119, lat: 19.1 }
 /** 标准格式的插件名，用于在 Units 中筛选传播损失单元 */
 export const TLRD_PLUGIN = 'Analyse3DTLRD'
 
-/** 水体内无效值（声线未覆盖 / 未参与解算） */
+/** 历史水体未覆盖哨兵；显示时按普通有限值保留，并钳制到色标上限 */
 export const TLRD_INVALID_WATER = 200
 
 /** 海底以下与陆地部分的无效值（超出海深范围） */
@@ -49,14 +48,14 @@ const M_PER_DEG_LAT = 110574
 const M_PER_DEG_LON = 111320
 
 /**
- * 判断 TL 值是否有效（排除水体无效值与海底以下/陆地无效值）。
+ * 判断 TL 值是否可显示（除海底以下/陆地 9999 外，所有有限值均保留）。
  * @param {number} v - 原始 TL 值
  * @returns {boolean} true = 有效
  */
 export function isTlrdValidValue(v) {
   const n = Number(v)
   if (!Number.isFinite(n)) return false
-  return n !== TLRD_INVALID_WATER && n !== TLRD_INVALID_SUBSTRATE
+  return n !== TLRD_INVALID_SUBSTRATE
 }
 
 /**
@@ -456,7 +455,8 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
   const depthMinM = depthValues[0] ?? 0
   const depthMaxM = depthValues[depthValues.length - 1] ?? depthMinM + 1
 
-  // 值域：仅统计有效体素（200 / 9999 已在上一步被剔除）
+  // 值域统计排除历史值 200，避免它抬高自动范围；200 仍写入纹理并钳制到末端。
+  // 9999 / 海底以下已在解析阶段变为 NaN，不参与纹理解码。
   let vMin = Number.isFinite(parsed.stats.valueMin) ? parsed.stats.valueMin : Infinity
   let vMax = Number.isFinite(parsed.stats.valueMax) ? parsed.stats.valueMax : -Infinity
   if (!Number.isFinite(vMin) || !Number.isFinite(vMax) || vMax <= vMin) {
@@ -538,9 +538,10 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
         const v1 = tl[base1 + ix]
         let v
         let coverage = 0
-        // 200 是水体未覆盖哨兵，任何模式都不得当成 200 dB 有效声场参与插值。
-        const valid0 = v0 === v0 && v0 !== TLRD_INVALID_WATER
-        const valid1 = v1 === v1 && v1 !== TLRD_INVALID_WATER
+        // 色标范围只负责映射颜色。除 9999 / NaN 外的有限值（包括历史值 200）
+        // 都写入体纹理；超过纹理统计上限时在下面钳制到 255，即色标末端。
+        const valid0 = Number.isFinite(v0) && v0 !== TLRD_INVALID_SUBSTRATE
+        const valid1 = Number.isFinite(v1) && v1 !== TLRD_INVALID_SUBSTRATE
         if (valid0 && valid1) {
           v = strictNearest ? v0 : interpolateTlIntensityDb(v0, v1, frac)
           coverage = 1
@@ -577,7 +578,7 @@ export function decodeTlrdPolarVolume(parsed, opts = {}) {
       }
     }
   }
-  // 平滑插值模式：无效体素（200 / 9999 哨兵、海底以下）回填邻近有效值，A 通道仍为 0，
+  // 平滑插值模式：无效体素（9999 / NaN、海底以下）回填邻近有效值，A 通道仍为 0，
   // 避免三线性插值在数据边界把 TL 稀释到值域最低端；严格最近邻则保留缺测体素透明。
   if (!strictNearest) {
     fillInvalidVoxelRgb(data, col, height, row, { wrapY: wrapTheta })

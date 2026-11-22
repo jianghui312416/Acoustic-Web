@@ -56,9 +56,8 @@ function isVolumeOccludedByGlobe(frameState, volume) {
 /** 体渲染光线步进最大步数 */
 export const MAX_MARCH_STEPS = 512
 /** 体透明度默认缩放系数 */
-// 高透明度会让光线在体顶数步内饱和，看起来像一张平面。默认降低到 42%，
-// 让侧视/斜视时能看到完整的深度结构；用户仍可在界面调回更实的效果。
-export const DEFAULT_ALPHA_SCALE = 0.42
+// UI 与 GPU 使用相同的 0–1 语义：0 完全不可见，1 完整显示。
+export const DEFAULT_ALPHA_SCALE = 1
 /**
  * TL 值 → 每步 alpha 系数的默认区间 `[低值端系数, 高值端系数]`。
  *
@@ -68,7 +67,8 @@ export const DEFAULT_ALPHA_SCALE = 0.42
  */
 export const DEFAULT_VALUE_ALPHA_RANGE = [1.0, 0]
 /** 体渲染色标最大控制点数（与 shader 中 u_colorStops 数组长度一致） */
-export const MAX_COLOR_STOPS = 6
+// custom/Bellhop 色带包含 8 个控制点；全部保留才能与二维 TL 图逐色一致。
+export const MAX_COLOR_STOPS = 8
 /** 体渲染切面模式：0 方位 1 深度 2 经度 3 纬度 */
 export const VOLUME_SLICE_MODE = {
   azimuth: 0,
@@ -1273,8 +1273,16 @@ export class WedgeShaderVolume3DPrimitive extends ShaderVolume3DPrimitive {
         float angleNorm = mod(angleDeg - u_wedgeMeta.z + 720.0, 360.0) / angleSpan;
         float depthNorm = (depthM - u_wedgeMeta2.z) / depthSpan;
 
+        // 声源至首个距离节点没有独立数据，连续沿用首列 TL；中心统一使用首方位，
+        // 防止 atan(0,0) 周围出现放射状接缝或透明孔洞。
+        float firstCellM = pathSpan / max(1.0, float(textureSize(u_volumeTexture, 0).x - 1));
+        if (pathM <= max(u_wedgeMeta2.x, firstCellM * 0.5)) {
+          pathNorm = 0.0;
+          angleNorm = 0.0;
+        }
+
         if (angleNorm < 0.0 || angleNorm > 1.0) return false;
-        if (pathNorm < 0.0 || pathNorm > 1.0) return false;
+        if (pathNorm > 1.0) return false;
         if (depthNorm < 0.0 || depthNorm > 1.0) return false;
 
         texUvw = vec3(pathNorm, angleNorm, depthNorm);
@@ -1673,8 +1681,16 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
         float angleNorm = mod(angleDeg - u_wedgeMeta.z + 720.0, 360.0) / angleSpan;
         float depthNorm = (depthM - u_wedgeMeta2.z) / depthSpan;
 
+        // 声源至首个距离节点没有独立数据，连续沿用首列 TL；中心统一使用首方位，
+        // 防止 atan(0,0) 周围出现放射状接缝或透明孔洞。
+        float firstCellM = pathSpan / max(1.0, float(textureSize(u_volumeTexture, 0).x - 1));
+        if (pathM <= max(u_wedgeMeta2.x, firstCellM * 0.5)) {
+          pathNorm = 0.0;
+          angleNorm = 0.0;
+        }
+
         if (angleNorm < 0.0 || angleNorm > 1.0) return false;
-        if (pathNorm < 0.0 || pathNorm > 1.0) return false;
+        if (pathNorm > 1.0) return false;
         if (depthNorm < 0.0 || depthNorm > 1.0) return false;
 
         texUvw = vec3(pathNorm, angleNorm, depthNorm);
@@ -1702,6 +1718,8 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
         float rayLength = endT - startT;
         float dt = max(min(requestedStep, voxelAwareStep), rayLength / float(${MAX_MARCH_STEPS}));
         vec4 accum = vec4(0.0);
+        vec3 lastClippedPoint = vec3(0.0);
+        bool hasClippedPoint = false;
         // 轻微的屏幕空间采样抖动可打散规则网格与固定步进产生的莫尔条带，
         // 不改变纹理数据及 TL 数值映射。
         float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
@@ -1710,7 +1728,26 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
           float t = startT + (float(i) + jitter) * dt;
           if (t > endT) break;
           vec3 p = u_cameraUvw + rayDir * t;
-          if (!passVolumeSlice(p)) continue;
+          if (!passVolumeSlice(p)) {
+            lastClippedPoint = p;
+            hasClippedPoint = true;
+            continue;
+          }
+
+          // 从被裁掉的半体进入保留半体时，二分回到精确裁切平面。该样本是露出的
+          // 距离—深度 TL 剖面；它直接使用原始体素色，不参与沿视线的体积分混色。
+          bool cutFaceSample = u_sliceInfo.y > 0.5 && u_sliceInfo.z < 0.5 && hasClippedPoint;
+          if (cutFaceSample) {
+            vec3 outsidePoint = lastClippedPoint;
+            vec3 insidePoint = p;
+            for (int cutStep = 0; cutStep < 8; cutStep++) {
+              vec3 midpoint = mix(outsidePoint, insidePoint, 0.5);
+              if (passVolumeSlice(midpoint)) insidePoint = midpoint;
+              else outsidePoint = midpoint;
+            }
+            p = insidePoint;
+            hasClippedPoint = false;
+          }
 
           vec3 texUvw;
           if (!geoToTextureUvw(p, texUvw)) continue;
@@ -1741,7 +1778,8 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
           float angleEdge = (u_wedgeMeta.w - u_wedgeMeta.z >= 359.5)
             ? 1.0
             : edgeLow.y * edgeHigh.y;
-          coverage *= min(min(edgeLow.x * edgeHigh.x, angleEdge), edgeLow.z * edgeHigh.z);
+          // 中心使用首个距离节点回填，不能在 x=0 淡出；只对最大距离外缘做羽化。
+          coverage *= min(min(edgeHigh.x, angleEdge), edgeLow.z * edgeHigh.z);
           // 连续海底约束：G 通道是独立的海底深度纹理。先执行硬裁剪，确保任何
           // 羽化或三线性过滤都不会把声场带到海底以下；随后仅在海底上方渐隐。
           if (u_hasBottomDepth == 1) {
@@ -1763,34 +1801,14 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
           if (u_strictNearest == 0) displayRatio = pow(displayRatio, max(0.35, u_colorInfo.z));
 
           vec3 color = getVolumeColor(displayRatio);
-          float opacitySignal;
-          if (u_strictNearest == 1) {
-            // bellhop_gebco 参考工程：低声损失更不透明，但最弱区域仍保留 0.56 的密度，
-            // 使外围蓝/青色声场可见，而不是按色标 alpha 直接淡出。
-            float strictOpacity = 0.56 + 0.44 * clamp((110.0 - realValue) / 70.0, 0.0, 1.0);
-            // 透明度指数在默认的严格最近邻模式下也必须生效。
-            opacitySignal = pow(strictOpacity, max(0.1, u_colorInfo.w));
-          } else {
-            // 将色标透明度逐采样应用：低信息量区域保持可见但更透明，内部特征可透过外层显示。
-            float valueAlpha = pow(
-              clamp(mix(u_alphaByValue.x, u_alphaByValue.y, displayRatio), 0.0, 1.0),
-              max(0.1, u_colorInfo.w)
-            );
-            opacitySignal = mix(0.08, 1.0, valueAlpha);
-          }
-
-          // Beer-Lambert 步长校正：透明度与实际射线距离相关，而不是与采样次数相关。
-          // 因而调节采样密度不会造成明暗条带或整体透明度跳变。
-          float density = max(0.0, u_depthInfo.z) * 5.5;
-          float alpha = clamp(1.0 - exp(-density * coverage * opacitySignal * dt), 0.0, 0.14);
-
-          float weight = (1.0 - accum.a) * alpha;
-          accum.rgb += weight * color;
-          accum.a += weight;
-          if (accum.a > 0.985) break;
+          // 整个声场体都采用“剖切面同款”的真实 TL 直出色：命中离相机最近的
+          // 有效体素后立即结束，不再把沿途多个 TL 颜色做 Beer-Lambert 混合。
+          float alpha = clamp(u_depthInfo.z, 0.0, 1.0);
+          accum = vec4(color * alpha, alpha);
+          break;
         }
 
-        if (accum.a <= 0.01) {
+        if (accum.a <= 0.0001) {
           discard;
         }
         // Front-to-Back 累积得到的是预乘颜色；Cesium.ALPHA_BLEND 接收直通颜色，
@@ -1833,6 +1851,9 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
    */
   update(frameState) {
     if (this.destroyed || this.show === false) return
+    // 0 的语义是完全不可见：不创建/提交 DrawCommand，避免低精度 alpha 残影。
+    const requestedOpacity = Number(this.options.alphaScale ?? DEFAULT_ALPHA_SCALE)
+    if (Number.isFinite(requestedOpacity) && requestedOpacity <= 0) return
     // 转到地球背面（视线被地球遮挡）时跳过绘制，避免远处“浮”出体/黑框
     if (isVolumeOccludedByGlobe(frameState, this.options.volume)) return
 

@@ -100,12 +100,13 @@ export const volumeRenderingControls = reactive({
   /** 方向光地形自阴影（跟随月亮方位）。 */
   terrainShadows: false,
   volumeVisible: true,
-  opacity: 1.7,
+  /** 整体不透明度：0 = 完全不可见，1 = 完整显示。 */
+  opacity: 1,
   sampling: 0.01,
   alphaPower: 1.3,
   colormap: 'bellhop',
-  /** 默认三轴严格最近邻：方位/距离/深度均取最近原始节点，不做插值。 */
-  strictNearest: true,
+  /** 默认连续采样，与二维 TL 图的平滑伪彩显示一致；需要检查原始节点时可手动开启最近邻。 */
+  strictNearest: false,
   /** 参考工程 fieldColor 的 TL 映射域为 45–128 dB，默认 dB 范围与之对齐。 */
   dbMin: 45,
   dbMax: 128,
@@ -130,17 +131,10 @@ export function activeVolumeColorStops(id = volumeRenderingControls.colormap) {
   return palette.stops.map(([position, rgb]) => [position, [...rgb]])
 }
 
-/**
- * 将侧边栏的“透明度”换算为体积分密度。
- *
- * 体绘制使用 Beer-Lambert 累积，直接线性放大密度会很快趋近完全不透明，
- * 导致滑杆稍微移动画面就发生跳变。这里保留 1.7 的既有默认外观，同时
- * 压缩两端增益，让整段滑杆的视觉变化更均匀。
- */
+/** 将 UI 的 0–1 不透明度原样传给 GPU。 */
 export function opacityControlToAlphaScale(value) {
   const number = Number(value)
-  const opacity = Math.min(5, Math.max(0.2, Number.isFinite(number) ? number : 1.7))
-  return 0.42 * Math.pow(opacity / 1.7, 0.55)
+  return Math.min(1, Math.max(0, Number.isFinite(number) ? number : 1))
 }
 
 export function clampVolumeRenderingControls(controls = volumeRenderingControls) {
@@ -155,10 +149,10 @@ export function clampVolumeRenderingControls(controls = volumeRenderingControls)
   controls.terrainContours = controls.terrainContours === true
   controls.terrainCoastline = controls.terrainCoastline === true
   controls.terrainShadows = controls.terrainShadows === true
-  controls.opacity = clamp(controls.opacity, 0.2, 5, 1.7)
+  controls.opacity = clamp(controls.opacity, 0, 1, 1)
   controls.sampling = clamp(controls.sampling, 0.004, 0.03, 0.01)
   controls.alphaPower = clamp(controls.alphaPower, 0.35, 3, 1.3)
-  controls.strictNearest = controls.strictNearest !== false
+  controls.strictNearest = controls.strictNearest === true
   controls.dbMin = clamp(controls.dbMin, 0, 199, 45)
   controls.dbMax = clamp(controls.dbMax, controls.dbMin + 1, 200, 128)
   controls.rotationX = clamp(controls.rotationX, 0, 359, 0)

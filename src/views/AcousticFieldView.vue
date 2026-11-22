@@ -605,8 +605,8 @@
           <input v-model.number="depthExaggeration" type="range" min="0.5" max="50" step="0.1" @input="onDepthExagChange" />
         </div>
         <div class="mini-control">
-          <span>透明度 <b>{{ alphaPercent }}%</b></span>
-          <input v-model.number="alphaPercent" type="range" min="5" max="100" step="5" @input="syncSoundField" />
+          <span>透明度 α <b>{{ fmt(volumeOpacity, 2) }}</b></span>
+          <input v-model.number="volumeOpacity" type="range" min="0" max="1" step="0.01" @input="onVolumeOpacityInput" />
         </div>
         <label class="toggle-line">
           <input v-model="singleSliceEnabled" type="checkbox" @change="onSliceToggle" />
@@ -2950,7 +2950,7 @@ const staticRaySourceDepthM = computed(() => Number(staticRayModel.value?.source
 // 唯一垂直夸张倍率：与侧边栏 terrainExaggeration 双向同步，同时作用于
 // 地形、三维声场、声源、声线与垂直切面。1× 保持真实物理比例。
 const depthExaggeration = ref(3)
-const alphaPercent = ref(Math.round(opacityControlToAlphaScale(volumeRenderingControls.opacity) * 100))
+const volumeOpacity = ref(opacityControlToAlphaScale(volumeRenderingControls.opacity))
 /** 数据筛选范围（dB）：决定哪些体素参与渲染 */
 const valueRange = ref({ min: VOLUME_TL_COLOR_MIN, max: VOLUME_TL_COLOR_MAX })
 /** 色标映射范围（dB）：决定红（下限）→蓝（上限）的取值映射，与数据筛选无关 */
@@ -3693,7 +3693,7 @@ watch(
     const min = Number.isFinite(rawMin) ? rawMin : VOLUME_TL_COLOR_MIN
     const max = Number.isFinite(rawMax) ? Math.max(min + 1, rawMax) : VOLUME_TL_COLOR_MAX
     colorRange.value = { min, max }
-    alphaPercent.value = Math.round(opacityControlToAlphaScale(controls.opacity) * 100)
+    volumeOpacity.value = opacityControlToAlphaScale(controls.opacity)
     syncSoundField()
     scheduleOmni2dLayer()
   },
@@ -3720,8 +3720,8 @@ watch(depthExaggeration, (value) => {
   }
 })
 
-// 插值开关切换时重建三维体纹理：默认按 Bellhop 原始方位/距离/深度节点
-// 严格最近邻显示（每个扇区在其角区内数值一致）；关闭后使用连续体采样。
+// 插值开关切换时重建三维体纹理：默认使用与二维 TL 图一致的连续采样；
+// 仅在用户主动开启“检查原始节点”时使用严格最近邻。
 // 仅重建纹理与几何，不动声线等状态。
 watch(
   () => volumeRenderingControls.strictNearest,
@@ -4653,11 +4653,12 @@ async function calculateVesselFieldSample(index, generation = vesselPlaybackGene
   const response = await analyse3dTLRDByModel(payload, model, ice)
   if (generation !== vesselPlaybackGeneration) throw new Error('本次播放任务已取消。')
   const parsed = parseAnalyse3DTlrd(response)
+  const strictNearest = volumeRenderingControls.strictNearest === true
   const texture = decodeTlrdPolarVolume(parsed, {
     sourceLon: sample.lon,
     sourceLat: sample.lat,
-    angleInterp: 1,
-    strictNearest: true,
+    angleInterp: strictNearest ? 1 : TLRD_ANGLE_INTERP,
+    strictNearest,
   })
   try {
     await maskVolumeByTerrain(texture, viewer?.scene?.terrainProvider)
@@ -5715,6 +5716,14 @@ function onOmni2dVisibleChange() {
   syncOmni2dLayer()
 }
 
+/** 浮动显示窗与侧边栏共用同一个 0–1 不透明度。 */
+function onVolumeOpacityInput() {
+  const next = opacityControlToAlphaScale(volumeOpacity.value)
+  volumeOpacity.value = next
+  if (volumeRenderingControls.opacity !== next) volumeRenderingControls.opacity = next
+  else syncSoundField()
+}
+
 /** 色标 / 筛选范围变化时合并重建二维图层（栅格化较重，避免拖动时卡顿） */
 function scheduleOmni2dLayer() {
   if (!omni2dVisible.value) return
@@ -5740,7 +5749,7 @@ function syncHistoricalSoundFields() {
       colorRange: { min: colorRange.value.min, max: colorRange.value.max },
       alphaPower: Number(volumeRenderingControls.alphaPower),
       sampling: Number(volumeRenderingControls.sampling),
-      alphaScale: alphaPercent.value / 100,
+      alphaScale: volumeOpacity.value,
       valueAlphaRange: [valueAlphaRange.value.min, valueAlphaRange.value.max],
       sliceClip: { enabled: false },
       rayLines: { visible: false },
@@ -5770,7 +5779,7 @@ function syncSoundField(options = {}) {
     colorRange: { min: colorRange.value.min, max: colorRange.value.max },
     alphaPower: Number(volumeRenderingControls.alphaPower),
     sampling: Number(volumeRenderingControls.sampling),
-    alphaScale: alphaPercent.value / 100,
+    alphaScale: volumeOpacity.value,
     valueAlphaRange: [valueAlphaRange.value.min, valueAlphaRange.value.max],
     sliceClip: getSliceClipOptions(),
     // 三维体上的声线：由侧边栏「声线播放」的静态声线开关控制；
@@ -6379,8 +6388,11 @@ function onColorRangeChange() {
   const lo = Math.max(dbRangeMin.value, Math.min(Math.min(rawMin, rawMax - 1), dbRangeMax.value - 1))
   const hi = Math.min(dbRangeMax.value, Math.max(Math.max(rawMax, rawMin + 1), dbRangeMin.value + 1))
   colorRange.value = { min: lo, max: hi }
-  syncSoundField()
-  scheduleOmni2dLayer()
+  // 主面板、侧边栏、区域地形体与垂直切面共用同一组色标范围。
+  // 上面的 controls watcher 负责重绘三维体和二维全向层；profileDbRange
+  // 则会让垂直切面用相同范围重新生成纹理。
+  volumeRenderingControls.dbMin = lo
+  volumeRenderingControls.dbMax = hi
 }
 
 function onDepthExagChange() {
@@ -7251,8 +7263,7 @@ async function loadTlrdData() {
     compassBearingToInternalAzimuth(Number(calcParams.value.azimuth))
   )
   // 声源经纬度使用表单输入的 coordX / coordY
-  // 默认严格最近邻：方位/距离/深度均逐节点取最近原始值，方位插值关闭后
-  // 4 个扇区各自的 90° 角区内数值一致；关闭该开关才启用连续体采样。
+  // 默认连续采样以匹配二维 TL 伪彩图；仅在检查原始节点时禁用插值。
   const strictNearest = volumeRenderingControls.strictNearest === true
   const texture = decodeTlrdPolarVolume(parsed, {
     sourceLon: Number(calcParams.value.coordX),
