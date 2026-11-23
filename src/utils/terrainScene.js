@@ -827,13 +827,29 @@ export function drawTerrainScene(canvas, grid, {
       ctx.lineWidth = 1
       const maxRadius = Math.max(...distance.map(Number).filter(Number.isFinite), 0)
       for (const fraction of [.25, .5, .75, 1]) {
+        const radius = maxRadius * fraction
         const ring = []
         for (let angle = 0; angle <= Math.PI * 2 + .001; angle += Math.PI / 36) {
-          const point = polar(angle, maxRadius * fraction, Number(source.depth) || 0)
+          const point = polar(angle, radius, Number(source.depth) || 0)
           if (point) ring.push(point)
         }
         if (ring.length < 3) continue
         ctx.beginPath(); ring.forEach((point, index) => index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y)); ctx.closePath(); ctx.stroke()
+        const labelPoint = ring[Math.round(ring.length / 8)]
+        if (labelPoint) {
+          const label = radius >= 1000
+            ? `${(radius / 1000).toFixed(radius >= 10000 ? 0 : 1)} km`
+            : `${Math.round(radius)} m`
+          ctx.save()
+          ctx.setLineDash([])
+          ctx.font = '9px ui-monospace, monospace'
+          const labelWidth = ctx.measureText(label).width
+          ctx.fillStyle = 'rgba(4,20,32,.8)'
+          ctx.fillRect(labelPoint.x - 3, labelPoint.y - 8, labelWidth + 6, 12)
+          ctx.fillStyle = '#9feeff'
+          ctx.fillText(label, labelPoint.x, labelPoint.y)
+          ctx.restore()
+        }
       }
       ctx.restore()
     }

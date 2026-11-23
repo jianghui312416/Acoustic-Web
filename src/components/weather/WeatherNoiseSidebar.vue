@@ -168,6 +168,7 @@
       :disabled="trackFieldRunState.running || !trackPointState.points.length"
       @click="runTrackField"
     >
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5-11-6.5Z" fill="currentColor" /></svg>
       <span v-if="trackFieldRunState.running" class="track-field-spinner" aria-hidden="true"></span>
       {{ trackFieldRunState.running ? '正在计算航线声场…' : '航线声场计算' }}
     </button>
@@ -356,10 +357,11 @@ button { color:#9fd9e9; border:1px solid #2e6078; border-radius:5px; background:
 .track-point-table th:first-child,.track-point-table td:first-child{width:22px;color:#6f96a9;text-align:center}
 .track-point-finish{width:100%;height:26px;margin-top:6px;color:#8fe4ff;border:1px solid #2f6f8d;border-radius:5px;background:#102b40;font-size:9px;cursor:pointer}
 .track-point-finish:hover{background:#154a66}
-.track-field-run{width:100%;height:28px;margin-top:8px;color:#8ff0ff;border:1px solid #3f86b8;border-radius:5px;background:#0d3552;font-size:10px;cursor:pointer}
-.track-field-run:hover:not(:disabled){background:#145079}
+.track-field-run{width:100%;height:28px;margin-top:8px;display:inline-flex;align-items:center;justify-content:center;gap:5px;color:#00d4b5;border:1px solid rgba(53,205,163,0.55);border-radius:5px;background:#10373c;font-size:10px;cursor:pointer}
+.track-field-run:hover:not(:disabled){color:#ffffff;border-color:rgba(59,229,180,0.9);background:linear-gradient(180deg,rgba(8,105,78,0.95),rgba(6,63,57,0.9));box-shadow:0 0 18px rgba(34,211,164,0.18)}
+.track-field-run svg{width:12px;height:12px;display:block}
 .track-field-run:disabled{opacity:.5;cursor:default}
-.track-field-spinner{display:inline-block;width:10px;height:10px;margin-right:4px;vertical-align:-1px;border:1.5px solid rgba(143,240,255,.35);border-top-color:#8ff0ff;border-radius:50%;animation:track-field-spin .8s linear infinite}
+.track-field-spinner{display:inline-block;width:10px;height:10px;margin-right:4px;vertical-align:-1px;border:1.5px solid rgba(0,212,181,.35);border-top-color:#00d4b5;border-radius:50%;animation:track-field-spin .8s linear infinite}
 .track-field-status{margin:5px 1px 0;color:#6ba3c0;font-size:8px}
 .track-field-status.error{color:#efb18c}
 @keyframes track-field-spin{to{transform:rotate(360deg)}}

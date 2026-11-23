@@ -128,7 +128,10 @@
         :readout-enabled="verticalSliceControls.cursorReadout"
         :source-lon="profileSourceLon"
         :source-lat="profileSourceLat"
+        :seabed-depth="profileSeabedDepth"
         :coordinate-format="simulationControls.coordFormat"
+        :bottom-type-segments="profileBottomTypeSegments"
+        :bottom-type-state="profileBottomTypeState"
       />
     </section>
     <AmbientNoiseProbe v-show="viewMode === 'terrain' && noiseProbeState.open && !terrainNoiseMinimized"
@@ -3184,6 +3187,28 @@ const profileSourceLon = computed(() => Number(
 const profileSourceLat = computed(() => Number(
   selectedProfileLayer.value?.source?.lat ?? sourcePoint.value?.lat ?? terrainSource.value?.lat ?? calcParams.value.coordY
 ))
+const profileSeabedDepth = computed(() => {
+  const field = selectedProfileLayer.value?.field || terrainField.value
+  if (!field || typeof field.seabedDepthAt !== 'function') return NaN
+  const sectorCount = Math.max(1, Number(field.grid?.sector) || 1)
+  const bearings = field.grid?.compassBearings
+  let sectorIndex = 0
+  if (Array.isArray(bearings) && bearings.length) {
+    const target = internalAzimuthToCompassBearing(Number(profileAzimuthDeg.value) || 0)
+    let bestDiff = Infinity
+    for (let index = 0; index < Math.min(sectorCount, bearings.length); index += 1) {
+      const raw = Number(bearings[index])
+      if (!Number.isFinite(raw)) continue
+      const diff = Math.abs((((raw - target) % 360) + 540) % 360 - 180)
+      if (diff < bestDiff) {
+        bestDiff = diff
+        sectorIndex = index
+      }
+    }
+  }
+  const depth = Number(field.seabedDepthAt(sectorIndex, 0))
+  return Number.isFinite(depth) && depth > 0 ? depth : NaN
+})
 
 /* ── 侧边栏「垂直切面」控件 ↔ 本地状态双向同步 ── */
 watch(() => verticalSliceControls.showSlice, (val) => {

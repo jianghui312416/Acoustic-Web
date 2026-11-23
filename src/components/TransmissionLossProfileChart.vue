@@ -43,6 +43,17 @@
         <div ref="chartEl" class="rp-chart"></div>
         <RayFlowOverlay ref="rayOverlay" :flow="rayFlow" :geometry="rayGeometry" :viewport="rayViewport" :playing="raysPlaying" :visible="raysVisible" :static-mode="staticRays && !animated" :show-static-tracks="staticRays" show-time />
         <div
+          v-if="showSeabed && showSeabedMask && sourceBottomTypeInfo"
+          class="rp-bottom-type-info"
+          :title="sourceBottomTypeInfo.lines.join('\n')"
+        >
+          <span class="rp-bottom-type-swatch" :style="{ background: sourceBottomTypeInfo.color }"></span>
+          <div class="rp-bottom-type-copy">
+            <b>{{ sourceBottomTypeInfo.label }}</b>
+            <span v-for="(line, index) in sourceBottomTypeInfo.lines" :key="index">{{ line }}</span>
+          </div>
+        </div>
+        <div
           v-for="marker in markerReadouts"
           :key="marker.id"
           class="rp-readout-marker"
@@ -521,6 +532,24 @@ const bottomMaskSegments = computed(() => {
   return out
 })
 
+const sourceBottomTypeInfo = computed(() => {
+  const first = bottomMaskSegments.value[0]
+  if (!first) return null
+  const p = first.acoustics || {}
+  const porosity = Number(p.porosity)
+  const porosityPct = Number.isFinite(porosity)
+    ? (Math.abs(porosity) <= 1.5 ? porosity * 100 : porosity)
+    : null
+  return {
+    label: first.label,
+    color: first.color,
+    lines: [
+      `Cp=${fmtBottomValue(p.cp, 0)} m/s · αp=${fmtBottomValue(p.alphaP, 3)} dB/λ`,
+      `ρ=${fmtBottomValue(p.density, 1)} kg/m³ · 孔隙率=${fmtBottomValue(porosityPct, 1)}% · 厚度=${fmtBottomValue(p.thickness, 1)} m`,
+    ],
+  }
+})
+
 const bottomStatusClass = computed(() => ({
   'is-loading': props.bottomTypeState === 'loading',
   'is-error': props.bottomTypeState === 'error',
@@ -707,12 +736,8 @@ function bottomMaskLabel(segment) {
   const porosity = Number(p.porosity)
   const porosityPct = Number.isFinite(porosity) ? (Math.abs(porosity) <= 1.5 ? porosity * 100 : porosity) : null
   return [
-    segment.label,
-    `Cp=${fmtBottomValue(p.cp, 0)} m/s`,
-    `Alpha_p=${fmtBottomValue(p.alphaP, 3)} dB/λ`,
-    `density=${fmtBottomValue(p.density, 1)} kg/m³`,
-    `porosity=${fmtBottomValue(porosityPct, 1)} %`,
-    `thickness=${fmtBottomValue(p.thickness, 1)} m`,
+    `${segment.label} · Cp=${fmtBottomValue(p.cp, 0)} m/s · αp=${fmtBottomValue(p.alphaP, 3)} dB/λ`,
+    `ρ=${fmtBottomValue(p.density, 1)} kg/m³ · 孔隙率=${fmtBottomValue(porosityPct, 1)}% · 厚度=${fmtBottomValue(p.thickness, 1)} m`,
   ].join('\n')
 }
 
@@ -812,15 +837,6 @@ function createBottomMaskSeries(profileData) {
       if (polygonPoints.length < 4) return null
       const firstTop = topPoints[0]
       const firstBottom = bottomPoints[bottomPoints.length - 1]
-      const midIndex = Math.round((start + end) / 2)
-      const midTopCategory = seabedCategoryAt(profileData, midIndex)
-      const midBottomCategory = axisLast
-      const midTop = api.coord([midIndex, midTopCategory])
-      const midBottom = api.coord([midIndex, midBottomCategory])
-      const left = api.coord([start, midTopCategory])[0]
-      const right = api.coord([end, midTopCategory])[0]
-      const width = Math.abs(right - left)
-      const height = Math.abs(midBottom[1] - midTop[1])
       const children = [
         {
           type: 'polygon',
@@ -833,25 +849,6 @@ function createBottomMaskSeries(profileData) {
           style: { stroke: 'rgba(241,245,249,0.9)', lineWidth: 1.1 },
         },
       ]
-      if (width >= 94 && height >= 38) {
-        children.push({
-          type: 'text',
-          style: {
-            x: midTop[0],
-            y: (midTop[1] + midBottom[1]) / 2,
-            text: bottomMaskLabel(segment),
-            align: 'center',
-            verticalAlign: 'middle',
-            fill: '#f8fafc',
-            stroke: 'rgba(0,0,0,0.72)',
-            lineWidth: 2,
-            font: '600 8px ui-monospace, SFMono-Regular, Consolas, monospace',
-            lineHeight: 10,
-            overflow: 'truncate',
-            width: Math.max(20, width - 8),
-          },
-        })
-      }
       return { type: 'group', children }
     },
   }
@@ -1611,6 +1608,49 @@ onBeforeUnmount(() => {
 .rp-chart-wrap {
   position: relative;
   width: 100%;
+}
+
+.rp-bottom-type-info {
+  position: absolute;
+  left: 50%;
+  bottom: 44px;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: calc(100% - 90px);
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 4px;
+  background: rgba(2, 6, 23, 0.8);
+  color: #f8fafc;
+  font: 8px ui-monospace, SFMono-Regular, Consolas, monospace;
+  pointer-events: none;
+  transform: translateX(-50%);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+.rp-bottom-type-swatch {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 1px;
+  border-radius: 2px;
+}
+
+.rp-bottom-type-copy {
+  display: grid;
+  gap: 1px;
+}
+
+.rp-bottom-type-copy b {
+  color: #ffffff;
+  font-size: 9px;
+}
+
+.rp-bottom-type-copy span {
+  color: #e2f1f8;
+  white-space: nowrap;
 }
 
 .rp-chart-wrap.is-placing-receiver .rp-chart {
