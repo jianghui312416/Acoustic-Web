@@ -41,6 +41,12 @@
       </button>
 
       <div class="thumb-rect" :style="rectStyle" @pointerdown.stop.prevent="onRectPointerDown">
+        <span class="thumb-coord thumb-coord-n">{{ coordLabels.north }}</span>
+        <span class="thumb-coord thumb-coord-s">{{ coordLabels.south }}</span>
+        <span class="thumb-coord thumb-coord-w">{{ coordLabels.west }}</span>
+        <span class="thumb-coord thumb-coord-e">{{ coordLabels.east }}</span>
+        <span class="thumb-size thumb-size-w">{{ widthKmLabel }}</span>
+        <span class="thumb-size thumb-size-h">{{ heightKmLabel }}</span>
         <span class="thumb-resize" @pointerdown.stop.prevent="onResizePointerDown"></span>
       </div>
 
@@ -67,11 +73,14 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vu
 import {
   boundsToViewRect,
   createThumbView,
+  formatDistanceKm,
+  formatTerrainBoundsEdges,
   mercatorY,
   moveTerrainBounds,
   panThumbView,
   resizeTerrainBounds,
   lonLatToWorldPoint,
+  terrainBoundsKm,
   viewPointToLonLat,
   zoomThumbView,
 } from '@/utils/terrainPreview.js'
@@ -165,6 +174,11 @@ const rectStyle = computed(() => {
     height: `${rect.height * 100}%`,
   }
 })
+
+const boundsKm = computed(() => terrainBoundsKm(props.bounds))
+const widthKmLabel = computed(() => formatDistanceKm(boundsKm.value.widthKm))
+const heightKmLabel = computed(() => formatDistanceKm(boundsKm.value.heightKm))
+const coordLabels = computed(() => formatTerrainBoundsEdges(props.bounds))
 
 const loadButtonStyle = computed(() => {
   const rect = boundsToViewRect(props.bounds, thumbView.value)
@@ -608,6 +622,70 @@ watch(() => aisMonitorState.displayEnabled, renderMap)
   background: rgba(255, 90, 82, 0.08);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), inset 0 0 18px rgba(255, 90, 82, 0.14);
   cursor: move;
+}
+
+.thumb-size {
+  position: absolute;
+  z-index: 1;
+  padding: 1px 3px;
+  color: #ffe0dd;
+  font: 9px ui-monospace, monospace;
+  line-height: 1.4;
+  white-space: nowrap;
+  border-radius: 3px;
+  background: rgba(64, 10, 10, 0.72);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+.thumb-size-w {
+  right: 2px;
+  top: 100%;
+  transform: translateY(2px);
+}
+
+.thumb-size-h {
+  left: 100%;
+  top: calc(50% - 18px);
+  transform: translate(2px, -50%);
+}
+
+.thumb-coord {
+  position: absolute;
+  z-index: 1;
+  padding: 1px 3px;
+  color: #cfe9ff;
+  font: 9px ui-monospace, monospace;
+  line-height: 1.4;
+  white-space: nowrap;
+  border-radius: 3px;
+  background: rgba(8, 30, 52, 0.72);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+.thumb-coord-n {
+  left: 50%;
+  bottom: 100%;
+  transform: translate(-50%, -2px);
+}
+
+.thumb-coord-s {
+  left: 2px;
+  top: 100%;
+  transform: translateY(2px);
+}
+
+.thumb-coord-w {
+  right: 100%;
+  top: 50%;
+  transform: translate(-2px, -50%);
+}
+
+.thumb-coord-e {
+  left: 100%;
+  top: 50%;
+  transform: translate(2px, -50%);
 }
 
 .thumb-resize {

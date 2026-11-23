@@ -9,13 +9,19 @@ const {
   buildDemoTerrainGrid,
   buildGebcoWmsUrl,
   createThumbView,
+  formatDistanceKm,
+  formatLatitudeValue,
+  formatLongitudeValue,
   formatTerrainBounds,
+  formatTerrainBoundsEdges,
+  greatCircleDistanceKm,
   lonLatToThumbPoint,
   lonLatToViewPoint,
   moveTerrainBounds,
   normalizeTerrainBounds,
   panThumbView,
   resizeTerrainBounds,
+  terrainBoundsKm,
   thumbPointToLonLat,
   viewPointToLonLat,
   zoomThumbView,
@@ -93,6 +99,38 @@ test('terrain bounds are formatted for the preview header', () => {
   assert.match(text, /100\.00°/)
   assert.match(text, /120\.00°/)
   assert.match(text, /-10\.00°/)
+})
+
+test('terrain selection reports its width and height in kilometers', () => {
+  const bounds = { west: 116, south: 15, east: 117, north: 16 }
+  const size = terrainBoundsKm(bounds)
+  assert.ok(Math.abs(size.widthKm - 107.5) < 2)
+  assert.ok(Math.abs(size.heightKm - 111.2) < 1)
+
+  const degreeLat = greatCircleDistanceKm(0, 0, 0, 1)
+  assert.ok(Math.abs(degreeLat - 111.2) < 0.2)
+})
+
+test('terrain selection size labels use km with a readable precision', () => {
+  assert.equal(formatDistanceKm(1234.4), '1234 km')
+  assert.equal(formatDistanceKm(45.67), '45.7 km')
+  assert.equal(formatDistanceKm(9.876), '9.88 km')
+  assert.equal(formatDistanceKm(Number.NaN), '—')
+})
+
+test('terrain selection exposes coordinate labels for all four edges', () => {
+  const labels = formatTerrainBoundsEdges({ west: 110, south: -10, east: 120, north: 15 })
+  assert.deepEqual(labels, {
+    north: '15.00°N',
+    south: '10.00°S',
+    west: '110.00°E',
+    east: '120.00°E',
+  })
+
+  assert.equal(formatLongitudeValue(-5), '5.00°W')
+  assert.equal(formatLongitudeValue(180), '180°')
+  assert.equal(formatLatitudeValue(0), '0°')
+  assert.equal(formatLatitudeValue(-12.5), '12.50°S')
 })
 
 test('terrain projection applies the requested vertical exaggeration', () => {

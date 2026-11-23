@@ -45,6 +45,12 @@
         :aria-label="handle.label"
         @pointerdown.stop.prevent="startResize(handle.key, $event)"
       ></span>
+      <span v-if="coordLabels" class="globe-coord globe-coord-n">{{ coordLabels.north }}</span>
+      <span v-if="coordLabels" class="globe-coord globe-coord-s">{{ coordLabels.south }}</span>
+      <span v-if="coordLabels" class="globe-coord globe-coord-w">{{ coordLabels.west }}</span>
+      <span v-if="coordLabels" class="globe-coord globe-coord-e">{{ coordLabels.east }}</span>
+      <span v-if="sizeLabels" class="globe-size globe-size-w">{{ sizeLabels.width }}</span>
+      <span v-if="sizeLabels" class="globe-size globe-size-h">{{ sizeLabels.height }}</span>
     </div>
 
     <button
@@ -78,6 +84,11 @@ import {
   moveGlobeSelectionRect,
   resizeGlobeSelectionRect,
 } from '@/utils/terrainSelection.js'
+import {
+  formatDistanceKm,
+  formatTerrainBoundsEdges,
+  terrainBoundsKm,
+} from '@/utils/terrainPreview.js'
 
 const props = defineProps({
   viewer: { type: Object, default: null },
@@ -112,10 +123,13 @@ const zoomedIn = ref(false)
 const armed = ref(false)
 const dragging = ref(false)
 const invalidHint = ref('')
+/** 红框当前覆盖区域的经纬度边界，用于实时显示宽高尺寸。 */
+const liveBounds = ref(null)
 
 let dragState = null
 let resizeObserver = null
 let disposed = false
+let lastSizeLabelAt = 0
 
 const rectStyle = computed(() => {
   const value = rect.value
@@ -156,6 +170,19 @@ const invalidStyle = computed(() => {
   const top = Math.min(height - 28, parseFloat(style.top) + 32)
   return { left: style.left, top: `${top}px` }
 })
+
+const sizeLabels = computed(() => {
+  if (!liveBounds.value) return null
+  const { widthKm, heightKm } = terrainBoundsKm(liveBounds.value)
+  return {
+    width: formatDistanceKm(widthKm),
+    height: formatDistanceKm(heightKm),
+  }
+})
+
+const coordLabels = computed(() => (
+  liveBounds.value ? formatTerrainBoundsEdges(liveBounds.value) : null
+))
 
 /** 交互选框只在放大到阈值以内或返回地形时显示。 */
 const showRect = computed(() => !!(rect.value && (zoomedIn.value || props.returnActive)))
@@ -292,10 +319,28 @@ function measure() {
   )
 }
 
+/** 实时估算红框覆盖区域的宽高尺寸（km），帧间节流避免拖动时反复采样。 */
+function refreshSize(force = false) {
+  if (!props.active || disposed) {
+    liveBounds.value = null
+    return
+  }
+  if (!(zoomedIn.value || props.returnActive) || !rect.value) {
+    liveBounds.value = null
+    return
+  }
+  const now = Date.now()
+  if (!force && now - lastSizeLabelAt < 100) return
+  lastSizeLabelAt = now
+  const { bounds } = collectBounds()
+  liveBounds.value = bounds
+}
+
 function onPostRender() {
   if (!props.active || disposed) return
   updateZoomState()
   syncRegionRect()
+  refreshSize()
   if (zoomedIn.value && !rect.value) measure()
 }
 
@@ -381,6 +426,7 @@ function onWindowPointerMove(event) {
       height,
       GLOBE_SELECTION_MARGIN_PX
     )
+    refreshSize()
     return
   }
   rect.value = resizeGlobeSelectionRect(
@@ -392,6 +438,7 @@ function onWindowPointerMove(event) {
     height,
     GLOBE_SELECTION_MARGIN_PX
   )
+  refreshSize()
 }
 
 function onWindowPointerUp(event) {
@@ -406,6 +453,7 @@ function endDrag() {
   clearDragListeners()
   dragState = null
   dragging.value = false
+  refreshSize(true)
 }
 
 function onWheel(event) {
@@ -641,6 +689,70 @@ onBeforeUnmount(() => {
 
 .globe-rect.dragging {
   cursor: grabbing;
+}
+
+.globe-size {
+  position: absolute;
+  z-index: 1;
+  padding: 1px 4px;
+  color: #ffe0dd;
+  font: 9px ui-monospace, monospace;
+  line-height: 1.4;
+  white-space: nowrap;
+  border-radius: 3px;
+  background: rgba(64, 10, 10, 0.72);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+.globe-size-w {
+  right: 8px;
+  top: 100%;
+  transform: translateY(6px);
+}
+
+.globe-size-h {
+  left: 100%;
+  top: calc(50% - 18px);
+  transform: translate(6px, -50%);
+}
+
+.globe-coord {
+  position: absolute;
+  z-index: 1;
+  padding: 1px 4px;
+  color: #cfe9ff;
+  font: 9px ui-monospace, monospace;
+  line-height: 1.4;
+  white-space: nowrap;
+  border-radius: 3px;
+  background: rgba(8, 30, 52, 0.72);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+.globe-coord-n {
+  left: 50%;
+  bottom: 100%;
+  transform: translate(-50%, -6px);
+}
+
+.globe-coord-s {
+  left: 8px;
+  top: 100%;
+  transform: translateY(6px);
+}
+
+.globe-coord-w {
+  right: 100%;
+  top: 50%;
+  transform: translate(-6px, -50%);
+}
+
+.globe-coord-e {
+  left: 100%;
+  top: 50%;
+  transform: translate(6px, -50%);
 }
 
 .globe-handle {

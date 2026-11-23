@@ -353,6 +353,71 @@ export function formatTerrainBounds(bounds) {
   return `${format(next.west)} ~ ${format(next.east)}  ·  ${format(next.south)} ~ ${format(next.north)}`
 }
 
+/** 把经度格式化为带东西经的单值标签。 */
+export function formatLongitudeValue(value, decimals = 2) {
+  const threshold = 0.5 / 10 ** decimals
+  const number = Number(value)
+  const absolute = Math.abs(number)
+  if (absolute < threshold) return '0°'
+  if (Math.abs(absolute - 180) < threshold) return '180°'
+  return `${absolute.toFixed(decimals)}°${number >= 0 ? 'E' : 'W'}`
+}
+
+/** 把纬度格式化为带南北纬的单值标签。 */
+export function formatLatitudeValue(value, decimals = 2) {
+  const threshold = 0.5 / 10 ** decimals
+  const number = Number(value)
+  const absolute = Math.abs(number)
+  if (absolute < threshold) return '0°'
+  return `${absolute.toFixed(decimals)}°${number >= 0 ? 'N' : 'S'}`
+}
+
+/** 选框四条边上的经纬度标签：上北、下南、左西、右东。 */
+export function formatTerrainBoundsEdges(bounds) {
+  const next = normalizeTerrainBounds(bounds)
+  return {
+    north: formatLatitudeValue(next.north),
+    south: formatLatitudeValue(next.south),
+    west: formatLongitudeValue(next.west),
+    east: formatLongitudeValue(next.east),
+  }
+}
+
+const EARTH_RADIUS_KM = 6371.0088
+
+/** 两点间的大圆距离（km），用于把选框的经纬度跨度换算成实际尺寸。 */
+export function greatCircleDistanceKm(lon1, lat1, lon2, lat2) {
+  const toRad = Math.PI / 180
+  const startLat = Number(lat1) * toRad
+  const endLat = Number(lat2) * toRad
+  const deltaLat = (Number(lat2) - Number(lat1)) * toRad
+  const deltaLon = (Number(lon2) - Number(lon1)) * toRad
+  const a =
+    Math.sin(deltaLat / 2) ** 2 +
+    Math.cos(startLat) * Math.cos(endLat) * Math.sin(deltaLon / 2) ** 2
+  return 2 * EARTH_RADIUS_KM * Math.asin(Math.min(1, Math.sqrt(Math.max(0, a))))
+}
+
+/** 选框的宽/高（km）：宽取中心纬度的东西向距离，高取中心经度的南北向距离。 */
+export function terrainBoundsKm(bounds) {
+  const next = normalizeTerrainBounds(bounds)
+  const centerLat = (next.south + next.north) / 2
+  const centerLon = (next.west + next.east) / 2
+  return {
+    widthKm: greatCircleDistanceKm(next.west, centerLat, next.east, centerLat),
+    heightKm: greatCircleDistanceKm(centerLon, next.south, centerLon, next.north),
+  }
+}
+
+/** 把 km 数值格式化为选框尺寸标签。 */
+export function formatDistanceKm(km) {
+  const value = Number(km)
+  if (!Number.isFinite(value) || value < 0) return '—'
+  if (value >= 100) return `${Math.round(value)} km`
+  if (value >= 10) return `${value.toFixed(1)} km`
+  return `${value.toFixed(2)} km`
+}
+
 /**
  * GEBCO 海底地形 WMS 请求地址。
  * WMS 1.3.0 + EPSG:4326 的 BBOX 顺序是 lat_min, lon_min, lat_max, lon_max。

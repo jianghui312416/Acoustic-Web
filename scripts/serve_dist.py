@@ -25,15 +25,37 @@ except ImportError as error:
 DEFAULT_NC_PATH = r"D:\JD功能开发\HYdata\GEBCO_2026_sub_ice.nc"
 
 
-def axis_slice(axis, minimum, maximum, requested):
-    first = int(np.searchsorted(axis, minimum, side="left"))
-    last = int(np.searchsorted(axis, maximum, side="right")) - 1
+def axis_window(axis, minimum, maximum, requested):
+    """选择覆盖请求范围的采样窗口；返回窗口、输出节点数与高端索引。"""
+    first = int(np.searchsorted(axis, minimum, side="right")) - 1
+    last = int(np.searchsorted(axis, maximum, side="left"))
     first = max(0, min(len(axis) - 1, first))
     last = max(first, min(len(axis) - 1, last))
     count = max(2, min(512, int(requested)))
-    stride = max(1, (last - first) // (count - 1))
-    end = min(last, first + stride * (count - 1))
-    return slice(first, end + 1, stride)
+    stride = max(1, int(np.ceil((last - first) / (count - 1))))
+    start = max(0, last - stride * (count - 1))
+    return slice(start, last + 1, stride), count, last
+
+
+def read_window(elevation, lat, lon, lat_window, lon_window, last_lat_index, last_lon_index):
+    """读取窗口内的高程，并补齐请求范围的高端格点。"""
+    lat_base = np.arange(lat_window.start, lat_window.stop, lat_window.step, dtype=np.int64)
+    lon_base = np.arange(lon_window.start, lon_window.stop, lon_window.step, dtype=np.int64)
+    values = np.asarray(elevation[lat_window, lon_window], dtype=np.float32)
+    src_lat = np.asarray(lat[lat_base], dtype=np.float64)
+    src_lon = np.asarray(lon[lon_base], dtype=np.float64)
+
+    if lon_base[-1] != last_lon_index:
+        extra_col = np.asarray(elevation[lat_window, last_lon_index], dtype=np.float32)
+        values = np.concatenate([values, extra_col.reshape(-1, 1)], axis=1)
+        src_lon = np.append(src_lon, float(lon[last_lon_index]))
+    if lat_base[-1] != last_lat_index:
+        extra_row = np.asarray(elevation[last_lat_index, lon_base], dtype=np.float32)
+        if lon_base[-1] != last_lon_index:
+            extra_row = np.append(extra_row, float(elevation[last_lat_index, last_lon_index]))
+        values = np.concatenate([values, extra_row.reshape(1, -1)], axis=0)
+        src_lat = np.append(src_lat, float(lat[last_lat_index]))
+    return values, src_lat, src_lon
 
 
 class GebcoGrid:
@@ -46,23 +68,40 @@ class GebcoGrid:
         self.lock = threading.Lock()
 
     def subset(self, west, east, south, north, resolution):
-        xs = axis_slice(self.lon, west, east, resolution)
-        ys = axis_slice(self.lat, south, north, resolution)
+        lat_window, count, last_lat = axis_window(self.lat, south, north, resolution)
+        lon_window, _, last_lon = axis_window(self.lon, west, east, resolution)
         with self.lock:
-            values = np.asarray(self.elevation[ys, xs][::-1], dtype=np.float32)
+            values, src_lat, src_lon = read_window(
+                self.elevation, self.lat, self.lon,
+                lat_window, lon_window, last_lat, last_lon,
+            )
+
+        values = values.astype(np.float64, copy=False)
+        if self.fill_value is not None:
+            values[values == float(self.fill_value)] = np.nan
+
+        target_lat = np.linspace(south, north, count)
+        target_lon = np.linspace(west, east, count)
+        along_lon = np.empty((src_lat.size, count), dtype=np.float64)
+        for row in range(src_lat.size):
+            along_lon[row] = np.interp(target_lon, src_lon, values[row])
+        result = np.empty((count, count), dtype=np.float64)
+        for col in range(count):
+            result[:, col] = np.interp(target_lat, src_lat, along_lon[:, col])
+
+        # 行方向翻转为“北 → 南”，与前端纬度轴一致。
+        rows = result[::-1]
         serialized = [
-            None if value == self.fill_value else float(value)
-            for value in values.ravel()
+            None if not np.isfinite(value) else float(value)
+            for value in rows.ravel()
         ]
         return {
-            "width": int(values.shape[1]),
-            "height": int(values.shape[0]),
+            "width": int(count),
+            "height": int(count),
             "values": serialized,
             "bounds": {
-                "west": float(self.lon[xs.start]),
-                "east": float(self.lon[xs.stop - 1]),
-                "south": float(self.lat[ys.start]),
-                "north": float(self.lat[ys.stop - 1]),
+                "west": float(west), "east": float(east),
+                "south": float(south), "north": float(north),
             },
             "source": "GEBCO_2026_sub_ice",
         }
