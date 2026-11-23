@@ -531,11 +531,9 @@ function onLoad() {
     invalidHint.value = '请先放大地图，再加载新的地形区域'
     return
   }
-  const { bounds, reason } = collectBounds()
+  const { bounds } = collectBounds()
   if (!bounds) {
-    invalidHint.value = reason === 'wrap'
-      ? '选区跨过 180° 经线或位于极区，无法作为单个地形区域；请转动地球到目标海域后再选'
-      : '未读到有效区域，请把红框移到地球表面'
+    invalidHint.value = '未读到有效区域，请把红框移到地球表面'
     return
   }
   invalidHint.value = ''

@@ -1,4 +1,4 @@
-import { computeTerrainStats, mercatorY, normalizeTerrainBounds } from './terrainPreview.js'
+import { computeTerrainStats, mercatorY, normalizeLongitude, normalizeTerrainBounds } from './terrainPreview.js'
 
 const localGrids = new Map()
 
@@ -53,8 +53,8 @@ async function defaultFetchJson(url) {
   return response.json()
 }
 
-async function loadLocalBathymetry(inputBounds, resolution, options) {
-  const request = buildLocalGebcoUrl(inputBounds, resolution, options.baseUrl)
+async function loadLocalGrid(bounds, resolution, options) {
+  const request = buildLocalGebcoUrl(bounds, resolution, options.baseUrl)
   if (!localGrids.has(request.url)) {
     localGrids.set(request.url, requestGrid(request.url, options.fetchJson || defaultFetchJson)
       .then(grid => {
@@ -63,8 +63,88 @@ async function loadLocalBathymetry(inputBounds, resolution, options) {
       })
       .catch(error => { localGrids.delete(request.url); throw error }))
   }
+  return localGrids.get(request.url)
+}
+
+function resampleGridColumns(grid, targetWidth) {
+  const width = Math.max(2, Math.round(Number(targetWidth) || 2))
+  const { width: sourceWidth, height, values, bounds } = grid
+  if (width === sourceWidth) return { width, height, values, bounds }
+  const result = new Float32Array(width * height)
+  for (let row = 0; row < height; row += 1) {
+    for (let col = 0; col < width; col += 1) {
+      const source = width > 1 ? (col / (width - 1)) * (sourceWidth - 1) : 0
+      const left = Math.floor(source)
+      const right = Math.min(sourceWidth - 1, left + 1)
+      const ratio = source - left
+      const a = values[row * sourceWidth + left]
+      const b = values[row * sourceWidth + right]
+      let value = NaN
+      if (Number.isFinite(a) && Number.isFinite(b)) value = a + (b - a) * ratio
+      else if (Number.isFinite(a)) value = a
+      else if (Number.isFinite(b)) value = b
+      result[row * width + col] = value
+    }
+  }
+  return { width, height, values: result, bounds }
+}
+
+async function loadWrappedLocalBathymetry(bounds, resolution, options) {
+  const requested = Math.max(2, Math.min(512, Math.round(Number(resolution) || 96)))
+  const totalSpan = Math.max(1e-9, bounds.east - bounds.west)
+  const spanWest = Math.max(0, 180 - bounds.west)
+  const spanEast = Math.max(0, bounds.east - 180)
+  const westColumns = Math.max(2, Math.round(requested * spanWest / totalSpan))
+  const eastColumns = Math.max(2, requested - westColumns)
+  const commonResolution = requested
+
+  const [westGrid, eastGrid] = await Promise.all([
+    loadLocalGrid(
+      { west: bounds.west, east: 180, south: bounds.south, north: bounds.north },
+      commonResolution,
+      options,
+    ),
+    loadLocalGrid(
+      { west: -180, east: bounds.east - 360, south: bounds.south, north: bounds.north },
+      commonResolution,
+      options,
+    ),
+  ])
+
+  const left = resampleGridColumns(westGrid, westColumns)
+  const right = resampleGridColumns(eastGrid, eastColumns)
+  const width = left.width + right.width
+  const height = Math.min(left.height, right.height)
+  const values = new Float32Array(width * height)
+  for (let row = 0; row < height; row += 1) {
+    for (let col = 0; col < left.width; col += 1) {
+      values[row * width + col] = left.values[row * left.width + col]
+    }
+    for (let col = 0; col < right.width; col += 1) {
+      values[row * width + left.width + col] = right.values[row * right.width + col]
+    }
+  }
+  return {
+    width,
+    height,
+    values,
+    bounds: { ...bounds },
+    source: westGrid.source || eastGrid.source || 'GEBCO_2026_sub_ice',
+    dataSource: BATHYMETRY_SOURCES.local,
+    ...computeTerrainStats(values),
+  }
+}
+
+async function loadLocalBathymetry(inputBounds, resolution, options) {
+  let bounds = normalizeTerrainBounds(inputBounds)
+  if (bounds.east > 180 && bounds.west >= 180 - 1e-9) {
+    bounds = { ...bounds, west: bounds.west - 360, east: bounds.east - 360 }
+  }
   try {
-    return { ...await localGrids.get(request.url), dataSource: BATHYMETRY_SOURCES.local }
+    if (bounds.east > 180) {
+      return await loadWrappedLocalBathymetry(bounds, resolution, options)
+    }
+    return { ...await loadLocalGrid(bounds, resolution, options), dataSource: BATHYMETRY_SOURCES.local }
   } catch (error) {
     throw new Error('本地 GEBCO_2026_sub_ice 海底高程读取失败', { cause: error })
   }
@@ -76,7 +156,8 @@ export function decodeTerrarium(r, g, b) { return r * 256 + g + b / 256 - 32768 
 
 export function terrainTilePoint(lon, lat, zoom) {
   const n = 2 ** zoom
-  const x = Math.min(n - 1e-8, Math.max(0, (lon + 180) / 360 * n))
+  const wrappedLon = normalizeLongitude(lon)
+  const x = Math.min(n - 1e-8, Math.max(0, (wrappedLon + 180) / 360 * n))
   const y = Math.min(n - 1e-8, Math.max(0, mercatorY(lat) * n))
   return { x: Math.floor(x), y: Math.floor(y), px: Math.floor((x % 1) * 256), py: Math.floor((y % 1) * 256) }
 }
@@ -173,9 +254,10 @@ async function loadOnlineBathymetry(inputBounds, resolution, options) {
   const size = Math.max(2, Math.min(512, Math.round(Number(resolution) || 96)))
   let zoom = 8
   while (zoom > 0) {
-    const nw = terrainTilePoint(bounds.west, bounds.north, zoom)
-    const se = terrainTilePoint(bounds.east, bounds.south, zoom)
-    if ((se.x - nw.x + 1) * (se.y - nw.y + 1) <= 16) break
+    const n = 2 ** zoom
+    const xTiles = Math.max(1, Math.ceil((bounds.east - bounds.west) / 360 * n))
+    const yTiles = Math.max(1, Math.ceil(Math.abs(mercatorY(bounds.south) - mercatorY(bounds.north)) * n))
+    if (xTiles * yTiles <= 16) break
     zoom--
   }
   let lastError

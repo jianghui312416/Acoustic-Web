@@ -57,14 +57,40 @@ function ensureSpan(center, min, max) {
   }
 }
 
+/** 把任意经度换算到 [-180, 180)。 */
+export function normalizeLongitude(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return number
+  return ((number + 180) % 360 + 360) % 360 - 180
+}
+
 export function normalizeTerrainBounds(bounds = {}) {
   const rawWest = Number(bounds.west)
   const rawEast = Number(bounds.east)
   const rawSouth = Number(bounds.south)
   const rawNorth = Number(bounds.north)
+  const rawWidth = rawEast - rawWest
+  const unwrapped = Number.isFinite(rawWidth) && rawWidth > 0 && rawWidth <= 360 && rawEast > 180
 
-  let west = clamp(Math.min(rawWest, rawEast), TERRAIN_WORLD_LIMITS.west, TERRAIN_WORLD_LIMITS.east)
-  let east = clamp(Math.max(rawWest, rawEast), TERRAIN_WORLD_LIMITS.west, TERRAIN_WORLD_LIMITS.east)
+  let west
+  let east
+  if (unwrapped) {
+    west = rawWest
+    east = rawEast
+    if (west > 180) {
+      west -= 360
+      east -= 360
+    }
+    if (west < -180) {
+      west += 360
+      east += 360
+    }
+    west = clamp(west, TERRAIN_WORLD_LIMITS.west, TERRAIN_WORLD_LIMITS.east)
+    east = clamp(east, west + MIN_TERRAIN_SPAN_DEG, west + 360)
+  } else {
+    west = clamp(Math.min(rawWest, rawEast), TERRAIN_WORLD_LIMITS.west, TERRAIN_WORLD_LIMITS.east)
+    east = clamp(Math.max(rawWest, rawEast), TERRAIN_WORLD_LIMITS.west, TERRAIN_WORLD_LIMITS.east)
+  }
   let south = clamp(Math.min(rawSouth, rawNorth), TERRAIN_WORLD_LIMITS.south, TERRAIN_WORLD_LIMITS.north)
   let north = clamp(Math.max(rawSouth, rawNorth), TERRAIN_WORLD_LIMITS.south, TERRAIN_WORLD_LIMITS.north)
 
@@ -77,10 +103,13 @@ export function normalizeTerrainBounds(bounds = {}) {
     north = 10
   }
 
-  if (east - west < MIN_TERRAIN_SPAN_DEG) {
-    const range = ensureSpan((west + east) / 2, TERRAIN_WORLD_LIMITS.west, TERRAIN_WORLD_LIMITS.east)
-    west = range.min
-    east = range.max
+  if (east - west >= 360 - 1e-9) {
+    west = TERRAIN_WORLD_LIMITS.west
+    east = TERRAIN_WORLD_LIMITS.east
+  } else if (east - west < MIN_TERRAIN_SPAN_DEG) {
+    const eastLimit = unwrapped ? west + 360 : TERRAIN_WORLD_LIMITS.east
+    west = clamp((west + east) / 2 - MIN_TERRAIN_SPAN_DEG / 2, TERRAIN_WORLD_LIMITS.west, eastLimit - MIN_TERRAIN_SPAN_DEG)
+    east = west + MIN_TERRAIN_SPAN_DEG
   }
   if (north - south < MIN_TERRAIN_SPAN_DEG) {
     const range = ensureSpan((south + north) / 2, TERRAIN_WORLD_LIMITS.south, TERRAIN_WORLD_LIMITS.north)
@@ -95,17 +124,19 @@ export function moveTerrainBounds(bounds, deltaLon, deltaLat) {
   const next = normalizeTerrainBounds(bounds)
   const width = next.east - next.west
   const height = next.north - next.south
+  const unwrapped = next.east > TERRAIN_WORLD_LIMITS.east
+  const eastLimit = unwrapped ? next.west + 360 : TERRAIN_WORLD_LIMITS.east
   const west = clamp(
     next.west + (Number(deltaLon) || 0),
     TERRAIN_WORLD_LIMITS.west,
-    TERRAIN_WORLD_LIMITS.east - width
+    eastLimit - width
   )
   const south = clamp(
     next.south + (Number(deltaLat) || 0),
     TERRAIN_WORLD_LIMITS.south,
     TERRAIN_WORLD_LIMITS.north - height
   )
-  return { west, south, east: west + width, north: south + height }
+  return normalizeTerrainBounds({ west, south, east: west + width, north: south + height })
 }
 
 export function resizeTerrainBounds(bounds, handle, deltaLon, deltaLat) {
@@ -113,13 +144,15 @@ export function resizeTerrainBounds(bounds, handle, deltaLon, deltaLat) {
   const dLon = Number(deltaLon) || 0
   const dLat = Number(deltaLat) || 0
   const key = String(handle || '').toLowerCase()
+  const unwrapped = next.east > TERRAIN_WORLD_LIMITS.east
+  const eastLimit = unwrapped ? next.west + 360 : TERRAIN_WORLD_LIMITS.east
   let { west, south, east, north } = next
 
   if (key.includes('w')) {
     west = clamp(west + dLon, TERRAIN_WORLD_LIMITS.west, east - MIN_TERRAIN_SPAN_DEG)
   }
   if (key.includes('e')) {
-    east = clamp(east + dLon, west + MIN_TERRAIN_SPAN_DEG, TERRAIN_WORLD_LIMITS.east)
+    east = clamp(east + dLon, west + MIN_TERRAIN_SPAN_DEG, eastLimit)
   }
   if (key.includes('n')) {
     north = clamp(north + dLat, south + MIN_TERRAIN_SPAN_DEG, TERRAIN_WORLD_LIMITS.north)
@@ -356,11 +389,15 @@ export function formatTerrainBounds(bounds) {
 /** 把经度格式化为带东西经的单值标签。 */
 export function formatLongitudeValue(value, decimals = 2) {
   const threshold = 0.5 / 10 ** decimals
-  const number = Number(value)
-  const absolute = Math.abs(number)
+  const raw = Number(value)
+  const absolute = Math.abs(raw)
   if (absolute < threshold) return '0°'
   if (Math.abs(absolute - 180) < threshold) return '180°'
-  return `${absolute.toFixed(decimals)}°${number >= 0 ? 'E' : 'W'}`
+  const number = normalizeLongitude(raw)
+  const abs = Math.abs(number)
+  if (abs < threshold) return '0°'
+  if (Math.abs(abs - 180) < threshold) return '180°'
+  return `${abs.toFixed(decimals)}°${number >= 0 ? 'E' : 'W'}`
 }
 
 /** 把纬度格式化为带南北纬的单值标签。 */

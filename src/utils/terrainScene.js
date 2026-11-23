@@ -1031,7 +1031,12 @@ const AXIS_TICKS = 6
 const AXIS_TICK_HALF = 4.5
 
 function formatAxisLon(value) {
-  return `${Math.abs(value).toFixed(2)}°${value >= 0 ? 'E' : 'W'}`
+  const raw = Number(value)
+  const number = ((raw + 180) % 360 + 360) % 360 - 180
+  const absolute = Math.abs(number)
+  if (absolute < 0.005) return '0.00°'
+  if (Math.abs(absolute - 180) < 0.005) return '180.00°'
+  return `${absolute.toFixed(2)}°${number >= 0 ? 'E' : 'W'}`
 }
 
 function formatAxisLat(value) {

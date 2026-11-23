@@ -98,27 +98,58 @@ export function resizeGlobeSelectionRect(
 
 /**
  * 由选框采样到的经纬度点求外包经纬度。
- * 选框跨过 180° 经线时无法用单一矩形表达，返回 null（界面提示用户移开）。
+ * 经度按圆周处理：取点集的最小覆盖弧，跨过 180° 时用东经大于 180°
+ * 的展开形式表示（如 170°E → 190°E），供后续地形底图按经度环绕读取。
+ * 极区选框会自然展开为接近整圈的经度范围。
  */
 export function lonLatPointsToBounds(points) {
-  let west = Infinity
-  let east = -Infinity
-  let south = Infinity
-  let north = -Infinity
+  const longitudes = []
+  const latitudes = []
   let count = 0
 
   for (const point of Array.isArray(points) ? points : []) {
     const lon = Number(point?.lon)
     const lat = Number(point?.lat)
     if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue
-    if (lon < west) west = lon
-    if (lon > east) east = lon
-    if (lat < south) south = lat
-    if (lat > north) north = lat
+    longitudes.push(((lon % 360) + 360) % 360)
+    latitudes.push(lat)
     count += 1
   }
 
   if (!count) return null
-  if (east - west > 180) return null
-  return normalizeTerrainBounds({ west, south, east, north })
+
+  const south = Math.min(...latitudes)
+  const north = Math.max(...latitudes)
+  longitudes.sort((a, b) => a - b)
+
+  let west = 0
+  let width = 0
+  const uniqueLongitudes = new Set(longitudes.map(value => value.toFixed(9)))
+  if (uniqueLongitudes.size > 1) {
+    let gapIndex = 0
+    let maxGap = -1
+    for (let index = 0; index < longitudes.length; index += 1) {
+      const next = longitudes[(index + 1) % longitudes.length]
+      const gap = (next - longitudes[index] + 360) % 360
+      if (gap > maxGap) {
+        maxGap = gap
+        gapIndex = index
+      }
+    }
+    const west360 = longitudes[(gapIndex + 1) % longitudes.length]
+    west = west360 > 180 ? west360 - 360 : west360
+    width = 360 - maxGap
+  } else {
+    const lon = longitudes[0] % 360
+    west = lon > 180 ? lon - 360 : lon
+  }
+  if (!Number.isFinite(width) || width <= 0) width = 0
+  if (north >= 89.5 || south <= -89.5) {
+    west = -180
+    width = 360
+  } else if (width >= 360 - 1e-7) {
+    west = -180
+    width = 360
+  }
+  return normalizeTerrainBounds({ west, south, east: west + width, north })
 }

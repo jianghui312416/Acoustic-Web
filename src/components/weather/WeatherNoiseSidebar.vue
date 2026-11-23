@@ -115,6 +115,64 @@
       </div>
     </template>
     <div v-else-if="!state.loading && !state.error" class="status-message">请选择地图点以加载天气和噪声。</div>
+    <label
+      class="toggle-row bottom"
+      :class="{ disabled: Boolean(selectedAisVessel) }"
+      :title="selectedAisVessel ? '已选择 AIS 船舶，航迹由船舶位置接管' : '在地形中点击依次添加航迹点，双击结束'"
+    >
+      <span>航迹点选择</span>
+      <input
+        v-model="signalTransmissionControls.selectTrackPoints"
+        type="checkbox"
+        :disabled="Boolean(selectedAisVessel)"
+      />
+      <i></i>
+    </label>
+    <p v-if="signalTransmissionControls.selectTrackPoints" class="track-point-help">
+      在地形中点击依次添加航迹点，双击或点击下方按钮结束；与信号传输的航迹点选择共用同一组点。
+    </p>
+    <button
+      v-if="signalTransmissionControls.selectTrackPoints && trackPointState.points.length"
+      type="button"
+      class="track-point-finish"
+      @click="finishTrackPointSelection"
+    >
+      完成航迹点选择（{{ trackPointState.points.length }} 点）
+    </button>
+    <div v-if="trackPointState.finished && trackPointState.points.length" class="track-point-table">
+      <div class="track-point-table-head">
+        <span>已选航迹点</span>
+        <b>{{ trackPointState.points.length }} 个</b>
+      </div>
+      <table>
+        <thead>
+          <tr><th>#</th><th>经度</th><th>纬度</th></tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="(point, index) in trackPointState.points"
+            :key="index"
+            :class="{ selected: trackPointState.selectedIndex === index }"
+            @click="selectTrackPoint(index)"
+          >
+            <td>{{ index + 1 }}</td>
+            <td>{{ formatTrackLon(point.lon) }}</td>
+            <td>{{ formatTrackLat(point.lat) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <button
+      type="button"
+      class="track-field-run"
+      :disabled="trackFieldRunState.running || !trackPointState.points.length"
+      @click="runTrackField"
+    >
+      <span v-if="trackFieldRunState.running" class="track-field-spinner" aria-hidden="true"></span>
+      {{ trackFieldRunState.running ? '正在计算航线声场…' : '航线声场计算' }}
+    </button>
+    <p v-if="trackFieldRunState.error" class="track-field-status error">{{ trackFieldRunState.error }}</p>
+    <p v-else-if="trackFieldRunState.message" class="track-field-status">{{ trackFieldRunState.message }}</p>
   </div>
 </template>
 
@@ -131,6 +189,15 @@ import {
   currentOverlayField, oceanCurrentRegional, overlayFieldDataRange, overlayGradient,
   OCEAN_CURRENT_OVERLAY_FIELD, REGIONAL_NOISE_OVERLAY_FIELD,
 } from '@/utils/weatherOverlay.js'
+import { signalTransmissionControls } from '@/modules/acoustic/signalTransmissionControls.js'
+import { selectedAisVessel } from '@/modules/ais/aisMonitorStore.js'
+import {
+  finishTrackPoints,
+  requestTrackFieldRun,
+  selectTrackPoint,
+  trackFieldRunState,
+  trackPointState,
+} from '@/modules/acoustic/trackPointState.js'
 
 const emit = defineEmits(['pick-on-map'])
 
@@ -139,6 +206,29 @@ const overlayFieldOptions = [
   { value: 'rain', label: '雨' },
   { value: 'sea', label: '海况' },
 ]
+
+function formatTrackLon(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '—'
+  return `${Math.abs(number).toFixed(4)}°${number >= 0 ? 'E' : 'W'}`
+}
+
+function formatTrackLat(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '—'
+  return `${Math.abs(number).toFixed(4)}°${number >= 0 ? 'N' : 'S'}`
+}
+
+function finishTrackPointSelection() {
+  if (!trackPointState.points.length) return
+  if (!trackPointState.finished) finishTrackPoints()
+  if (signalTransmissionControls.selectTrackPoints) signalTransmissionControls.selectTrackPoints = false
+}
+
+function runTrackField() {
+  finishTrackPointSelection()
+  requestTrackFieldRun()
+}
 
 const state = weatherNoiseState
 const result = computed(() => state.result)
@@ -250,6 +340,29 @@ onMounted(async () => {
 .wn-panel,.wn-panel * { box-sizing:border-box; }.wn-panel { margin:5px 0 3px; padding:9px 7px 11px; color:#91adbe; border:1px solid #244057; border-radius:7px; background:#0d1c2d; font:10px/1.35 'Microsoft YaHei',sans-serif; }
 button { color:#9fd9e9; border:1px solid #2e6078; border-radius:5px; background:#102b40; cursor:pointer; }button:disabled { opacity:.5;cursor:default; }
 .provider-row { display:flex; align-items:center; gap:5px; }.provider-row>span:nth-child(2){flex:1;color:#587e94;font-size:9px}.provider { padding:3px 6px;color:#f3bd5f;border:1px solid #85652d;border-radius:12px;font-size:9px;white-space:nowrap}.provider-row button{display:flex;align-items:center;justify-content:center;width:24px;height:22px}.provider-row button svg{width:14px;height:14px;display:block}.grid-point{margin:6px 1px;color:#64869a;font-family:ui-monospace,monospace}.section-label{margin:8px 0 3px;color:#5e8499}.selected-point{display:flex;justify-content:space-between;margin:0 0 6px}.selected-point b{color:#76c9ec;font:10px ui-monospace,monospace}.selected-point span{color:#eabf61}.point-actions{display:grid;grid-template-columns:1fr 1fr;gap:4px}.point-actions button{height:28px;font-size:10px}.toggle-row{position:relative;display:flex;align-items:center;justify-content:space-between;margin:7px 1px;color:#afc6d1}.toggle-row input{position:absolute;right:0;width:40px;height:20px;opacity:0;z-index:2;cursor:pointer}.toggle-row i{width:40px;height:20px;border:1px solid #37617d;border-radius:12px;background:#20384f}.toggle-row i:after{content:'';display:block;width:16px;height:16px;margin:1px;border-radius:50%;background:#6b8aaa;transition:.15s}.toggle-row input:checked+i{background:#0d5e90;border-color:#42a7e4}.toggle-row input:checked+i:after{transform:translateX(19px);background:#62bcff}.bottom{padding-top:7px;border-top:1px solid #20384b}
+.toggle-row.disabled{opacity:.55;cursor:default}
+.toggle-row.disabled input{cursor:default}
+.track-point-help{margin:4px 1px 0;color:#5f8194;font-size:8px;line-height:1.5}
+.track-point-table{margin:7px 1px 0;border:1px solid #26495f;border-radius:6px;background:#0b2233;overflow:hidden}
+.track-point-table-head{display:flex;justify-content:space-between;align-items:center;height:25px;padding:0 7px;border-bottom:1px solid #203c50;color:#8bb7cd;font-size:9px}
+.track-point-table-head b{color:#6de5c4;font:500 9px ui-monospace,monospace}
+.track-point-table table{width:100%;border-collapse:collapse;table-layout:fixed}
+.track-point-table th,.track-point-table td{padding:3px 4px;text-align:left;font-size:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.track-point-table th{color:#5f8499;font-weight:400;border-bottom:1px solid #1d384b}
+.track-point-table td{color:#a8c9d9;font-family:ui-monospace,monospace}
+.track-point-table tbody tr{cursor:pointer}
+.track-point-table tbody tr:hover td{background:#123247;color:#e3f7ff}
+.track-point-table tbody tr.selected td{background:#174966;color:#eafaff}
+.track-point-table th:first-child,.track-point-table td:first-child{width:22px;color:#6f96a9;text-align:center}
+.track-point-finish{width:100%;height:26px;margin-top:6px;color:#8fe4ff;border:1px solid #2f6f8d;border-radius:5px;background:#102b40;font-size:9px;cursor:pointer}
+.track-point-finish:hover{background:#154a66}
+.track-field-run{width:100%;height:28px;margin-top:8px;color:#8ff0ff;border:1px solid #3f86b8;border-radius:5px;background:#0d3552;font-size:10px;cursor:pointer}
+.track-field-run:hover:not(:disabled){background:#145079}
+.track-field-run:disabled{opacity:.5;cursor:default}
+.track-field-spinner{display:inline-block;width:10px;height:10px;margin-right:4px;vertical-align:-1px;border:1.5px solid rgba(143,240,255,.35);border-top-color:#8ff0ff;border-radius:50%;animation:track-field-spin .8s linear infinite}
+.track-field-status{margin:5px 1px 0;color:#6ba3c0;font-size:8px}
+.track-field-status.error{color:#efb18c}
+@keyframes track-field-spin{to{transform:rotate(360deg)}}
 .status-message,.error-message{margin:8px 0;padding:8px;border-radius:5px;background:#12283a;line-height:1.5}.error-message{color:#efb18c;border:1px solid #674b43}.error-message button{display:block;margin-top:6px;padding:3px 9px}.forecast-head{display:flex;justify-content:space-between;gap:8px;margin-top:7px}.forecast-head b{color:#c2d9e4;font-size:9px;text-align:right}.time-slider,.shipping-level input{width:100%;height:3px;margin:9px 0 5px;accent-color:#35d5e7}.weather-spark{display:block;width:100%;height:43px}.weather-spark path{stroke:#263d50}.weather-spark polyline{fill:none}.weather-spark .trend-context{stroke:#376d82;stroke-width:1}.weather-spark .trend-active{stroke:#65def8;stroke-width:1.6}.weather-spark line{stroke:#e4c55e;stroke-width:.7}.weather-spark .trend-level{stroke:#5aa8ff;stroke-width:.65;stroke-dasharray:2 2;opacity:.75}.weather-spark circle{fill:#65def8;stroke:#dffbff;stroke-width:.7}.forecast-range{display:flex;justify-content:space-between;color:#5e7e91;font-size:8px}.weather-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:7px 0}.weather-grid article{min-width:0;padding:7px;border:1px solid #223e55;border-radius:6px;background:#102033}.weather-grid small{display:block;color:#66899d}.weather-grid strong{display:block;margin:2px 0;color:#edf8fb;font-size:17px}.weather-grid strong em{margin-left:3px;color:#a7bfcb;font-size:8px;font-style:normal}.weather-grid p{margin:0;color:#718fa1;font-size:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.noise-title{display:flex;justify-content:space-between;margin:8px 0 4px}.noise-title b{color:#d7e8ef;font-size:9px}.noise-summary{padding:7px;border:1px solid #28617b;border-radius:6px;background:#0c2537}.noise-summary div{display:flex;align-items:baseline;gap:5px}.noise-summary div strong{color:#61e4f8;font:700 21px ui-monospace,monospace}.noise-summary div span{color:#87a7b7;font-size:8px}.noise-summary small{display:block;color:#7799ab}.noise-summary p{margin:4px 0 0;color:#58cfe8}.noise-summary p b{color:#e3eef2}.component-values{display:flex;flex-wrap:wrap;gap:2px 7px;margin:5px 1px;font:8px ui-monospace,monospace}.component-values span{white-space:nowrap}.component-values .wind{color:#59dff5}.component-values .rain{color:#5aa8ff}.component-values .shipping{color:#eebc58}.component-values .turbulence{color:#8ca0b3}.component-values .thermal{color:#b993ff}.noise-band-switch{display:flex;flex-wrap:wrap;gap:4px;margin:5px 0}.noise-band-switch button{height:18px;padding:0 6px;color:#a9cad9;border-color:#35617b;background:#102b40;font-size:8px}.noise-band-switch button.active{color:#eafaff;border-color:#62ccea;background:#174966;box-shadow:inset 0 0 0 1px #2b809f}.chart-note{margin:4px 0 8px;color:#5f8194;font-size:8px}.shipping-level{display:grid;grid-template-columns:1fr auto;align-items:center;color:#7899aa}.shipping-level b{color:#59dce8}.shipping-level input{grid-column:1/-1;cursor:pointer}
 .shipping-scale{grid-column:1/-1;display:flex;justify-content:space-between;color:#58798d;font-size:8px;font-style:normal}
 .shipping-count-curve{margin:7px 0 9px;padding-top:6px;border-top:1px solid #20384b}.shipping-curve-title,.shipping-curve-range{display:flex;justify-content:space-between;gap:8px}.shipping-curve-title{color:#7899aa}.shipping-curve-title b{color:#eebc58;font-family:ui-monospace,monospace}.shipping-count-curve svg{display:block;width:100%;height:36px;margin-top:4px}.shipping-count-curve path{fill:none;stroke:#263d50;stroke-width:.7}.shipping-count-curve polyline{fill:none;stroke:#eebc58;stroke-width:1.4}.shipping-count-curve line{stroke:#65def8;stroke-width:.7;stroke-dasharray:2 2}.shipping-count-curve circle{fill:#65def8;stroke:#dffbff;stroke-width:.7}.shipping-curve-range{color:#58798d;font:8px ui-monospace,monospace}.shipping-count-curve small{display:block;margin-top:3px;color:#5f8194;font-size:8px}

@@ -33,7 +33,7 @@ test('global globe mounts AIS markers with hover halo and a compact synchronized
 
 test('terrain thumbnail renders lightweight AIS presence dots and highlights the selected vessel', () => {
   assert.match(thumbnail, /function drawAisPresence/)
-  assert.match(thumbnail, /lonLatToWorldPoint\(vessel\.longitude, vessel\.latitude\)/)
+  assert.match(thumbnail, /normalizeLongitude\(Number\(vessel\.longitude\) - thumbLonOffset\.value\)/)
   assert.match(thumbnail, /const maxDots = 4000/)
   assert.match(thumbnail, /ctx\.fillStyle = '#ffd04c'/)
   assert.match(thumbnail, /watch\(\(\) => aisMonitorState\.vessels, renderMap\)/)
@@ -41,8 +41,8 @@ test('terrain thumbnail renders lightweight AIS presence dots and highlights the
   assert.match(thumbnail, /watch\(\(\) => aisMonitorState\.displayEnabled, renderMap\)/)
 })
 
-test('ship monitor follows signal excess and exposes connection, sorting, speed filter and details', () => {
-  assert.ok(sidebar.indexOf('class="module-group ais-monitor-module"') > sidebar.indexOf('class="module-group signal-excess-module"'))
+test('ship monitor appears above signal excess and exposes connection, sorting, speed filter and details', () => {
+  assert.ok(sidebar.indexOf('class="module-group ais-monitor-module"') < sidebar.indexOf('class="module-group signal-excess-module"'))
   assert.match(sidebar, /<AisMonitorSidebar v-if="aisOpen"/)
   assert.match(sidebar, /@click\.stop="toggleAisMonitor"/)
   assert.match(sidebar, /if \(props\.collapsed\) emit\('toggle-collapse'\)/)

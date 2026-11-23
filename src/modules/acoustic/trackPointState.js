@@ -5,11 +5,53 @@ const DOUBLE_CLICK_DUPLICATE_MS = 600
 
 export const trackPointState = reactive({
   points: [],
+  params: [],
+  selectedIndex: -1,
   finished: false,
   revision: 0,
   lastAddedAt: 0,
   addedAt: [],
 })
+
+export const trackFieldRunState = reactive({
+  requestToken: 0,
+  running: false,
+  message: '',
+  error: '',
+  completedCount: 0,
+})
+
+function defaultTrackPointParams() {
+  return {
+    sourceDepthM: 150,
+    frequencyHz: 100,
+    rangeNm: 10,
+    grazingAngleMin: -25,
+    grazingAngleMax: 25,
+    lineCount: 10,
+    sector: 4,
+    model: 'bellhop',
+  }
+}
+
+export function updateTrackPointParams(index, patch) {
+  const target = trackPointState.params[index]
+  if (!target || !patch || typeof patch !== 'object') return
+  trackPointState.params[index] = { ...target, ...patch }
+  trackPointState.revision += 1
+}
+
+export function selectTrackPoint(index) {
+  const next = Number(index)
+  trackPointState.selectedIndex = Number.isInteger(next) && next >= 0 && next < trackPointState.points.length
+    ? next
+    : -1
+}
+
+export function requestTrackFieldRun() {
+  if (trackFieldRunState.running) return
+  trackFieldRunState.requestToken += 1
+}
 
 /** 航迹点选择开关打开且尚未双击结束时，仅由地形区域接收点选。 */
 export const trackPointDrawing = computed(() => (
@@ -23,13 +65,18 @@ function finiteNumber(value) {
 
 export function resetTrackPoints() {
   trackPointState.points = []
+  trackPointState.params = []
+  trackPointState.selectedIndex = -1
   trackPointState.finished = false
   trackPointState.revision += 1
   trackPointState.lastAddedAt = 0
   trackPointState.addedAt = []
+  trackFieldRunState.message = ''
+  trackFieldRunState.error = ''
+  trackFieldRunState.completedCount = 0
 }
 
-export function addTrackPoint(point, now = Date.now()) {
+export function addTrackPoint(point, now = Date.now(), params = null) {
   if (trackPointState.finished) return false
   const lon = finiteNumber(point?.lon)
   const lat = finiteNumber(point?.lat)
@@ -39,6 +86,10 @@ export function addTrackPoint(point, now = Date.now()) {
     lon,
     lat,
     elevation: elevation === null ? 0 : elevation,
+  })
+  trackPointState.params.push({
+    ...defaultTrackPointParams(),
+    ...(params && typeof params === 'object' ? params : {}),
   })
   trackPointState.revision += 1
   trackPointState.lastAddedAt = now
@@ -56,10 +107,12 @@ export function finishTrackPointsFromDoubleClick(now = Date.now()) {
   }
   while (duplicateCount > 0 && trackPointState.points.length) {
     trackPointState.points.pop()
+    trackPointState.params.pop()
     trackPointState.addedAt.pop()
     duplicateCount -= 1
   }
   trackPointState.finished = true
+  trackPointState.selectedIndex = -1
   trackPointState.revision += 1
   return true
 }
@@ -68,6 +121,7 @@ export function finishTrackPointsFromDoubleClick(now = Date.now()) {
 export function finishTrackPoints() {
   if (trackPointState.finished || trackPointState.points.length < 1) return false
   trackPointState.finished = true
+  trackPointState.selectedIndex = -1
   trackPointState.revision += 1
   return true
 }

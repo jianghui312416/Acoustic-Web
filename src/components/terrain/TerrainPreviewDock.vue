@@ -26,20 +26,6 @@
         :style="tick.style"
       >{{ tick.label }}</span>
 
-      <button
-        type="button"
-        class="thumb-locate"
-        title="定位到当前数字地球视角"
-        @pointerdown.stop
-        @click="$emit('locate')"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="1.4" />
-          <circle cx="12" cy="12" r="2.2" fill="currentColor" />
-          <path d="M12 2.8v4M12 17.2v4M2.8 12h4M17.2 12h4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-        </svg>
-      </button>
-
       <div class="thumb-rect" :style="rectStyle" @pointerdown.stop.prevent="onRectPointerDown">
         <span class="thumb-coord thumb-coord-n">{{ coordLabels.north }}</span>
         <span class="thumb-coord thumb-coord-s">{{ coordLabels.south }}</span>
@@ -77,6 +63,7 @@ import {
   formatTerrainBoundsEdges,
   mercatorY,
   moveTerrainBounds,
+  normalizeLongitude,
   panThumbView,
   resizeTerrainBounds,
   lonLatToWorldPoint,
@@ -97,11 +84,12 @@ const props = defineProps({
 })
 const collapsed = defineModel('collapsed', { type: Boolean, default: false })
 
-const emit = defineEmits(['update:bounds', 'load', 'locate'])
+const emit = defineEmits(['update:bounds', 'load'])
 
 const mapEl = ref(null)
 const mapCanvas = ref(null)
 const worldCanvas = shallowRef(null)
+const shiftedWorldCanvas = shallowRef(null)
 const thumbnailReady = ref(false)
 const armed = ref(false)
 const thumbView = ref(createThumbView())
@@ -111,16 +99,33 @@ let bathyTimer = 0
 let bathyToken = 0
 let bathyImage = null
 let bathyViewKey = ''
-const viewKey = () => Object.values(thumbView.value).map(v => v.toFixed(7)).join(',')
+const thumbLonOffset = computed(() => {
+  const west = Number(props.bounds?.west)
+  const east = Number(props.bounds?.east)
+  if (!Number.isFinite(west) || !Number.isFinite(east)) return 0
+  return east > 180 && east - west < 180 - 1e-9 ? 180 : 0
+})
+const viewBounds = computed(() => {
+  const bounds = props.bounds || {}
+  if (!thumbLonOffset.value) return { ...bounds }
+  return {
+    west: Number(bounds.west) - 180,
+    east: Number(bounds.east) - 180,
+    south: Number(bounds.south),
+    north: Number(bounds.north),
+  }
+})
+const viewKey = () => [thumbLonOffset.value, ...Object.values(thumbView.value).map(v => v.toFixed(7))].join(',')
 
 function scheduleBathyMap() {
   clearTimeout(bathyTimer)
   const request = ++bathyToken
   bathyTimer = setTimeout(async () => {
     const view = { ...thumbView.value }
+    const offset = thumbLonOffset.value
     const key = viewKey()
     try {
-      const grid = await loadBathymetry({ west: view.x0 * 360 - 180, east: view.x1 * 360 - 180,
+      const grid = await loadBathymetry({ west: view.x0 * 360 - 180 + offset, east: view.x1 * 360 - 180 + offset,
         north: inverseMercatorY(view.y0), south: inverseMercatorY(view.y1) }, 160,
       { source: bathymetrySourceState.source })
       if (disposed || request !== bathyToken) return
@@ -146,7 +151,7 @@ function scheduleBathyMap() {
 }
 
 // Start with the selected region in view, leaving room to move the red bounds.
-watch(() => props.bounds, (bounds) => {
+watch(viewBounds, (bounds) => {
   if (dragState) return
   const cx = ((bounds.west + bounds.east) / 2 + 180) / 360
   const cy = mercatorY((bounds.north + bounds.south) / 2)
@@ -166,7 +171,7 @@ watch(() => bathymetrySourceState.source, () => {
 })
 
 const rectStyle = computed(() => {
-  const rect = boundsToViewRect(props.bounds, thumbView.value)
+  const rect = boundsToViewRect(viewBounds.value, thumbView.value)
   return {
     left: `${rect.left * 100}%`,
     top: `${rect.top * 100}%`,
@@ -181,7 +186,7 @@ const heightKmLabel = computed(() => formatDistanceKm(boundsKm.value.heightKm))
 const coordLabels = computed(() => formatTerrainBoundsEdges(props.bounds))
 
 const loadButtonStyle = computed(() => {
-  const rect = boundsToViewRect(props.bounds, thumbView.value)
+  const rect = boundsToViewRect(viewBounds.value, thumbView.value)
   const left = Math.min(0.9, Math.max(0.1, rect.left + rect.width / 2))
   const top = Math.min(0.82, Math.max(0.02, rect.top + rect.height + 0.015))
   return {
@@ -210,9 +215,10 @@ const graticuleTicks = computed(() => {
   const latDecimals = latSpan >= 10 ? 0 : latSpan >= 1 ? 1 : 2
 
   const lonTicks = []
+  const lonOffset = thumbLonOffset.value
   for (let i = 0; i < 5; i += 1) {
     const f = i / 4
-    const lon = west + lonSpan * f
+    const lon = normalizeLongitude(west + lonSpan * f + lonOffset)
     const transform = i === 0 ? 'translateX(4px)' : i === 4 ? 'translateX(calc(-100% - 4px))' : 'translateX(-50%)'
     lonTicks.push({ style: { left: `${f * 100}%`, transform }, label: tickLabel(lon, lonDecimals, true) })
   }
@@ -337,6 +343,17 @@ onMounted(() => {
   buildWorldThumbnail()
 })
 
+function makeShiftedWorld(source) {
+  const shifted = document.createElement('canvas')
+  shifted.width = source.width
+  shifted.height = source.height
+  const ctx = shifted.getContext('2d')
+  if (!ctx) return null
+  ctx.drawImage(source, source.width / 2, 0)
+  ctx.drawImage(source, -source.width / 2, 0)
+  return shifted
+}
+
 async function buildWorldThumbnail() {
   const zoom = 2
   const tileCount = 1 << zoom
@@ -350,6 +367,7 @@ async function buildWorldThumbnail() {
 
   drawFallbackMap(offCtx, worldSize, worldSize)
   worldCanvas.value = offscreen
+  shiftedWorldCanvas.value = makeShiftedWorld(offscreen)
   renderMap()
 
   const tiles = []
@@ -377,13 +395,16 @@ async function buildWorldThumbnail() {
 
   if (!loadedCount) drawFallbackMap(offCtx, worldSize, worldSize)
   worldCanvas.value = offscreen
+  shiftedWorldCanvas.value = makeShiftedWorld(offscreen)
   renderMap()
   thumbnailReady.value = true
 }
 
 function renderMap() {
   const canvas = mapCanvas.value
-  const world = worldCanvas.value
+  const world = thumbLonOffset.value
+    ? (shiftedWorldCanvas.value || worldCanvas.value)
+    : worldCanvas.value
   if (!canvas || !world) return
 
   const width = 1024
@@ -421,9 +442,12 @@ function drawAisPresence(ctx, width, height, view) {
   let selectedDot = null
   const maxDots = 4000
 
-  for (const vessel of aisMonitorState.vessels) {
-    const world = lonLatToWorldPoint(vessel.longitude, vessel.latitude)
-    if (world.x < view.x0 || world.x > view.x1 || world.y < view.y0 || world.y > view.y1) continue
+    for (const vessel of aisMonitorState.vessels) {
+      const world = lonLatToWorldPoint(
+        normalizeLongitude(Number(vessel.longitude) - thumbLonOffset.value),
+        vessel.latitude,
+      )
+      if (world.x < view.x0 || world.x > view.x1 || world.y < view.y0 || world.y > view.y1) continue
     const x = (world.x - view.x0) / viewWidth * width
     const y = (world.y - view.y0) / viewHeight * height
     if (vessel.mmsi === aisMonitorState.selectedMmsi) {
@@ -586,34 +610,6 @@ watch(() => aisMonitorState.displayEnabled, renderMap)
 
 .thumb-grid-lon { bottom: 4px; }
 .thumb-grid-lat { left: 6px; }
-
-.thumb-locate {
-  position: absolute;
-  top: 7px;
-  right: 7px;
-  z-index: 6;
-  width: 26px;
-  height: 26px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  color: #a9eaff;
-  border: 1px solid rgba(92, 198, 228, 0.45);
-  border-radius: 5px;
-  background: rgba(4, 30, 46, 0.72);
-  cursor: pointer;
-}
-
-.thumb-locate:hover {
-  color: #ffffff;
-  border-color: rgba(98, 224, 255, 0.85);
-  background: rgba(10, 67, 90, 0.86);
-}
-
-.thumb-locate svg {
-  width: 15px;
-  height: 15px;
-}
 
 .thumb-rect {
   position: absolute;

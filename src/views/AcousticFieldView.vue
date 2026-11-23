@@ -1336,6 +1336,7 @@ import {
 import {
   clearTrackPoints,
   resetTrackPoints,
+  trackFieldRunState,
   trackPointDrawing,
   trackPointState,
 } from '@/modules/acoustic/trackPointState.js'
@@ -1365,7 +1366,7 @@ import {
 } from '@/utils/vesselNoiseSimulation.js'
 import { signalExcessState } from '@/modules/acoustic/signalExcessState.js'
 import { createSignalExcessField } from '@/utils/signalExcess.js'
-import { normalizeTerrainBounds } from '@/utils/terrainPreview.js'
+import { normalizeLongitude, normalizeTerrainBounds } from '@/utils/terrainPreview.js'
 import {
   acousticSceneState,
   activeVolumeColorStops,
@@ -1601,7 +1602,7 @@ function syncGlobeSelection(bounds) {
 function syncSimulationSourceToBoundsCenter(bounds) {
   if (!bounds) return
   const target = normalizeTerrainBounds(bounds)
-  const lon = (Number(target.west) + Number(target.east)) / 2
+  const lon = normalizeLongitude((Number(target.west) + Number(target.east)) / 2)
   const lat = (Number(target.south) + Number(target.north)) / 2
   if (!Number.isFinite(lon) || !Number.isFinite(lat)) return
   calcParams.value.coordX = Number(lon.toFixed(6))
@@ -1628,7 +1629,7 @@ function leaveTerrainForGlobe(payload) {
   globeSelection.value = target
   enterCleanGlobeView()
 
-  const centerLon = (target.west + target.east) / 2
+  const centerLon = normalizeLongitude((target.west + target.east) / 2)
   const centerLat = (target.south + target.north) / 2
   if (viewer && !viewer.isDestroyed?.()) {
     const spanLatM = Math.max(0.5, target.north - target.south) * 110574
@@ -2397,9 +2398,88 @@ function runStationPositionCard() {
 function runAtTerrainStation(point) {
   if (loading.value) return
   if (analysisMode.value !== '3d') switchMode('3d')
-  // 直接运行不打开/替换参数卡片；仅同步本次运行时使用的声源坐标。
+  // 直接运行参数卡/替换当前声场；面板运行时使用声源坐标。
   syncSimulationLocationFromTerrain(point)
   runTerrainField()
+}
+
+function applyTrackPointParamsToCalc(point, index) {
+  const params = trackPointState.params[index] || {}
+  const sourceDepth = Number(params.sourceDepthM)
+  const frequency = Number(params.frequencyHz)
+  const range = Number(params.rangeNm)
+  const grazingMin = Number(params.grazingAngleMin)
+  const grazingMax = Number(params.grazingAngleMax)
+  const lineCount = Number(params.lineCount)
+  const sector = Number(params.sector)
+  calcParams.value.coordX = Number(normalizeLongitude(Number(point.lon)).toFixed(6))
+  calcParams.value.coordY = Number(Number(point.lat).toFixed(6))
+  if (Number.isFinite(sourceDepth)) calcParams.value.srcDepth = Math.max(0, sourceDepth)
+  if (Number.isFinite(frequency) && frequency > 0) {
+    calcParams.value.minFreq = frequency
+    calcParams.value.maxFreq = frequency
+  }
+  if (Number.isFinite(range) && range > 0) calcParams.value.range = range
+  if (Number.isFinite(grazingMin)) calcParams.value.grazingAngleMin = Math.max(-90, Math.min(90, grazingMin))
+  if (Number.isFinite(grazingMax)) calcParams.value.grazingAngleMax = Math.max(-90, Math.min(90, grazingMax))
+  if (Number.isFinite(lineCount)) calcParams.value.lineCount = Math.max(0, Math.round(lineCount))
+  if (Number.isFinite(sector)) calcParams.value.sector = Math.max(1, Math.min(360, Math.round(sector)))
+  if (params.model === 'bellhop' || params.model === 'ram') calcParams.value.model = params.model
+}
+
+async function runTrackPointFields() {
+  if (loading.value || trackFieldRunState.running) return
+  const points = trackPointState.points.map((point, index) => ({
+    ...point,
+    index,
+    params: trackPointState.params[index] || {},
+  }))
+  if (!points.length) {
+    trackFieldRunState.error = '请先选择航迹点'
+    return
+  }
+  if (analysisMode.value !== '3d') switchMode('3d')
+  const original = JSON.parse(JSON.stringify(calcParams.value))
+  trackFieldRunState.running = true
+  trackFieldRunState.error = ''
+  trackFieldRunState.completedCount = 0
+  trackFieldRunState.message = `准备计算 ${points.length} 个航迹点声场…`
+  try {
+    archiveCurrent3dRun()
+    for (let index = 0; index < points.length; index += 1) {
+      const point = points[index]
+      applyTrackPointParamsToCalc(point, index)
+      terrainRunVisible.value = true
+      terrainRunMinimized.value = false
+      terrainRunTime.value = `${new Date().toLocaleTimeString('zh-CN', { hour12: false })} · 航迹点 ${index + 1}`
+      terrainSource.value = {
+        lon: Number(calcParams.value.coordX),
+        lat: Number(calcParams.value.coordY),
+        depth: Number(calcParams.value.srcDepth),
+      }
+      terrainRadiusKm.value = Math.max(0.1, Number(calcParams.value.range) * 1.852)
+      errorText.value = ''
+      trackFieldRunState.message = `正在计算航迹点 ${index + 1}/${points.length}…`
+      await loadData()
+      if (errorText.value || !soundField?.loaded || !raySourceData.value) {
+        throw new Error(errorText.value || `航迹点 ${index + 1} 声场计算失败`)
+      }
+      const layerCount = runHistoryLayers.value.length
+      archiveCurrent3dRun()
+      if (runHistoryLayers.value.length <= layerCount) {
+        throw new Error(`航迹点 ${index + 1} 声场归档失败`)
+      }
+      trackFieldRunState.completedCount = index + 1
+      await nextTick()
+    }
+    terrainRunVisible.value = false
+    trackFieldRunState.message = `已完成 ${points.length} 个航迹点声场`
+  } catch (error) {
+    trackFieldRunState.error = error?.message || String(error)
+  } finally {
+    trackFieldRunState.running = false
+    Object.assign(calcParams.value, original)
+  }
 }
 // 任何入口触发运行时，以实际运行时间为准刷新站点参数卡片状态。
 watch(terrainRunTime, (time) => {
@@ -4378,6 +4458,10 @@ watch(() => trackPointState.revision, () => {
   syncHydrophonePreviewPlayback()
 })
 
+watch(() => trackFieldRunState.requestToken, () => {
+  void runTrackPointFields()
+})
+
 function vesselSimulationIntent() {
   if (skipVesselSimulationOnce) {
     skipVesselSimulationOnce = false
@@ -5833,95 +5917,6 @@ function syncSoundField(options = {}) {
 let azimuthSyncTimer = null
 /** 最近一次「裁剪体」方向（内部角，正东 0°、逆时针），关闭再开启时恢复该裁剪效果。 */
 let lastClipAzimuthDeg = null
-
-/** 方位方向线（Display[4]）：在海平面绘制指向当前方位角的洋红方向线 + 标签 */
-let east90IndicatorEntities = []
-
-/** 罗盘方位角 → 中文八方位 */
-function compassCardinalLabel(bearing) {
-  const dirs = ['北', '东北', '东', '东南', '南', '西南', '西', '西北']
-  const normalized = ((Math.round(bearing) % 360) + 360) % 360
-  return dirs[Math.round(normalized / 45) % 8]
-}
-
-function applyEast90Indicator() {
-  if (viewer?.entities) {
-    for (const entity of east90IndicatorEntities) {
-      try { viewer.entities.remove(entity) } catch {}
-    }
-  }
-  east90IndicatorEntities = []
-  // 区域地形模式由 TerrainPreviewMode 直接绘制方位线；这里只负责全球 Cesium 三维体。
-  const enabled = verticalSliceControls.east90Indicator && props.viewMode !== 'terrain'
-  if (!enabled || !viewer?.entities || !viewer || viewer.isDestroyed?.()) return
-  // 选中历史声场时方向线跟随该声场体，否则用当前实际声源点。
-  const layer = selectedProfileLayer.value
-  const source = layer?.source ?? sourcePoint.value ?? { lon: calcParams.value.coordX, lat: calcParams.value.coordY }
-  const sourceLon = Number(source.lon)
-  const sourceLat = Number(source.lat)
-  if (!Number.isFinite(sourceLon) || !Number.isFinite(sourceLat)) return
-  const radiusM = Number(layer ? (layer.sourceRadiusKm || layer.radiusKm) : sourceRadiusKm.value) * 1000 || 10000
-  // 内部方位（正东 0°、逆时针）转罗盘方位（正北 0°、顺时针）。
-  const bearing = internalAzimuthToCompassBearing(
-    layer ? (Number(layer.sliceAzimuthDeg) || 0) : sliceAzimuthDeg.value
-  )
-  const end = destinationLonLat(sourceLon, sourceLat, bearing, radiusM)
-  const color = Cesium.Color.fromCssColorString('#ff2d95').withAlpha(0.95)
-  const lineAltitude = 5
-  const start = Cesium.Cartesian3.fromDegrees(sourceLon, sourceLat, lineAltitude)
-  const endCart = Cesium.Cartesian3.fromDegrees(end.lon, end.lat, lineAltitude)
-  east90IndicatorEntities.push(
-    viewer.entities.add({
-      polyline: {
-        positions: [start, endCart],
-        width: 2.5,
-        arcType: Cesium.ArcType.NONE,
-        material: new Cesium.ColorMaterialProperty(color),
-        depthFailMaterial: new Cesium.ColorMaterialProperty(color),
-      },
-    })
-  )
-  east90IndicatorEntities.push(
-    viewer.entities.add({
-      position: Cesium.Cartesian3.midpoint(start, endCart, new Cesium.Cartesian3()),
-      label: {
-        text: `${Math.round(bearing)}° ${compassCardinalLabel(bearing)}`,
-        font: '600 13px sans-serif',
-        fillColor: Cesium.Color.fromCssColorString('#ffd6e4'),
-        backgroundColor: Cesium.Color.fromCssColorString('#4a0b2e'),
-        showBackground: true,
-        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
-        pixelOffset: new Cesium.Cartesian2(0, -14),
-        disableDepthTestDistance: Number.POSITIVE_INFINITY,
-      },
-    })
-  )
-  east90IndicatorEntities.push(
-    viewer.entities.add({
-      position: endCart,
-      point: {
-        pixelSize: 6,
-        color,
-        outlineColor: Cesium.Color.WHITE,
-        outlineWidth: 1,
-        disableDepthTestDistance: Number.POSITIVE_INFINITY,
-      },
-    })
-  )
-  viewer.scene?.requestRender?.()
-}
-watch(
-  () => [
-    verticalSliceControls.east90Indicator,
-    props.viewMode,
-    profileDirectionLayerId.value,
-    profileSourceLon.value,
-    profileSourceLat.value,
-    profileMaxRadiusM.value,
-    profileAzimuthDeg.value,
-  ],
-  () => applyEast90Indicator()
-)
 
 /** 创建 / 更新声源点上方「可拖拽方位指针」 */
 function setupAzimuthPointer() {
@@ -7655,12 +7650,6 @@ onBeforeUnmount(() => {
   removePickMarker('receiver')
   clearTrackPointFeatures()
   clearTrackPoints()
-  if (viewer?.entities) {
-    for (const entity of east90IndicatorEntities) {
-      try { viewer.entities.remove(entity) } catch {}
-    }
-    east90IndicatorEntities = []
-  }
   soundField?.destroy()
   soundField = null
   if (viewer && !viewer.isDestroyed()) {

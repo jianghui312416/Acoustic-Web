@@ -8,6 +8,7 @@ import {
   clampFrameIndex, clampShippingActivity, coatesStojanovicShippingCurve,
   powerSumCurvesDb, spectrumValueAt,
 } from '@/utils/weatherNoiseForecast.js'
+import { normalizeLongitude } from '@/utils/terrainPreview.js'
 
 export const DEFAULT_NOISE_BANDS = Object.freeze([
   Object.freeze({ id: '100hz-10khz', label: '100 Hz–10 kHz', low_hz: 100, high_hz: 10000 }),
@@ -161,7 +162,7 @@ export function setWeatherNoiseFrame(index) {
 }
 
 export function setTerrainCenter(center) {
-  const lon = Number(center?.lon)
+  const lon = normalizeLongitude(Number(center?.lon))
   const lat = Number(center?.lat)
   if (!Number.isFinite(lon) || !Number.isFinite(lat)) return
   weatherNoiseState.terrainCenter = { lon, lat }
@@ -379,7 +380,7 @@ export function setNoiseProbePicking(picking) {
 }
 
 export function setWeatherNoisePoint(point, options = {}) {
-  const lon = Number(point?.lon ?? point?.longitude)
+  const lon = normalizeLongitude(Number(point?.lon ?? point?.longitude))
   const lat = Number(point?.lat ?? point?.latitude)
   if (!Number.isFinite(lon) || !Number.isFinite(lat)) return Promise.resolve(null)
   const next = { lon, lat, elevation: Number.isFinite(Number(point?.elevation)) ? Number(point.elevation) : null }

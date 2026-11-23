@@ -10,6 +10,15 @@
     <canvas ref="aisCanvasEl" class="ais-canvas" aria-label="地形模式 AIS 船舶位置图层"></canvas>
     <canvas ref="aisDynamicCanvasEl" class="ais-dynamic-canvas" aria-hidden="true"></canvas>
     <canvas ref="trackCanvasEl" class="track-canvas" aria-hidden="true"></canvas>
+    <SeafloorFeatureLabels
+      v-if="active"
+      :active="active"
+      :grid="grid"
+      :scene="labelScene"
+      :camera="camera"
+      :canvas-size="canvasSize"
+      @station="onSeafloorFeatureStation"
+    />
     <button
       v-if="exaggerationHandle && !leavingForGlobe"
       type="button"
@@ -57,6 +66,12 @@
     </div>
     <TerrainStationCard v-if="station" :point="station" :dataset="dataset" :time="time" :running="running"
       @close="station = null" @run="runStation" @parameters="openStationParameters" @noise="$emit('noise', $event)" />
+    <TrackPointCard
+      v-if="trackPointCardPoint"
+      :point="trackPointCardPoint"
+      @close="trackPointState.selectedIndex = -1"
+      @update-params="updateTrackPointParams($event.index, $event.patch)"
+    />
     <div v-if="terrainLegend" class="terrain-legend" aria-label="高程色带图例">
       <span class="terrain-legend-title">{{ terrainLegend.title }}</span>
       <div class="terrain-legend-bar" :style="{ background: terrainLegend.gradient }"></div>
@@ -66,7 +81,7 @@
     </div>
     <slot :anchor="anchor" />
     <TerrainPreviewDock v-model:bounds="bounds" :collapsed="thumbnailCollapsed" :loading="status === 'loading'"
-      @update:collapsed="$emit('update:thumbnailCollapsed', $event)" @load="loadTerrainFromDock" @locate="locateSource" />
+      @update:collapsed="$emit('update:thumbnailCollapsed', $event)" @load="loadTerrainFromDock" />
     <footer class="terrain-status">
       <i></i>
       <span v-if="hover">经度 {{ hover.lon.toFixed(4) }}°　纬度 {{ hover.lat.toFixed(4) }}°　{{ hover.elevation < 0 ? '水深' : '高程' }} {{ Math.abs(hover.elevation).toFixed(0) }} m</span>
@@ -96,6 +111,8 @@ import { moonLightDirection } from '@/utils/moonLight.js'
 import { TERRAIN_MAX_MESH_SEGMENTS, terrainColorAt } from '@/utils/terrainRendering.js'
 import TerrainPreviewDock from './TerrainPreviewDock.vue'
 import TerrainStationCard from './TerrainStationCard.vue'
+import TrackPointCard from './TrackPointCard.vue'
+import SeafloorFeatureLabels from './SeafloorFeatureLabels.vue'
 import { pickTerrainPoint } from '@/utils/terrainPicking.js'
 import {
   activeVolumeColorStops,
@@ -122,8 +139,10 @@ import {
   finishTrackPointsFromDoubleClick,
   trackPointDrawing,
   trackPointState,
+  updateTrackPointParams,
 } from '@/modules/acoustic/trackPointState.js'
 import { signalTransmissionControls } from '@/modules/acoustic/signalTransmissionControls.js'
+import { simulationControls } from '@/modules/acoustic/simulationControls.js'
 import {
   aisMonitorState,
   selectAisVessel,
@@ -176,8 +195,36 @@ const props = defineProps({
 })
 const emit = defineEmits(['anchor', 'layer-anchors', 'bounds-change', 'load-terrain', 'request-globe', 'station-run', 'station-parameters', 'station-pick', 'noise', 'receiver-pick', 'update:thumbnailCollapsed', 'arrow-azimuth'])
 const station = ref(null)
+const trackPointAnchor = ref(null)
+const trackPointCardPoint = computed(() => {
+  const index = trackPointState.selectedIndex
+  const point = trackPointState.points[index]
+  const anchor = trackPointAnchor.value
+  if (!point || !anchor) return null
+  return {
+    ...point,
+    index,
+    params: trackPointState.params[index] || {},
+    x: anchor.x,
+    y: anchor.y,
+  }
+})
 let suspendedStation = null
 function runStation(point) { emit('station-run', point) }
+function onSeafloorFeatureStation(point) {
+  const lon = Number(point?.lon)
+  const lat = Number(point?.lat)
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return
+  const next = {
+    lon,
+    lat,
+    elevation: Number(point?.elevation) || 0,
+    x: Number(point?.x) || 0,
+    y: Number(point?.y) || 0,
+  }
+  station.value = next
+  emit('station-pick', next)
+}
 function openStationParameters(point) {
   suspendedStation = station.value ? { ...station.value } : { ...point }
   emit('station-parameters', point)
@@ -198,6 +245,7 @@ const trackCanvasEl = ref(null)
 const bounds = ref(normalizeTerrainBounds({ west: 115.4, east: 116.6, south: 15.4, north: 16.6 }))
 const loadedBounds = ref(null)
 const grid = shallowRef(null)
+const labelScene = shallowRef(null)
 const status = ref('idle')
 const error = ref('')
 const hover = ref(null)
@@ -545,6 +593,17 @@ function draw() {
     },
   })
   updateExaggerationHandle()
+  labelScene.value = lastScene
+  if (trackPointState.selectedIndex >= 0 && lastScene?.project) {
+    const trackPoint = trackPointState.points[trackPointState.selectedIndex]
+    if (trackPoint) {
+      const depth = Math.max(0, Number(trackPointState.params[trackPointState.selectedIndex]?.sourceDepthM) || 0)
+      const projected = lastScene.project(trackPoint.lon, trackPoint.lat, -depth)
+      if (projected && Number.isFinite(projected.x) && Number.isFinite(projected.y)) {
+        trackPointAnchor.value = { x: projected.x, y: projected.y }
+      }
+    }
+  }
   const nextAnchor = lastScene?.anchor ? { x: lastScene.anchor.x, y: lastScene.anchor.y } : null
   emit('layer-anchors', lastScene?.anchors || {})
   if (station.value && lastScene?.project) {
@@ -597,18 +656,33 @@ function drawTrack() {
   const project = lastScene?.project
   const points = trackPointState.points
   if (typeof project !== 'function' || !points.length) return
-  // 航迹点位于海面，统一投影到 0 m 高程。
   const projected = points
-    .map(point => project(point.lon, point.lat, 0))
-    .filter(point => point && Number.isFinite(point.x) && Number.isFinite(point.y))
+    .map((point, index) => {
+      const depth = Math.max(0, Number(trackPointState.params[index]?.sourceDepthM) || 0)
+      const source = project(point.lon, point.lat, -depth)
+      if (!source || !Number.isFinite(source.x) || !Number.isFinite(source.y)) return null
+      const seabed = project(point.lon, point.lat, Number(point.elevation) || 0)
+      return { source, seabed, depth }
+    })
+    .filter(Boolean)
   if (!projected.length) return
 
   ctx.save()
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
+  for (const { source, seabed } of projected) {
+    if (!seabed || !Number.isFinite(seabed.x) || !Number.isFinite(seabed.y)) continue
+    if (Math.abs(seabed.x - source.x) < 0.5 && Math.abs(seabed.y - source.y) < 0.5) continue
+    ctx.beginPath()
+    ctx.moveTo(seabed.x, seabed.y)
+    ctx.lineTo(source.x, source.y)
+    ctx.strokeStyle = 'rgba(126, 247, 255, 0.45)'
+    ctx.lineWidth = 1
+    ctx.stroke()
+  }
   if (projected.length >= 2) {
     ctx.beginPath()
-    projected.forEach((point, index) => (index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y)))
+    projected.forEach(({ source }, index) => (index ? ctx.lineTo(source.x, source.y) : ctx.moveTo(source.x, source.y)))
     ctx.strokeStyle = 'rgba(56, 214, 255, 0.28)'
     ctx.lineWidth = 7
     ctx.stroke()
@@ -616,9 +690,9 @@ function drawTrack() {
     ctx.lineWidth = 2.4
     ctx.stroke()
   }
-  projected.forEach((point, index) => {
+  projected.forEach(({ source }, index) => {
     ctx.beginPath()
-    ctx.arc(point.x, point.y, 5.5, 0, Math.PI * 2)
+    ctx.arc(source.x, source.y, 5.5, 0, Math.PI * 2)
     ctx.fillStyle = index === 0 ? '#7ef7ff' : '#38d6ff'
     ctx.fill()
     ctx.lineWidth = 1.6
@@ -1438,7 +1512,21 @@ function onPointerUp(event) {
     const rect = canvasEl.value.getBoundingClientRect()
     const picked = pickTerrainPoint(lastScene, event.clientX - rect.left, event.clientY - rect.top)
     if (trackPointDrawing.value) {
-      if (picked && picked.elevation < 0 && addTrackPoint(picked)) scheduleDraw()
+      if (picked && picked.elevation < 0 && addTrackPoint(picked, Date.now(), {
+        sourceDepthM: Number(simulationControls.srcDepth) || 0,
+        frequencyHz: Number(simulationControls.frequency) || 100,
+        rangeNm: Number(simulationControls.range) || 10,
+        grazingAngleMin: Number(simulationControls.grazingAngleMin),
+        grazingAngleMax: Number(simulationControls.grazingAngleMax),
+        lineCount: Number(simulationControls.lineCount),
+        sector: Number(simulationControls.sector),
+        model: simulationControls.model === 'ram' ? 'ram' : 'bellhop',
+      })) {
+        trackPointState.selectedIndex = trackPointState.points.length - 1
+        trackPointAnchor.value = { x: picked.x, y: picked.y }
+        station.value = null
+        scheduleDraw()
+      }
       hover.value = null
       return
     }
@@ -1612,6 +1700,10 @@ watch(() => aisMonitorState.displayEnabled, (enabled) => {
   scheduleDraw()
 })
 watch(() => trackPointState.revision, () => scheduleDraw())
+watch(() => trackPointState.selectedIndex, (index) => {
+  if (index >= 0) station.value = null
+  scheduleDraw()
+})
 watch(() => signalTransmissionControls.showReceiver, () => scheduleDraw())
 watch(() => props.initialBoundsToken, () => {
   if (!props.active) return

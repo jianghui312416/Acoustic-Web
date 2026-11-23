@@ -72,12 +72,15 @@ test('sampled lon/lat points become a normalized terrain bounds', () => {
   assert.equal(lonLatPointsToBounds([{ lon: NaN, lat: 10 }]), null)
 })
 
-test('a selection crossing the antimeridian is rejected instead of becoming a world-sized box', () => {
-  assert.equal(
-    lonLatPointsToBounds([
-      { lon: 179.5, lat: 10 },
-      { lon: -179.5, lat: 10.5 },
-    ]),
-    null
-  )
+test('a selection crossing the antimeridian becomes an unwrapped longitude range', () => {
+  const bounds = lonLatPointsToBounds([
+    { lon: 179.5, lat: 10 },
+    { lon: -179.5, lat: 10.5 },
+  ])
+  assert.ok(bounds)
+  assert.equal(bounds.west, 179.5)
+  assert.ok(bounds.east > 180)
+  assert.ok(Math.abs(bounds.east - 180.5) < 1e-9)
+  assert.equal(bounds.south, 10)
+  assert.equal(bounds.north, 10.5)
 })

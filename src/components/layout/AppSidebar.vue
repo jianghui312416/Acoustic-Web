@@ -48,311 +48,53 @@
       </div>
 
       <nav class="module-list" aria-label="业务模块">
-        <section class="module-group work-module" :class="{ active: workOpen }">
-          <button type="button" class="module-entry" :class="{ active: workOpen }" title="运行记录恢复" aria-label="工作" @click="workOpen = !workOpen">
-            <span class="module-icon work-module-icon" aria-hidden="true"><span class="module-icon-emoji">📁</span></span>
-            <span class="module-label">工作区</span>
-            <span class="work-refresh" :class="{ spinning: jobWorkspace.loading }" role="button" tabindex="0" title="刷新工作" aria-label="刷新工作" @click.stop="refreshJobWorkspace" @keydown.enter.stop="refreshJobWorkspace">↻</span>
-            <span class="module-chevron" :class="{ open: workOpen }" aria-hidden="true">›</span>
+        <section class="module-group weather-noise-module" :class="{ active: weatherNoiseOpen }">
+          <button type="button" class="module-entry" :class="{ active: weatherNoiseOpen }" title="预报天气（海面10米风速、降雨、海况）与环境噪声" aria-label="天气与环境噪声" @click="weatherNoiseOpen = !weatherNoiseOpen">
+            <span class="module-icon weather-module-icon" aria-hidden="true">🌊</span>
+            <span class="module-label">天气与环境噪声</span>
+            <span class="module-chevron" :class="{ open: weatherNoiseOpen }" aria-hidden="true">›</span>
           </button>
-          <div v-if="workOpen" class="work-list" @click.stop>
-            <p v-if="jobWorkspace.error" class="work-message error">{{ jobWorkspace.error }}</p>
-            <p v-else-if="jobWorkspace.loading && !jobWorkspace.jobs.length" class="work-message">正在读取工作区项目…</p>
-            <p v-else-if="!jobWorkspace.jobs.length" class="work-message">暂无可打开的三维声场历史工作项目</p>
-            <article v-for="job in jobWorkspace.jobs" :key="job.job_id" class="work-card">
-              <div class="work-card-title">
-                <span>◆</span><b>{{ job.model_label || job.model || '三维声场' }}</b><i :class="job.status === 'completed' ? 'ready' : ''">{{ job.status_label || (job.openable ? '完成' : '处理中') }}</i>
-              </div>
-              <div class="work-card-meta">工作 {{ job.job_id }} · {{ formatJobTime(job.updated_at_ms) }}</div>
-              <div class="work-card-actions">
-                <button type="button" :disabled="!job.openable || openingJobId === job.job_id" @click="openJob(job)">
-                  {{ openingJobId === job.job_id ? '正在打开…' : isJobOpened(job.job_id) ? '定位声场' : '打开声场' }}
-                </button>
-                <span v-if="isJobOpened(job.job_id)">已打开</span>
-                <button type="button" class="work-delete" :disabled="deletingJobId === job.job_id" title="删除工作记录" :aria-label="`删除工作 ${job.job_id}`" @click="removeJob(job)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3m2 0-1 13H8L7 7m3 4v5m4-5v5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-              </div>
-            </article>
-          </div>
+          <WeatherNoiseSidebar v-if="weatherNoiseOpen && viewMode === 'terrain'" @pick-on-map="$emit('select-view-mode', 'terrain')" />
+          <p v-else-if="weatherNoiseOpen" class="module-mode-hint">进入地形模式（M）加载场景的预报。</p>
         </section>
 
-        <section class="module-group" :class="{ active: terrainControlsOpen }">
+        <section class="module-group ais-monitor-module" :class="{ active: aisOpen }">
+          <button
+            ref="aisMenuEntryRef"
+            type="button"
+            class="module-entry"
+            :class="{ active: aisOpen }"
+            title="船舶监测"
+            aria-label="船舶监测"
+            :aria-expanded="aisOpen"
+            @click.stop="toggleAisMonitor"
+          >
+            <span class="module-icon ais-monitor-icon" aria-hidden="true">
+              <span class="module-icon-emoji">🚢</span>
+            </span>
+            <span class="module-label">船舶监测</span>
+            <span class="module-chevron" :class="{ open: aisOpen }" aria-hidden="true">›</span>
+          </button>
+          <AisMonitorSidebar v-if="aisOpen" :view-mode="viewMode" @navigate="$emit('select-view-mode', $event)" />
+        </section>
+
+        <section class="module-group signal-excess-module" :class="{ active: signalExcessOpen }">
           <button
             type="button"
             class="module-entry"
-            :class="{ active: terrainControlsOpen }"
-            title="地形"
-            aria-label="地形"
-            @click="toggleTerrainControls"
+            :class="{ active: signalExcessOpen }"
+            title="信号余量"
+            aria-label="信号余量"
+            @click="signalExcessOpen = !signalExcessOpen"
           >
-            <span class="module-icon terrain-module-icon" aria-hidden="true">
-              <span class="module-icon-emoji">⛰️</span>
+            <span class="module-icon signal-excess-icon" aria-hidden="true">
+              <span class="module-icon-emoji">📡</span>
             </span>
-            <span class="module-label">地形</span>
-            <span class="module-chevron" :class="{ open: terrainControlsOpen }" aria-hidden="true">›</span>
+            <span class="module-label">信号余量</span>
+            <span class="module-chevron" :class="{ open: signalExcessOpen }" aria-hidden="true">›</span>
           </button>
-
-          <div v-if="terrainControlsOpen" class="feature-controls terrain-controls" @click.stop>
-            <p class="feature-section-title">显示</p>
-            <label class="feature-slider">
-              <span>垂直夸张 <b>{{ formatControl(visualControls.terrainExaggeration, 1) }}×</b></span>
-              <input v-model.number="visualControls.terrainExaggeration" aria-label="垂直夸张倍率" type="range" min="0.5" max="50" step="0.1" @input="normalizeControls" />
-            </label>
-            <label class="feature-slider">
-              <span>地形亮度 <b>{{ formatControl(visualControls.terrainBrightness, 2) }}×</b></span>
-              <input v-model.number="visualControls.terrainBrightness" aria-label="地形整体亮度" type="range" min="0.5" max="4" step="0.05" @input="normalizeControls" />
-            </label>
-            <label class="feature-switch">
-              <input v-model="visualControls.terrainBands" type="checkbox" />
-              <span class="switch-track"><i></i></span>
-              <span class="feature-switch-label"><span aria-hidden="true">▤</span><span>高程色带</span></span>
-            </label>
-            <label class="feature-switch">
-              <input v-model="visualControls.terrainFog" type="checkbox" />
-              <span class="switch-track"><i></i></span>
-              <span class="feature-switch-label"><span aria-hidden="true">≋</span><span>距离雾</span></span>
-            </label>
-            <label class="feature-switch">
-              <input v-model="visualControls.terrainContours" type="checkbox" />
-              <span class="switch-track"><i></i></span>
-              <span class="feature-switch-label"><span aria-hidden="true">〰️</span><span>等高线</span></span>
-            </label>
-            <label class="feature-switch">
-              <input v-model="visualControls.terrainCoastline" type="checkbox" />
-              <span class="switch-track"><i></i></span>
-              <span class="feature-switch-label"><span aria-hidden="true">◠</span><span>海岸线</span></span>
-            </label>
-            <label class="feature-switch">
-              <input v-model="visualControls.terrainShadows" type="checkbox" />
-              <span class="switch-track"><i></i></span>
-              <span class="feature-switch-label"><span aria-hidden="true">☾</span><span>地形阴影</span></span>
-            </label>
-          </div>
-        </section>
-
-        <section class="module-group" :class="{ active: simulation.sidebarOpen }">
-          <button
-            type="button"
-            class="module-entry"
-            :class="{ active: simulation.sidebarOpen }"
-            title="仿真配置"
-            aria-label="仿真配置"
-            @click="toggleSimulationControls"
-          >
-            <span class="module-icon simulation-module-icon" aria-hidden="true">
-              <span class="module-icon-emoji">⚙️</span>
-            </span>
-            <span class="module-label">仿真配置</span>
-            <span class="module-chevron" :class="{ open: simulation.sidebarOpen }" aria-hidden="true">›</span>
-          </button>
-
-          <div v-if="simulation.sidebarOpen" class="feature-controls simulation-controls" @click.stop>
-            <label class="feature-select">
-              <span>仿真模型</span>
-              <select v-model="simulation.model" @change="normalizeSimulationControls">
-                <option v-for="item in simulationModels" :key="item.id" :value="item.id">🧠 {{ item.label }}</option>
-              </select>
-            </label>
-
-            <div class="feature-select simulation-time">
-              <span>仿真时间</span>
-              <div class="simulation-time-field">
-                <button type="button" class="simulation-time-trigger" @click="openSimulationTimePicker">
-                  <span>UTC {{ simulationTimeText }}</span>
-                  <svg class="simulation-time-icon" viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="3.5" y="5" width="17" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" />
-                    <path d="M3.5 9h17M8 3.5v3M16 3.5v3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-                    <path d="M7.5 12.5h3M7.5 16h3M13.5 12.5h3M13.5 16h3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
-                  </svg>
-                </button>
-                <input
-                  ref="simulationTimeInputRef"
-                  class="simulation-time-native"
-                  type="datetime-local"
-                  step="60"
-                  :value="simulationTimeInputValue"
-                  aria-label="仿真时间"
-                  @input="onSimulationTimeInput"
-                />
-              </div>
-            </div>
-
-            <div class="simulation-grid">
-              <label>
-                <span>经度</span>
-                <input v-model.number="simulation.coordX" type="number" step="0.0001" min="-180" max="180" @change="normalizeSimulationControls" />
-              </label>
-              <label>
-                <span>纬度</span>
-                <input v-model.number="simulation.coordY" type="number" step="0.0001" min="-90" max="90" @change="normalizeSimulationControls" />
-              </label>
-              <label>
-                <span>声源深度 (m)</span>
-                <input v-model.number="simulation.srcDepth" type="number" step="1" min="0" @change="normalizeSimulationControls" />
-              </label>
-              <label>
-                <span>运行频率 (Hz)</span>
-                <input v-model.number="simulation.frequency" type="number" step="1" min="1" @change="normalizeSimulationControls" />
-              </label>
-              <label>
-                <span>距离 (nmi)</span>
-                <input v-model.number="simulation.range" type="number" step="0.1" min="0.1" @change="normalizeSimulationControls" />
-              </label>
-              <label>
-                <span>俯角 (°)</span>
-                <input v-model.number="simulation.grazingAngleMin" type="number" step="1" min="-90" max="90" @change="normalizeSimulationControls" />
-              </label>
-              <label>
-                <span>仰角 (°)</span>
-                <input v-model.number="simulation.grazingAngleMax" type="number" step="1" min="-90" max="90" @change="normalizeSimulationControls" />
-              </label>
-              <label>
-                <span>方位数</span>
-                <input v-model.number="simulation.sector" type="number" step="1" min="1" max="360" @change="normalizeSimulationControls" />
-              </label>
-              <label>
-                <span>声线条数</span>
-                <input v-model.number="simulation.lineCount" type="number" step="1" min="0" @change="normalizeSimulationControls" />
-              </label>
-            </div>
-
-            <label class="feature-select">
-              <span>相干性</span>
-              <select v-model="simulation.coherent" @change="normalizeSimulationControls">
-                <option :value="true">相干</option>
-                <option :value="false">非相干</option>
-              </select>
-            </label>
-
-            <button type="button" class="simulation-run-button" @click="$emit('run')">
-              <span aria-hidden="true">▶</span>
-              {{ runSimulationLabel }}
-            </button>
-          </div>
-        </section>
-
-        <section class="module-group signal-transmission-module" :class="{ active: signalTransmissionOpen }">
-          <button
-            type="button"
-            class="module-entry"
-            :class="{ active: signalTransmissionOpen }"
-            title="信号传输"
-            aria-label="信号传输"
-            @click="signalTransmissionOpen = !signalTransmissionOpen"
-          >
-            <span class="module-icon signal-transmission-icon" aria-hidden="true">
-              <span class="module-icon-emoji">📶</span>
-            </span>
-            <span class="module-label">信号传输</span>
-            <span class="module-chevron" :class="{ open: signalTransmissionOpen }" aria-hidden="true">›</span>
-          </button>
-          <div v-if="signalTransmissionOpen" class="feature-controls signal-transmission-controls" @click.stop>
-            <SignalTransmissionControls @run="$emit('run-signal')" @stop="$emit('stop-signal')" />
-          </div>
-        </section>
-
-        <section
-          v-for="moduleItem in modules"
-          :key="moduleItem.id"
-          class="module-group"
-          :class="{ active: isModuleExpanded(moduleItem.id) }"
-        >
-          <button
-            type="button"
-            class="module-entry"
-            :class="{ active: isModuleExpanded(moduleItem.id) }"
-            :title="moduleItem.label"
-            :aria-label="moduleItem.label"
-            @click="toggleModule(moduleItem)"
-          >
-            <span class="module-icon" aria-hidden="true">
-              <span v-if="moduleItem.viewKey === 'acoustic-field'" class="module-icon-emoji">🧊</span>
-              <svg v-else viewBox="0 0 24 24">
-                <path d="M12 3.6v4.1M12 16.3v4.1M3.6 12h4.1M16.3 12h4.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-                <circle cx="12" cy="12" r="3.1" fill="none" stroke="currentColor" stroke-width="1.5" />
-                <circle cx="12" cy="12" r="7.6" fill="none" stroke="currentColor" stroke-width="1.1" opacity=".55" />
-              </svg>
-            </span>
-            <span class="module-label">{{ moduleItem.label }}</span>
-            <span class="module-chevron" :class="{ open: isModuleExpanded(moduleItem.id) }" aria-hidden="true">›</span>
-          </button>
-
-          <div v-if="moduleItem.viewKey === 'acoustic-field' && isModuleExpanded(moduleItem.id)" class="feature-controls volume-controls" @click.stop>
-            <template v-if="volumeControlsAvailable">
-              <div class="volume-state">
-                <span class="volume-cube" aria-hidden="true">◆</span>
-                <span>{{ visualControls.volumeVisible ? '体数据已显示' : '体数据已隐藏' }}</span>
-              </div>
-
-            <p class="feature-section-title">外观</p>
-            <label class="feature-slider">
-              <span>透明度 α <b>{{ formatControl(visualControls.opacity, 2) }}</b></span>
-              <input v-model.number="visualControls.opacity" type="range" min="0" max="1" step="0.01" @input="normalizeControls" />
-            </label>
-            <label class="feature-slider">
-              <span title="归一化纹理坐标中的最大步长；实际步长会按三维体素分辨率自适应缩小">最大采样步长 <b>{{ formatControl(visualControls.sampling, 3) }}</b></span>
-              <input v-model.number="visualControls.sampling" type="range" min="0.004" max="0.03" step="0.001" title="体素分辨率自适应采样上限" @input="normalizeControls" />
-            </label>
-            <label class="feature-slider">
-              <span>透明度指数 <b>{{ formatControl(visualControls.alphaPower, 1) }}</b></span>
-              <input v-model.number="visualControls.alphaPower" type="range" min="0.35" max="3" step="0.05" @input="normalizeControls" />
-            </label>
-
-            <label class="feature-select">
-              <span>色图</span>
-              <select v-model="visualControls.colormap">
-                <option v-for="palette in volumeColormaps" :key="palette.id" :value="palette.id">{{ palette.label }}</option>
-              </select>
-            </label>
-
-            <p class="feature-section-title">dB 范围</p>
-            <div class="db-control-grid">
-              <span>最小值</span><span>最大值</span>
-              <div class="stepper"><button type="button" @click="stepDb('dbMin', -1)">−</button><input v-model.number="visualControls.dbMin" type="number" min="0" max="199" @change="normalizeControls" /><em>dB</em><button type="button" @click="stepDb('dbMin', 1)">＋</button></div>
-              <div class="stepper"><button type="button" @click="stepDb('dbMax', -1)">−</button><input v-model.number="visualControls.dbMax" type="number" min="1" max="200" @change="normalizeControls" /><em>dB</em><button type="button" @click="stepDb('dbMax', 1)">＋</button></div>
-            </div>
-            <div class="color-scale-bar" :style="{ background: volumeColorGradient }"></div>
-
-            <details class="feature-fold">
-              <summary><span>▣ 方向</span><small>旋转</small></summary>
-              <label v-for="axis in rotationAxes" :key="axis.key" class="feature-slider compact-slider">
-                <span>旋转 {{ axis.label }} <b>{{ Math.round(visualControls[axis.key]) }}°</b></span>
-                <input v-model.number="visualControls[axis.key]" type="range" min="0" max="359" step="1" @input="normalizeControls" />
-              </label>
-            </details>
-
-            <details class="feature-fold">
-              <summary><span>⌖ 位置</span><small>米</small></summary>
-              <label v-for="axis in moveAxes" :key="axis.key" class="move-control">
-                <span>移动 {{ axis.label }}</span>
-                <div class="stepper"><button type="button" @click="stepMove(axis.key, -10)">−</button><input v-model.number="visualControls[axis.key]" type="number" step="10" @change="normalizeControls" /><em>m</em><button type="button" @click="stepMove(axis.key, 10)">＋</button></div>
-              </label>
-            </details>
-
-            <p class="feature-section-title">操作</p>
-            <div class="feature-actions">
-              <button type="button" :class="{ active: visualControls.rangeRings }" @click="visualControls.rangeRings = !visualControls.rangeRings">距离环</button>
-              <button type="button" class="danger-action" @click="visualControls.volumeVisible = !visualControls.volumeVisible">{{ visualControls.volumeVisible ? '移除' : '显示' }}</button>
-            </div>
-            </template>
-            <template v-else>
-              <div class="feature-unavailable"><span aria-hidden="true">📦</span><b>未加载卷</b></div>
-              <p class="feature-unavailable-hint">进入地形模式并加载三维声场体</p>
-            </template>
-          </div>
-
-          <div v-else-if="isModuleExpanded(moduleItem.id)" class="module-children">
-            <button
-              v-for="child in moduleItem.children || []"
-              :key="child.id"
-              type="button"
-              class="module-child"
-              :class="{ active: child.id === activeSubmoduleId && submoduleActive }"
-              @click="$emit('select-submodule', child.id)"
-            >
-              <span class="child-dot" aria-hidden="true"></span>
-              <span>{{ child.label }}</span>
-            </button>
-          </div>
+          <SignalExcessPanel v-if="signalExcessOpen && volumeControlsAvailable" />
+          <p v-else-if="signalExcessOpen" class="module-mode-hint">进入地形模式并运行声场——声场体成为接收器。</p>
         </section>
 
         <section class="module-group" :class="{ active: sliceControlsOpen }">
@@ -470,53 +212,337 @@
           </div>
         </section>
 
-        <section class="module-group signal-excess-module" :class="{ active: signalExcessOpen }">
+        <section
+          v-for="moduleItem in modules"
+          :key="moduleItem.id"
+          class="module-group"
+          :class="{ active: isModuleExpanded(moduleItem.id) }"
+        >
           <button
             type="button"
             class="module-entry"
-            :class="{ active: signalExcessOpen }"
-            title="信号余量"
-            aria-label="信号余量"
-            @click="signalExcessOpen = !signalExcessOpen"
+            :class="{ active: isModuleExpanded(moduleItem.id) }"
+            :title="moduleItem.label"
+            :aria-label="moduleItem.label"
+            @click="toggleModule(moduleItem)"
           >
-            <span class="module-icon signal-excess-icon" aria-hidden="true">
-              <span class="module-icon-emoji">📡</span>
+            <span class="module-icon" aria-hidden="true">
+              <span v-if="moduleItem.viewKey === 'acoustic-field'" class="module-icon-emoji">🧊</span>
+              <svg v-else viewBox="0 0 24 24">
+                <path d="M12 3.6v4.1M12 16.3v4.1M3.6 12h4.1M16.3 12h4.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                <circle cx="12" cy="12" r="3.1" fill="none" stroke="currentColor" stroke-width="1.5" />
+                <circle cx="12" cy="12" r="7.6" fill="none" stroke="currentColor" stroke-width="1.1" opacity=".55" />
+              </svg>
             </span>
-            <span class="module-label">信号余量</span>
-            <span class="module-chevron" :class="{ open: signalExcessOpen }" aria-hidden="true">›</span>
+            <span class="module-label">{{ moduleItem.label }}</span>
+            <span class="module-chevron" :class="{ open: isModuleExpanded(moduleItem.id) }" aria-hidden="true">›</span>
           </button>
-          <SignalExcessPanel v-if="signalExcessOpen && volumeControlsAvailable" />
-          <p v-else-if="signalExcessOpen" class="module-mode-hint">进入地形模式并运行声场——声场体成为接收器。</p>
+
+          <div v-if="moduleItem.viewKey === 'acoustic-field' && isModuleExpanded(moduleItem.id)" class="feature-controls volume-controls" @click.stop>
+            <template v-if="volumeControlsAvailable">
+              <div class="volume-state">
+                <span class="volume-cube" aria-hidden="true">◆</span>
+                <span>{{ visualControls.volumeVisible ? '体数据已显示' : '体数据已隐藏' }}</span>
+              </div>
+
+            <p class="feature-section-title">外观</p>
+            <label class="feature-slider">
+              <span>透明度 α <b>{{ formatControl(visualControls.opacity, 2) }}</b></span>
+              <input v-model.number="visualControls.opacity" type="range" min="0" max="1" step="0.01" @input="normalizeControls" />
+            </label>
+            <label class="feature-slider">
+              <span title="归一化纹理坐标中的最大步长；实际步长会按三维体素分辨率自适应缩小">最大采样步长 <b>{{ formatControl(visualControls.sampling, 3) }}</b></span>
+              <input v-model.number="visualControls.sampling" type="range" min="0.004" max="0.03" step="0.001" title="体素分辨率自适应采样上限" @input="normalizeControls" />
+            </label>
+            <label class="feature-slider">
+              <span>透明度指数 <b>{{ formatControl(visualControls.alphaPower, 1) }}</b></span>
+              <input v-model.number="visualControls.alphaPower" type="range" min="0.35" max="3" step="0.05" @input="normalizeControls" />
+            </label>
+
+            <label class="feature-select">
+              <span>色图</span>
+              <select v-model="visualControls.colormap">
+                <option v-for="palette in volumeColormaps" :key="palette.id" :value="palette.id">{{ palette.label }}</option>
+              </select>
+            </label>
+
+            <p class="feature-section-title">dB 范围</p>
+            <div class="db-control-grid">
+              <span>最小值</span><span>最大值</span>
+              <div class="stepper"><button type="button" @click="stepDb('dbMin', -1)">−</button><input v-model.number="visualControls.dbMin" type="number" min="0" max="199" @change="normalizeControls" /><em>dB</em><button type="button" @click="stepDb('dbMin', 1)">＋</button></div>
+              <div class="stepper"><button type="button" @click="stepDb('dbMax', -1)">−</button><input v-model.number="visualControls.dbMax" type="number" min="1" max="200" @change="normalizeControls" /><em>dB</em><button type="button" @click="stepDb('dbMax', 1)">＋</button></div>
+            </div>
+            <div class="color-scale-bar" :style="{ background: volumeColorGradient }"></div>
+
+            <details class="feature-fold">
+              <summary><span>▣ 方向</span><small>旋转</small></summary>
+              <label v-for="axis in rotationAxes" :key="axis.key" class="feature-slider compact-slider">
+                <span>旋转 {{ axis.label }} <b>{{ Math.round(visualControls[axis.key]) }}°</b></span>
+                <input v-model.number="visualControls[axis.key]" type="range" min="0" max="359" step="1" @input="normalizeControls" />
+              </label>
+            </details>
+
+            <details class="feature-fold">
+              <summary><span>⌖ 位置</span><small>米</small></summary>
+              <label v-for="axis in moveAxes" :key="axis.key" class="move-control">
+                <span>移动 {{ axis.label }}</span>
+                <div class="stepper"><button type="button" @click="stepMove(axis.key, -10)">−</button><input v-model.number="visualControls[axis.key]" type="number" step="10" @change="normalizeControls" /><em>m</em><button type="button" @click="stepMove(axis.key, 10)">＋</button></div>
+              </label>
+            </details>
+
+            <p class="feature-section-title">操作</p>
+            <div class="feature-actions">
+              <button type="button" :class="{ active: visualControls.rangeRings }" @click="visualControls.rangeRings = !visualControls.rangeRings">距离环</button>
+              <button type="button" class="danger-action" @click="visualControls.volumeVisible = !visualControls.volumeVisible">{{ visualControls.volumeVisible ? '移除' : '显示' }}</button>
+            </div>
+            </template>
+            <template v-else>
+              <div class="feature-unavailable"><span aria-hidden="true">📦</span><b>未加载卷</b></div>
+              <p class="feature-unavailable-hint">进入地形模式并加载三维声场体</p>
+            </template>
+          </div>
+
+          <div v-else-if="isModuleExpanded(moduleItem.id)" class="module-children">
+            <button
+              v-for="child in moduleItem.children || []"
+              :key="child.id"
+              type="button"
+              class="module-child"
+              :class="{ active: child.id === activeSubmoduleId && submoduleActive }"
+              @click="$emit('select-submodule', child.id)"
+            >
+              <span class="child-dot" aria-hidden="true"></span>
+              <span>{{ child.label }}</span>
+            </button>
+          </div>
         </section>
 
-        <section class="module-group ais-monitor-module" :class="{ active: aisOpen }">
+        <section class="module-group signal-transmission-module" :class="{ active: signalTransmissionOpen }">
           <button
-            ref="aisMenuEntryRef"
             type="button"
             class="module-entry"
-            :class="{ active: aisOpen }"
-            title="船舶监测"
-            aria-label="船舶监测"
-            :aria-expanded="aisOpen"
-            @click.stop="toggleAisMonitor"
+            :class="{ active: signalTransmissionOpen }"
+            title="信号传输"
+            aria-label="信号传输"
+            @click="signalTransmissionOpen = !signalTransmissionOpen"
           >
-            <span class="module-icon ais-monitor-icon" aria-hidden="true">
-              <span class="module-icon-emoji">🚢</span>
+            <span class="module-icon signal-transmission-icon" aria-hidden="true">
+              <span class="module-icon-emoji">📶</span>
             </span>
-            <span class="module-label">船舶监测</span>
-            <span class="module-chevron" :class="{ open: aisOpen }" aria-hidden="true">›</span>
+            <span class="module-label">信号传输</span>
+            <span class="module-chevron" :class="{ open: signalTransmissionOpen }" aria-hidden="true">›</span>
           </button>
-          <AisMonitorSidebar v-if="aisOpen" :view-mode="viewMode" @navigate="$emit('select-view-mode', $event)" />
+          <div v-if="signalTransmissionOpen" class="feature-controls signal-transmission-controls" @click.stop>
+            <SignalTransmissionControls @run="$emit('run-signal')" @stop="$emit('stop-signal')" />
+          </div>
         </section>
 
-        <section class="module-group weather-noise-module" :class="{ active: weatherNoiseOpen }">
-          <button type="button" class="module-entry" :class="{ active: weatherNoiseOpen }" title="预报天气（海面10米风速、降雨、海况）与环境噪声" aria-label="天气与环境噪声" @click="weatherNoiseOpen = !weatherNoiseOpen">
-            <span class="module-icon weather-module-icon" aria-hidden="true">🌊</span>
-            <span class="module-label">天气与环境噪声</span>
-            <span class="module-chevron" :class="{ open: weatherNoiseOpen }" aria-hidden="true">›</span>
+        <section class="module-group" :class="{ active: simulation.sidebarOpen }">
+          <button
+            type="button"
+            class="module-entry"
+            :class="{ active: simulation.sidebarOpen }"
+            title="仿真配置"
+            aria-label="仿真配置"
+            @click="toggleSimulationControls"
+          >
+            <span class="module-icon simulation-module-icon" aria-hidden="true">
+              <span class="module-icon-emoji">⚙️</span>
+            </span>
+            <span class="module-label">仿真配置</span>
+            <span class="module-chevron" :class="{ open: simulation.sidebarOpen }" aria-hidden="true">›</span>
           </button>
-          <WeatherNoiseSidebar v-if="weatherNoiseOpen && viewMode === 'terrain'" @pick-on-map="$emit('select-view-mode', 'terrain')" />
-          <p v-else-if="weatherNoiseOpen" class="module-mode-hint">进入地形模式（M）加载场景的预报。</p>
+
+          <div v-if="simulation.sidebarOpen" class="feature-controls simulation-controls" @click.stop>
+            <label class="feature-select">
+              <span>仿真模型</span>
+              <select v-model="simulation.model" @change="normalizeSimulationControls">
+                <option v-for="item in simulationModels" :key="item.id" :value="item.id">🧠 {{ item.label }}</option>
+              </select>
+            </label>
+
+            <div class="feature-select simulation-time">
+              <span>仿真时间</span>
+              <div class="simulation-time-field">
+                <button type="button" class="simulation-time-trigger" @click="openSimulationTimePicker">
+                  <span>UTC {{ simulationTimeText }}</span>
+                  <svg class="simulation-time-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="3.5" y="5" width="17" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" />
+                    <path d="M3.5 9h17M8 3.5v3M16 3.5v3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                    <path d="M7.5 12.5h3M7.5 16h3M13.5 12.5h3M13.5 16h3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+                  </svg>
+                </button>
+                <input
+                  ref="simulationTimeInputRef"
+                  class="simulation-time-native"
+                  type="datetime-local"
+                  step="60"
+                  :value="simulationTimeInputValue"
+                  aria-label="仿真时间"
+                  @input="onSimulationTimeInput"
+                />
+              </div>
+            </div>
+
+            <div class="simulation-grid">
+              <label>
+                <span>经度</span>
+                <input v-model.number="simulation.coordX" type="number" step="0.0001" min="-180" max="180" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>纬度</span>
+                <input v-model.number="simulation.coordY" type="number" step="0.0001" min="-90" max="90" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>声源深度 (m)</span>
+                <input v-model.number="simulation.srcDepth" type="number" step="1" min="0" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>运行频率 (Hz)</span>
+                <input v-model.number="simulation.frequency" type="number" step="1" min="1" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>距离 (nmi)</span>
+                <input v-model.number="simulation.range" type="number" step="0.1" min="0.1" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>俯角 (°)</span>
+                <input v-model.number="simulation.grazingAngleMin" type="number" step="1" min="-90" max="90" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>仰角 (°)</span>
+                <input v-model.number="simulation.grazingAngleMax" type="number" step="1" min="-90" max="90" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>方位数</span>
+                <input v-model.number="simulation.sector" type="number" step="1" min="1" max="360" @change="normalizeSimulationControls" />
+              </label>
+              <label>
+                <span>声线条数</span>
+                <input v-model.number="simulation.lineCount" type="number" step="1" min="0" @change="normalizeSimulationControls" />
+              </label>
+            </div>
+
+            <label class="feature-select">
+              <span>相干性</span>
+              <select v-model="simulation.coherent" @change="normalizeSimulationControls">
+                <option :value="true">相干</option>
+                <option :value="false">非相干</option>
+              </select>
+            </label>
+
+            <button type="button" class="simulation-run-button" @click="$emit('run')">
+              <span aria-hidden="true">▶</span>
+              {{ runSimulationLabel }}
+            </button>
+          </div>
+        </section>
+
+        <section class="module-group" :class="{ active: terrainControlsOpen }">
+          <button
+            type="button"
+            class="module-entry"
+            :class="{ active: terrainControlsOpen }"
+            title="地形"
+            aria-label="地形"
+            @click="toggleTerrainControls"
+          >
+            <span class="module-icon terrain-module-icon" aria-hidden="true">
+              <span class="module-icon-emoji">⛰️</span>
+            </span>
+            <span class="module-label">地形</span>
+            <span class="module-chevron" :class="{ open: terrainControlsOpen }" aria-hidden="true">›</span>
+          </button>
+
+          <div v-if="terrainControlsOpen" class="feature-controls terrain-controls" @click.stop>
+            <p class="feature-section-title">显示</p>
+            <label class="feature-slider">
+              <span>垂直夸张 <b>{{ formatControl(visualControls.terrainExaggeration, 1) }}×</b></span>
+              <input v-model.number="visualControls.terrainExaggeration" aria-label="垂直夸张倍率" type="range" min="0.5" max="50" step="0.1" @input="normalizeControls" />
+            </label>
+            <label class="feature-slider">
+              <span>地形亮度 <b>{{ formatControl(visualControls.terrainBrightness, 2) }}×</b></span>
+              <input v-model.number="visualControls.terrainBrightness" aria-label="地形整体亮度" type="range" min="0.5" max="4" step="0.05" @input="normalizeControls" />
+            </label>
+            <label class="feature-switch">
+              <input v-model="visualControls.terrainBands" type="checkbox" />
+              <span class="switch-track"><i></i></span>
+              <span class="feature-switch-label"><span aria-hidden="true">▤</span><span>高程色带</span></span>
+            </label>
+            <label class="feature-switch">
+              <input v-model="visualControls.terrainFog" type="checkbox" />
+              <span class="switch-track"><i></i></span>
+              <span class="feature-switch-label"><span aria-hidden="true">≋</span><span>距离雾</span></span>
+            </label>
+            <label class="feature-switch">
+              <input v-model="visualControls.terrainContours" type="checkbox" />
+              <span class="switch-track"><i></i></span>
+              <span class="feature-switch-label"><span aria-hidden="true">〰️</span><span>等高线</span></span>
+            </label>
+            <label class="feature-switch">
+              <input v-model="visualControls.terrainCoastline" type="checkbox" />
+              <span class="switch-track"><i></i></span>
+              <span class="feature-switch-label"><span aria-hidden="true">◠</span><span>海岸线</span></span>
+            </label>
+            <label class="feature-switch">
+              <input v-model="visualControls.terrainShadows" type="checkbox" />
+              <span class="switch-track"><i></i></span>
+              <span class="feature-switch-label"><span aria-hidden="true">☾</span><span>地形阴影</span></span>
+            </label>
+
+            <details class="feature-fold seafloor-feature-fold">
+              <summary>
+                <span>🏷️ 海底地名</span>
+                <small>{{ seafloorFeatureState.enabled ? '已开启' : '已关闭' }}</small>
+              </summary>
+              <label class="feature-switch compact-switch">
+                <input
+                  :checked="seafloorFeatureState.enabled"
+                  type="checkbox"
+                  @change="setSeafloorFeatureEnabled($event.target.checked)"
+                />
+                <span class="switch-track"><i></i></span>
+                <span>显示地名标注</span>
+              </label>
+              <label class="feature-switch compact-switch" :class="{ 'switch-disabled': !seafloorFeatureState.enabled }">
+                <input
+                  :checked="seafloorFeatureState.showBoundaries"
+                  type="checkbox"
+                  :disabled="!seafloorFeatureState.enabled"
+                  @change="setSeafloorFeatureBoundaries($event.target.checked)"
+                />
+                <span class="switch-track"><i></i></span>
+                <span>显示范围边界</span>
+              </label>
+            </details>
+          </div>
+        </section>
+
+        <section class="module-group work-module" :class="{ active: workOpen }">
+          <button type="button" class="module-entry" :class="{ active: workOpen }" title="运行记录恢复" aria-label="工作" @click="workOpen = !workOpen">
+            <span class="module-icon work-module-icon" aria-hidden="true"><span class="module-icon-emoji">📁</span></span>
+            <span class="module-label">工作区</span>
+            <span class="work-refresh" :class="{ spinning: jobWorkspace.loading }" role="button" tabindex="0" title="刷新工作" aria-label="刷新工作" @click.stop="refreshJobWorkspace" @keydown.enter.stop="refreshJobWorkspace">↻</span>
+            <span class="module-chevron" :class="{ open: workOpen }" aria-hidden="true">›</span>
+          </button>
+          <div v-if="workOpen" class="work-list" @click.stop>
+            <p v-if="jobWorkspace.error" class="work-message error">{{ jobWorkspace.error }}</p>
+            <p v-else-if="jobWorkspace.loading && !jobWorkspace.jobs.length" class="work-message">正在读取工作区项目…</p>
+            <p v-else-if="!jobWorkspace.jobs.length" class="work-message">暂无可打开的三维声场历史工作项目</p>
+            <article v-for="job in jobWorkspace.jobs" :key="job.job_id" class="work-card">
+              <div class="work-card-title">
+                <span>◆</span><b>{{ job.model_label || job.model || '三维声场' }}</b><i :class="job.status === 'completed' ? 'ready' : ''">{{ job.status_label || (job.openable ? '完成' : '处理中') }}</i>
+              </div>
+              <div class="work-card-meta">工作 {{ job.job_id }} · {{ formatJobTime(job.updated_at_ms) }}</div>
+              <div class="work-card-actions">
+                <button type="button" :disabled="!job.openable || openingJobId === job.job_id" @click="openJob(job)">
+                  {{ openingJobId === job.job_id ? '正在打开…' : isJobOpened(job.job_id) ? '定位声场' : '打开声场' }}
+                </button>
+                <span v-if="isJobOpened(job.job_id)">已打开</span>
+                <button type="button" class="work-delete" :disabled="deletingJobId === job.job_id" title="删除工作记录" :aria-label="`删除工作 ${job.job_id}`" @click="removeJob(job)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3m2 0-1 13H8L7 7m3 4v5m4-5v5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+              </div>
+            </article>
+          </div>
         </section>
       </nav>
     </div>
@@ -556,6 +582,11 @@ import SignalExcessPanel from '@/components/acoustic/SignalExcessPanel.vue'
 import SignalTransmissionControls from '@/components/acoustic/SignalTransmissionControls.vue'
 import AisMonitorSidebar from '@/components/ais/AisMonitorSidebar.vue'
 import { aisMonitorState } from '@/modules/ais/aisMonitorStore.js'
+import {
+  seafloorFeatureState,
+  setSeafloorFeatureBoundaries,
+  setSeafloorFeatureEnabled,
+} from '@/modules/terrain/seafloorFeatureState.js'
 
 const props = defineProps({
   collapsed: { type: Boolean, default: false },
@@ -1222,6 +1253,8 @@ onBeforeUnmount(() => {
 .feature-switch input:focus-visible + .switch-track { outline: 2px solid rgba(83, 207, 242, 0.72); outline-offset: 2px; }
 .feature-switch input:checked + .switch-track { background: #12649a; border-color: #3f9fe2; box-shadow: inset 0 0 8px rgba(59, 174, 255, 0.2); }
 .feature-switch input:checked + .switch-track i { transform: translateX(18px); background: #55b5ff; }
+.feature-switch.switch-disabled { opacity: 0.45; cursor: not-allowed; }
+.feature-switch.switch-disabled input { cursor: not-allowed; }
 .volume-state { min-height: 29px; display: flex; align-items: center; gap: 8px; padding: 0 9px; color: #98bacb; font: 9px ui-monospace, monospace; border: 1px solid #28536a; border-radius: 5px; background: #153346; }
 .volume-cube { color: #dc807f; font-size: 11px; }
 .db-control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 8px; color: #7f9eaf; font-size: 9px; }
@@ -1260,6 +1293,7 @@ onBeforeUnmount(() => {
 .vertical-slice-controls { padding-top: 5px; }
 .ray-playback-fold { margin-top: 7px; }
 .ray-playback-fold .compact-switch { margin: 0 0 5px; padding: 0 9px; }
+.seafloor-feature-fold .compact-switch { margin: 0 0 5px; padding: 0 9px; }
 .ray-playback-fold .compact-slider { margin: 3px 9px 8px; }
 .ray-playback-fold .compact-slider:last-child { margin-bottom: 9px; }
 .app-sidebar.collapsed { width: 52px; }
