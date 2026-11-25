@@ -70,7 +70,7 @@ test('weather overlay paints one constant block per native grid cell without int
   assert.ok(fills.every(fill => fill.path.length === 4))
 })
 
-test('HYCOM current supports all-depth vector mean and an individual depth layer', () => {
+test('HYCOM current selects an individual physical depth layer', () => {
   const current = {
     grid: { longitudes: [115, 115.08], latitudes: [16.08, 16] },
     depths_m: [0, 10],
@@ -81,10 +81,8 @@ test('HYCOM current supports all-depth vector mean and an individual depth layer
       depth_mean_v_mps: [[0.5, 0.5], [-0.5, -0.5]],
     },
   }
-  const all = oceanCurrentRegional(current, 'all')
   const depth10 = oceanCurrentRegional(current, '10')
-  assert.equal(all.data.current_speed_mps[0][0], Math.hypot(0.5, 0.5))
-  assert.equal(all.data.current_direction_deg[0][0], 45)
+  assert.equal(depth10.selected_depth_m, 10)
   assert.equal(depth10.data.current_speed_mps[0][0], 1)
   assert.equal(depth10.data.current_direction_deg[0][0], 0)
   assert.equal(OCEAN_CURRENT_OVERLAY_FIELD.regionValue, 'current_speed_mps')
@@ -98,7 +96,8 @@ test('HYCOM current switch, depth menu and forecast-frame refresh are wired abov
   const overlay = await readSource('../src/utils/weatherOverlay.js')
   assert.match(api, /directEndpoint\('GetRegionalOceanCurrent'\)/)
   assert.match(sidebar, /<span>海流<\/span>/)
-  assert.match(sidebar, /<option value="all">全深度<\/option>/)
+  assert.doesNotMatch(sidebar, /全深度/)
+  assert.match(sidebar, /海流伪彩图绘制在所选水下深度层/)
   assert.match(sidebar, /v-model="state\.oceanCurrentDynamic"/)
   assert.ok(
     sidebar.indexOf('<span>海流</span>') < sidebar.indexOf('<span>风\/雨\/海况覆盖层</span>')
@@ -109,5 +108,33 @@ test('HYCOM current switch, depth menu and forecast-frame refresh are wired abov
   assert.match(terrain, /oceanCurrentDynamic\(\)[\s\S]*?terrainAnimating\(\)/)
   assert.match(overlay, /OCEAN_CURRENT_TIME_WARP = 60000/)
   assert.match(overlay, /field\.key === 'ocean-current' \? OCEAN_CURRENT_TIME_WARP/)
+})
+
+test('HYCOM current fill is projected onto its selected underwater depth', () => {
+  const elevations = []
+  const context = {
+    setTransform() {}, beginPath() {}, moveTo() {}, lineTo() {}, closePath() {}, fill() {},
+  }
+  const canvas = {
+    getContext: () => context,
+    getBoundingClientRect: () => ({ width: 100, height: 100 }),
+  }
+  const scene = {
+    project(lon, lat, elevation) {
+      elevations.push(elevation)
+      return { x: lon * 100, y: lat * 100 }
+    },
+  }
+  const grid = { bounds: { west: -0.125, east: 0.375, south: -0.125, north: 0.375 } }
+  const regional = {
+    selected_depth_m: 20,
+    grid: { longitudes: [0, 0.25], latitudes: [0.25, 0] },
+    data: { current_speed_mps: [[1, 1], [1, 1]], current_direction_deg: [[0, 0], [0, 0]] },
+  }
+
+  drawWeatherOverlay(canvas, scene, grid, OCEAN_CURRENT_OVERLAY_FIELD, regional, false, 0)
+
+  assert.ok(elevations.length > 0)
+  assert.ok(elevations.every(elevation => elevation === -20))
 })
 

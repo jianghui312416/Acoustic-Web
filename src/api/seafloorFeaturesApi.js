@@ -1,4 +1,4 @@
-import { portalApiUrl } from '@/config/runtimeConfig.js'
+import { authErrorMessage, http } from './authHttp.js'
 
 const responseCache = new Map()
 const CACHE_TTL_MS = 120_000
@@ -22,27 +22,29 @@ export async function fetchSeafloorFeatures(bounds, options = {}) {
   const cached = responseCache.get(key)
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.payload
 
-  const url = new URL('GetSeafloorFeatures', portalApiUrl())
-  url.searchParams.set('west', String(bounds.west))
-  url.searchParams.set('south', String(bounds.south))
-  url.searchParams.set('east', String(bounds.east))
-  url.searchParams.set('north', String(bounds.north))
-  url.searchParams.set('limit', String(limit))
+  const params = {
+    west: bounds.west,
+    south: bounds.south,
+    east: bounds.east,
+    north: bounds.north,
+    limit,
+  }
   if (Number.isFinite(Number(options.minExtentM)) && Number(options.minExtentM) > 0) {
-    url.searchParams.set('minExtentM', String(Number(options.minExtentM)))
+    params.minExtentM = Number(options.minExtentM)
   }
   if (Array.isArray(options.categories) && options.categories.length) {
-    url.searchParams.set('categories', options.categories.join(','))
+    params.categories = options.categories.join(',')
   }
 
-  const response = await fetch(url, {
-    headers: { Accept: 'application/json' },
-    signal: options.signal,
-    cache: 'no-store',
-  })
-  const payload = await response.json().catch(() => null)
-  if (!response.ok) {
-    throw new Error(payload?.detail || payload?.message || `海底地名请求失败（${response.status}）`)
+  let payload
+  try {
+    const response = await http.get('GetSeafloorFeatures', {
+      params,
+      signal: options.signal,
+    })
+    payload = response?.data ?? null
+  } catch (error) {
+    throw new Error(authErrorMessage(error, '海底地名请求失败'))
   }
   if (!payload || !Array.isArray(payload.features)) {
     throw new Error('海底地名响应格式无效')

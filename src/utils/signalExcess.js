@@ -20,6 +20,33 @@ export const SIGNAL_EXCESS_COLOR_STOPS = Object.freeze([
   [1, [200, 44, 44]],
 ])
 
+/** 三色探测分级；null 表示低于 25% 时不显示。 */
+export function detectionClassColor(probability) {
+  const pd = Number(probability)
+  if (!Number.isFinite(pd) || pd < 25) return null
+  if (pd < 50) return [0, 0, 0]
+  if (pd <= 75) return [255, 255, 0]
+  return [255, 0, 0]
+}
+
+/**
+ * 三色模式图例。Margin 模式把 25/50/75% 反算为 SE 阈值，Pd 模式直接使用百分比。
+ */
+export function buildDetectionClassGradient(min, max, displayMode = 'pd', sigma = 6) {
+  const low = Number(min)
+  const high = Number(max)
+  const span = Math.max(1e-6, high - low)
+  const spread = Math.max(1e-6, Number(sigma) || 6)
+  const valueAt = displayMode === 'pd'
+    ? (pd) => pd
+    : (pd) => (pd === 25 ? -0.67448975 * spread : pd === 75 ? 0.67448975 * spread : 0)
+  const position = (pd) => Math.min(100, Math.max(0, ((valueAt(pd) - low) / span) * 100)).toFixed(3)
+  const p25 = position(25)
+  const p50 = position(50)
+  const p75 = position(75)
+  return `linear-gradient(90deg, transparent 0%, transparent ${p25}%, #000 ${p25}%, #000 ${p50}%, #ffff00 ${p50}%, #ffff00 ${p75}%, #ff0000 ${p75}%, #ff0000 100%)`
+}
+
 /**
  * 标准正态累积分布 Φ(z)，用于由信号余量 SE 计算探测概率 Pd = Φ(SE / σ)。
  * 采用 Abramowitz & Stegun 7.1.26 近似，精度约 1e-7。

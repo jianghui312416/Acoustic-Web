@@ -4,6 +4,7 @@ import {
   pickBandStep, terrainColorAt, screenHeightGradient, contourLineWidth,
   terrainShadowMask, terrainShadowFactor,
 } from './terrainRendering.js'
+import { detectionClassColor, standardNormalCdf } from './signalExcess.js'
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x))
 export function bathymetryColor(height, min = -8000, max = 0) {
   return terrainColorAt(height, min, max)
@@ -461,7 +462,9 @@ export function drawTerrainScene(canvas, grid, {
     const radialStep = fullResolution ? 1 : Math.max(1, Math.ceil(Math.max(1, col - 1) / 54))
     const depthStep = fullResolution ? 1 : Math.max(1, Math.ceil(Math.max(1, row - 1) / 44))
     const opacity = clamp((Number(controls.opacity) || 1.7) / 5, .04, 1)
-    const alphaPower = clamp(Number(controls.alphaPower) || 1.3, .35, 3)
+    const density = clamp(Number(controls.density) || 3, .25, 8)
+    const contrast = clamp(Number(controls.contrast) || 2, .5, 3)
+    const edgeSharpness = clamp(Number(controls.edgeSharpness) || 1, .5, 4)
     const dbMin = Number.isFinite(Number(controls.dbMin)) ? Number(controls.dbMin) : 60
     const dbMax = Math.max(dbMin + 1, Number(controls.dbMax) || 120)
     const rotations = [controls.rotationX, controls.rotationY, controls.rotationZ].map(value => (Number(value) || 0) * Math.PI / 180)
@@ -470,7 +473,7 @@ export function drawTerrainScene(canvas, grid, {
       ? controls.colorStops
       : [[0, [255,40,0]], [1, [0,0,127]]]
     const colorAt = (ratio) => {
-      const t = clamp(ratio, 0, 1)
+      const t = clamp((clamp(ratio, 0, 1) - .5) * contrast + .5, 0, 1)
       for (let i = 0; i < colorStops.length - 1; i++) {
         const [a, ca] = colorStops[i], [z, cz] = colorStops[i + 1]
         if (t > z && i < colorStops.length - 2) continue
@@ -479,6 +482,10 @@ export function drawTerrainScene(canvas, grid, {
       }
       return colorStops[colorStops.length - 1][1]
     }
+    const threeColor = controls.signalExcess?.threeColor === true
+    const probabilityFor = (value) => controls.signalExcess?.pd === true
+      ? Number(value)
+      : standardNormalCdf(Number(value) / Math.max(1e-6, Number(controls.signalExcess?.sigma) || 6)) * 100
     const rotate = (x, y, z) => {
       const [rx, ry, rz] = rotations
       let y1 = y * Math.cos(rx) - z * Math.sin(rx), z1 = y * Math.sin(rx) + z * Math.cos(rx)
@@ -629,11 +636,25 @@ export function drawTerrainScene(canvas, grid, {
     const pushFace = (points, values, baseAlpha) => {
       if (skipVolumeFaces) return
       if (points.some(point => !point) || values.some(value => !Number.isFinite(value))) return
+      if (threeColor) {
+        const probabilities = values.map(probabilityFor)
+        const meanProbability = probabilities.reduce((sum, value) => sum + value, 0) / probabilities.length
+        const classColor = detectionClassColor(meanProbability)
+        if (!classColor) return
+        const alpha = clamp(baseAlpha * density, .12, .98).toFixed(3)
+        volumeFaces.push({
+          p: points,
+          colors: values.map(() => classColor),
+          alpha,
+          order: points.reduce((sum, point) => sum + point.order, 0) / points.length,
+        })
+        return
+      }
       const ratios = values.map(value => clamp((value - dbMin) / (dbMax - dbMin), 0, 1))
       const colors = ratios.map(colorAt)
       const meanRatio = ratios.reduce((sum, value) => sum + value, 0) / ratios.length
-      const valueOpacity = Math.pow(1 - meanRatio * .42, alphaPower)
-      const alpha = clamp(baseAlpha * valueOpacity, .12, .9).toFixed(3)
+      const valueOpacity = Math.pow(1 - meanRatio * .42, edgeSharpness)
+      const alpha = clamp(baseAlpha * valueOpacity * density, .12, .98).toFixed(3)
       volumeFaces.push({
         p: points,
         colors,

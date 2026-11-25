@@ -21,6 +21,10 @@ test('polar volume shader uses interpolated coverage and direct TL surface color
   assert.match(polarClass, /smoothstep\(0\.015, 0\.92, voxel\.a\)/)
   assert.match(polarClass, /textureSize\(u_volumeTexture, 0\)/)
   assert.match(polarClass, /u_wedgeMeta\.w - u_wedgeMeta\.z >= 359\.5/)
+  assert.match(polarClass, /uniform vec3 u_displayTuning/)
+  assert.match(polarClass, /coverage = pow\(clamp\(coverage, 0\.0, 1\.0\), edgeSharpness\)/)
+  assert.match(polarClass, /displayRatio = clamp\(\(displayRatio - 0\.5\) \* contrast \+ 0\.5/)
+  assert.match(polarClass, /u_depthInfo\.z \* density \* coverage/)
   assert.match(polarClass, /accum = vec4\(color \* alpha, alpha\);\s*break;/)
   assert.doesNotMatch(polarClass, /1\.0 - exp\(-density/)
 })
@@ -35,7 +39,7 @@ test('polar volume fills the center from the first range sample without angular 
 test('polar half-body clip exposes an exact, opacity-controlled TL face', () => {
   assert.match(polarClass, /bool cutFaceSample = u_sliceInfo\.y > 0\.5 && u_sliceInfo\.z < 0\.5 && hasClippedPoint/)
   assert.match(polarClass, /for \(int cutStep = 0; cutStep < 8; cutStep\+\+\)/)
-  assert.match(polarClass, /float alpha = clamp\(u_depthInfo\.z, 0\.0, 1\.0\)/)
+  assert.match(polarClass, /float alpha = clamp\(u_depthInfo\.z \* density \* coverage, 0\.0, 1\.0\)/)
   assert.match(polarClass, /requestedOpacity <= 0\) return/)
 })
 

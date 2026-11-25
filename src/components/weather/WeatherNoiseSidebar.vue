@@ -85,7 +85,6 @@
       <label class="toggle-row bottom"><span>海流</span><input v-model="state.oceanCurrentOverlay" type="checkbox"><i></i></label>
       <div v-if="state.oceanCurrentOverlay" class="overlay-control current-overlay-control">
         <label class="current-depth-row"><span>深度</span><select v-model="state.oceanCurrentDepth" aria-label="HYCOM海流深度">
-          <option value="all">全深度</option>
           <option v-for="depth in oceanCurrentDepths" :key="depth" :value="String(depth)">{{ num(depth, depth < 10 ? 1 : 0) }} m</option>
         </select></label>
         <div v-if="oceanCurrentLayer" class="overlay-legend">
@@ -94,7 +93,7 @@
           <div class="overlay-ticks"><span v-for="t in oceanCurrentTicks" :key="t">{{ tickLabel(t) }}</span></div>
         </div>
         <label class="toggle-row overlay-dynamic"><span>动态显示</span><input v-model="state.oceanCurrentDynamic" type="checkbox"><i></i></label>
-        <small class="current-note">全深度为各有效深度层的 u/v 矢量平均</small>
+        <small class="current-note">海流伪彩图绘制在所选水下深度层</small>
         <p v-if="state.regionalOceanCurrentLoading" class="overlay-loading">正在加载HYCOM区域海流…</p>
         <p v-else-if="state.regionalOceanCurrentError" class="overlay-error">{{ state.regionalOceanCurrentError }}</p>
       </div>
@@ -118,7 +117,7 @@
     <label
       class="toggle-row bottom"
       :class="{ disabled: Boolean(selectedAisVessel) }"
-      :title="selectedAisVessel ? '已选择 AIS 船舶，航迹由船舶位置接管' : '在地形中点击依次添加航迹点，双击结束'"
+      :title="selectedAisVessel ? '已选择 AIS 船舶，航迹由船舶位置接管' : '在地形中点击依次添加航迹点，右键撤销最后一点，双击结束'"
     >
       <span>航迹点选择</span>
       <input
@@ -129,7 +128,7 @@
       <i></i>
     </label>
     <p v-if="signalTransmissionControls.selectTrackPoints" class="track-point-help">
-      在地形中点击依次添加航迹点，双击或点击下方按钮结束；与信号传输的航迹点选择共用同一组点。
+      在地形中点击依次添加航迹点，右键撤销最后一点，双击或点击下方按钮结束；相邻点间常驻标注距离。
     </p>
     <button
       v-if="signalTransmissionControls.selectTrackPoints && trackPointState.points.length"

@@ -43,8 +43,8 @@
 
       <p class="se-label">{{ rangeLabel }}</p>
       <div class="se-db-grid">
-        <div class="se-db-cell"><span>Min</span><input v-if="!isPdMode" v-model.number="state.dbMin" type="number" step="1" @blur="restoreDbRangeValue('dbMin')" /><b v-else class="se-fixed">0</b><em>{{ unitLabel }}</em></div>
-        <div class="se-db-cell"><span>Max</span><input v-if="!isPdMode" v-model.number="state.dbMax" type="number" step="1" @blur="restoreDbRangeValue('dbMax')" /><b v-else class="se-fixed">100</b><em>{{ unitLabel }}</em></div>
+        <div class="se-db-cell"><span>Min</span><input v-model.number="rangeMin" type="number" :min="isPdMode ? 0 : undefined" :max="isPdMode ? 99 : undefined" step="1" @blur="normalizeDisplayRange" /><em>{{ unitLabel }}</em></div>
+        <div class="se-db-cell"><span>Max</span><input v-model.number="rangeMax" type="number" :min="isPdMode ? 1 : undefined" :max="isPdMode ? 100 : undefined" step="1" @blur="normalizeDisplayRange" /><em>{{ unitLabel }}</em></div>
       </div>
       <div class="se-colorbar" :style="{ background: seGradient }"></div>
 
@@ -69,6 +69,13 @@
           <button type="button" :class="{ active: state.displayMode === 'pd' }" @click="state.displayMode = 'pd'">Pd（%）</button>
         </div>
       </div>
+      <div class="se-band se-three-color-row">
+        <span>三色 <em>→</em></span>
+        <button type="button" class="se-three-color" :class="{ active: state.threeColor }" :aria-pressed="state.threeColor" @click="state.threeColor = !state.threeColor">
+          {{ state.threeColor ? '已开启' : '已关闭' }}
+        </button>
+      </div>
+      <p v-if="state.threeColor" class="se-tricolor-note"><i class="hidden"></i>&lt;25% 不显示　<i class="black"></i>25–50%　<i class="yellow"></i>50–75%　<i class="red"></i>&gt;75%</p>
 
       <p class="se-note">SE = SL − TL − NL − DT + AG · NL {{ noiseLevelText }} dB</p>
       <p class="se-formula">Pd = Φ(SE / σ)，σ = {{ state.sigma }} dB</p>
@@ -84,7 +91,11 @@ import {
   currentWeatherNoiseFrame, forecastNoiseSummary, setWeatherNoiseFrame, weatherNoiseState,
 } from '@/modules/weather/weatherNoiseStore.js'
 import { formatForecastTime } from '@/utils/weatherNoiseForecast.js'
-import { SIGNAL_EXCESS_COLOR_STOPS } from '@/utils/signalExcess.js'
+import { buildDetectionClassGradient, SIGNAL_EXCESS_COLOR_STOPS } from '@/utils/signalExcess.js'
+import {
+  contrastedVolumeColorStops,
+  volumeRenderingControls,
+} from '@/modules/acoustic/volumeRenderingControls.js'
 
 const receiverOptions = [
   '自动 — 已选择/最新，音量为 TL',
@@ -100,11 +111,26 @@ const targetPresets = [
 ]
 
 const bandOptions = ['最大', '均值', '最小']
-const defaultDbRange = { dbMin: -60, dbMax: 60 }
+const defaultDbRange = { dbMin: -60, dbMax: 60, pdMin: 0, pdMax: 100 }
 
-const seGradient = `linear-gradient(90deg, ${SIGNAL_EXCESS_COLOR_STOPS
-  .map(([t, rgb]) => `rgb(${rgb.join(',')}) ${(t * 100).toFixed(1)}%`)
-  .join(', ')})`
+const rangeMin = computed({
+  get: () => isPdMode.value ? state.pdMin : state.dbMin,
+  set: (value) => { state[isPdMode.value ? 'pdMin' : 'dbMin'] = value },
+})
+const rangeMax = computed({
+  get: () => isPdMode.value ? state.pdMax : state.dbMax,
+  set: (value) => { state[isPdMode.value ? 'pdMax' : 'dbMax'] = value },
+})
+
+const seGradient = computed(() => {
+  if (state.threeColor) {
+    return buildDetectionClassGradient(rangeMin.value, rangeMax.value, state.displayMode, state.sigma)
+  }
+  const stops = contrastedVolumeColorStops(SIGNAL_EXCESS_COLOR_STOPS, volumeRenderingControls.contrast)
+  return `linear-gradient(90deg, ${stops
+    .map(([t, rgb]) => `rgb(${rgb.join(',')}) ${(t * 100).toFixed(1)}%`)
+    .join(', ')})`
+})
 
 const noiseLevelText = computed(() => {
   const level = Number(forecastNoiseSummary.value?.bandLevelDb)
@@ -134,9 +160,29 @@ function restoreDbRangeValue(key) {
   }
 }
 
+function normalizeDisplayRange() {
+  const minKey = isPdMode.value ? 'pdMin' : 'dbMin'
+  const maxKey = isPdMode.value ? 'pdMax' : 'dbMax'
+  restoreDbRangeValue(minKey)
+  restoreDbRangeValue(maxKey)
+  let min = Number(state[minKey])
+  let max = Number(state[maxKey])
+  if (isPdMode.value) {
+    min = Math.min(99, Math.max(0, min))
+    max = Math.min(100, Math.max(1, max))
+  }
+  if (!(max > min)) max = isPdMode.value ? Math.min(100, min + 1) : min + 1
+  if (!(max > min)) min = max - 1
+  state[minKey] = min
+  state[maxKey] = max
+}
+
 onMounted(() => {
   restoreDbRangeValue('dbMin')
   restoreDbRangeValue('dbMax')
+  restoreDbRangeValue('pdMin')
+  restoreDbRangeValue('pdMax')
+  normalizeDisplayRange()
 })
 
 function selectTarget(target) {
@@ -176,6 +222,15 @@ function selectTarget(target) {
 .se-band em { color:#59dff5; font-style:normal; }
 .se-band-buttons { display:flex; flex:1; gap:4px; }
 .se-band-buttons button { flex:1; }
+.se-three-color-row { margin-top:6px; }
+.se-three-color { flex:1; height:25px; color:#a9cad9; background:#132c40; border:1px solid #2e6078; border-radius:5px; font:10px 'Microsoft YaHei',sans-serif; cursor:pointer; }
+.se-three-color.active { color:#07121a; background:linear-gradient(90deg,#111 0 33%,#ffff00 33% 66%,#ff0000 66%); border-color:#f3c94f; font-weight:700; text-shadow:0 1px rgba(255,255,255,.45); }
+.se-tricolor-note { margin:5px 1px 2px; color:#7899aa; font-size:8px; line-height:1.6; }
+.se-tricolor-note i { display:inline-block; width:8px; height:8px; margin-right:2px; border:1px solid #496275; vertical-align:-1px; }
+.se-tricolor-note i.hidden { background:transparent; }
+.se-tricolor-note i.black { background:#000; }
+.se-tricolor-note i.yellow { background:#ffff00; }
+.se-tricolor-note i.red { background:#ff0000; }
 .se-section { margin:11px 1px 2px; padding-top:8px; color:#5e8499; font-size:10px; border-top:1px solid #1c3448; }
 .se-db-grid { display:grid; grid-template-columns:1fr 1fr; gap:4px 6px; }
 .se-db-cell { display:flex; align-items:center; gap:4px; color:#7f9eaf; }

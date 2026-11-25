@@ -97,6 +97,18 @@ export function addTrackPoint(point, now = Date.now(), params = null) {
   return true
 }
 
+/** 选择过程中撤销最后一个航迹点，并保持点、参数和双击时间记录严格对齐。 */
+export function undoLastTrackPoint() {
+  if (trackPointState.finished || !trackPointState.points.length) return false
+  trackPointState.points.pop()
+  trackPointState.params.pop()
+  trackPointState.addedAt.pop()
+  trackPointState.lastAddedAt = trackPointState.addedAt.at(-1) || 0
+  trackPointState.selectedIndex = trackPointState.points.length - 1
+  trackPointState.revision += 1
+  return true
+}
+
 /** 双击仅用于结束选择：移除双击过程中由两次 pointerup 产生的航迹点。 */
 export function finishTrackPointsFromDoubleClick(now = Date.now()) {
   if (trackPointState.finished) return false

@@ -510,6 +510,7 @@ export class ShaderVolume3DPrimitive {
       colorInfo: v4(),
       depthInfo: v4(),
       alphaByValue: new Cesium.Cartesian2(),
+      displayTuning: new Cesium.Cartesian3(1, 1, 1),
       cameraUvw: new Cesium.Cartesian3(),
       sampleStep: 0.01,
       strictNearest: 0,
@@ -528,6 +529,7 @@ export class ShaderVolume3DPrimitive {
       u_sliceInfo: () => u.sliceInfo,
       u_sliceMeta: () => u.sliceMeta,
       u_alphaByValue: () => u.alphaByValue,
+      u_displayTuning: () => u.displayTuning,
       u_sampleStep: () => u.sampleStep,
       u_strictNearest: () => u.strictNearest,
       u_hasBottomDepth: () => u.hasBottomDepth,
@@ -1579,6 +1581,8 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
       uniform float u_colorStopCount;
       // 色标透明度区间：x = 色带下限(60 dB/红)的 alpha 系数，y = 色带上限(120 dB/蓝)的 alpha 系数
       uniform vec2 u_alphaByValue;
+      // x = 体密度倍率，y = TL 色彩对比度倍率，z = 边缘锐度倍率。
+      uniform vec3 u_displayTuning;
       // 归一化纹理坐标中的最大步长；实际步长还会按当前射线穿过的体素数自适应缩小。
       uniform float u_sampleStep;
       // 严格最近邻（bellhop_gebco 参考模式）：1 = 逐节点 texelFetch、不做三线性插值。
@@ -1788,6 +1792,9 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
             if (depthM >= bottomM) continue;
             coverage *= smoothstep(0.0, max(8.0, u_featherM), bottomM - depthM);
           }
+          // 只收紧覆盖度羽化，不改变 realValue/displayRatio，因此不会改变色标映射。
+          float edgeSharpness = clamp(u_displayTuning.z, 0.5, 4.0);
+          coverage = pow(clamp(coverage, 0.0, 1.0), edgeSharpness);
           if (coverage <= 0.001) continue;
 
           float dataRatio = clamp(voxel.r, 0.0, 1.0);
@@ -1799,11 +1806,14 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
           float displayRatio = clamp((realValue - u_colorInfo.x) / colorSpan, 0.0, 1.0);
           // 参考模式不做色标 gamma，保持 fieldColor 原始分段映射；平滑模式沿用可调 gamma。
           if (u_strictNearest == 0) displayRatio = pow(displayRatio, max(0.35, u_colorInfo.z));
+          float contrast = clamp(u_displayTuning.y, 0.5, 3.0);
+          displayRatio = clamp((displayRatio - 0.5) * contrast + 0.5, 0.0, 1.0);
 
           vec3 color = getVolumeColor(displayRatio);
           // 整个声场体都采用“剖切面同款”的真实 TL 直出色：命中离相机最近的
           // 有效体素后立即结束，不再把沿途多个 TL 颜色做 Beer-Lambert 混合。
-          float alpha = clamp(u_depthInfo.z, 0.0, 1.0);
+          float density = clamp(u_displayTuning.x, 0.25, 8.0);
+          float alpha = clamp(u_depthInfo.z * density * coverage, 0.0, 1.0);
           accum = vec4(color * alpha, alpha);
           break;
         }
@@ -1870,8 +1880,9 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
         depthBottomIndex,
         depthRevealMax,
         alphaScale,
-        alphaPower,
-        sampling,
+        density,
+        contrast,
+        edgeSharpness,
         valueAlphaRange,
         sliceClip,
         colorStops,
@@ -1933,6 +1944,9 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
       uniforms.sliceMeta.w = 360
       uniforms.alphaByValue.x = valueAlpha[0]
       uniforms.alphaByValue.y = valueAlpha[1]
+      uniforms.displayTuning.x = clamp(Number(density) || 3, 0.25, 8)
+      uniforms.displayTuning.y = clamp(Number(contrast) || 2, 0.5, 3)
+      uniforms.displayTuning.z = clamp(Number(edgeSharpness) || 1, 0.5, 4)
       uniforms.valueInfo.x = valueRange.min
       uniforms.valueInfo.y = valueRange.max
       uniforms.valueInfo.z = volume.valueMin
@@ -1940,13 +1954,13 @@ export class NcPolarShaderVolume3DPrimitive extends WedgeShaderVolume3DPrimitive
       uniforms.colorInfo.x = colorRange?.min ?? volume.valueMin
       uniforms.colorInfo.y = colorRange?.max ?? volume.valueMax
       uniforms.colorInfo.z = colorGamma ?? 0.82
-      uniforms.colorInfo.w = Number(alphaPower) || 1
+      uniforms.colorInfo.w = 1
       uniforms.depthInfo.x = depthTopIndex
       uniforms.depthInfo.y = Math.min(depthBottomIndex, depthRevealMax)
       uniforms.depthInfo.z = alphaScale ?? DEFAULT_ALPHA_SCALE
       uniforms.depthInfo.w = volume.sourceDepth
-      // sampling 是归一化纹理坐标的最大步长；shader 会结合纹理三轴分辨率进一步缩小。
-      uniforms.sampleStep = clamp(Number(sampling) || 0.01, 0.001, 0.05)
+      // 采样步长由体素分辨率自适应决定，不再暴露无效的手动滑杆。
+      uniforms.sampleStep = 0.01
       uniforms.strictNearest = volume.strictNearest ? 1 : 0
       uniforms.hasBottomDepth = volume.hasBottomDepth ? 1 : 0
       // 近底羽化宽度：参考工程默认 160 m，浅水时按深度跨度的 25% 上限自适应缩小。

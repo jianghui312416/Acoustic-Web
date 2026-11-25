@@ -1,14 +1,15 @@
 import { portalApiUrl } from '@/config/runtimeConfig.js'
+import { withAccessToken } from '@/api/authHttp.js'
 
 export function signalTransmissionWsUrl(baseUrl = portalApiUrl()) {
   const url = new URL('ws/signal-transmission', baseUrl)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-  return url.toString()
+  return withAccessToken(url.toString())
 }
 
 export function absolutePortalFileUrl(path, baseUrl = portalApiUrl()) {
   if (!path) return ''
-  return new URL(String(path).replace(/^\//, ''), baseUrl).toString()
+  return withAccessToken(new URL(String(path).replace(/^\//, ''), baseUrl).toString())
 }
 
 export function createSignalTransmissionSocket({
@@ -27,7 +28,7 @@ export function createSignalTransmissionSocket({
   function connect() {
     onStatus?.({ state: 'connecting', message: '正在连接信号传输服务…' })
     try {
-      socket = new WebSocket(url)
+      socket = new WebSocket(withAccessToken(url))
     } catch (error) {
       onError?.(error)
       return

@@ -2,7 +2,7 @@
   <section class="terrain-preview-mode" aria-label="区域海底地形">
     <canvas ref="terrainGlCanvasEl" class="terrain-gl-canvas" aria-hidden="true"></canvas>
     <canvas ref="canvasEl" class="terrain-canvas" style="position:absolute;inset:0 0 25px;width:100%;height:calc(100% - 25px);display:block"
-      aria-label="区域海底地形，左键拖动平移，右键拖动旋转，滚轮缩放，悬停查看深度"
+      aria-label="区域海底地形，左键拖动平移，右键拖动旋转；选择航迹点时右键撤销；滚轮缩放，悬停查看深度"
       @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp"
       @pointercancel="onPointerUp" @pointerleave="onPointerLeave" @wheel.prevent="onWheel"
       @dblclick="onTrackDoubleClick" @contextmenu.prevent></canvas>
@@ -87,28 +87,27 @@
       <span v-if="hover">经度 {{ hover.lon.toFixed(4) }}°　纬度 {{ hover.lat.toFixed(4) }}°　{{ hover.elevation < 0 ? '水深' : '高程' }} {{ Math.abs(hover.elevation).toFixed(0) }} m</span>
       <span v-else-if="error" class="terrain-warn">{{ error }}</span>
       <span v-else>{{ status === 'loading' ? '正在加载地形' : grid ? '地形已就绪' : '等待加载地形' }}</span>
-      <span class="terrain-fps">帧率 {{ fps }}</span>
       <div class="terrain-source" role="group" aria-label="海底高程数据源">
         <button v-for="option in BATHYMETRY_SOURCE_OPTIONS" :key="option.value" type="button"
           :class="{ active: bathymetrySourceState.source === option.value }" :title="option.title"
           :aria-pressed="bathymetrySourceState.source === option.value"
           @click="switchBathymetrySource(option.value)">{{ option.label }}</button>
       </div>
-      <a :href="sourceAttribution.href" target="_blank" rel="noreferrer">{{ sourceAttribution.label }}</a>
+      <UserMenu inline />
     </footer>
   </section>
 </template>
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
-import { useFrameRate } from '@/composables/useFrameRate.js'
-import { normalizeTerrainBounds } from '@/utils/terrainPreview.js'
+import { greatCircleDistanceKm, normalizeTerrainBounds } from '@/utils/terrainPreview.js'
 import { loadBathymetry, acousticTerrainBounds } from '@/utils/bathymetry.js'
 import { BATHYMETRY_SOURCE_OPTIONS, bathymetrySourceState, setBathymetrySource } from '@/modules/terrain/bathymetrySource.js'
 import { drawTerrainScene, terrainMetersPerPixel } from '@/utils/terrainScene.js'
 import { createTerrainWebGLRenderer } from '@/utils/terrainWebGL.js'
 import { moonLightDirection } from '@/utils/moonLight.js'
 import { TERRAIN_MAX_MESH_SEGMENTS, terrainColorAt } from '@/utils/terrainRendering.js'
+import UserMenu from '@/components/layout/UserMenu.vue'
 import TerrainPreviewDock from './TerrainPreviewDock.vue'
 import TerrainStationCard from './TerrainStationCard.vue'
 import TrackPointCard from './TrackPointCard.vue'
@@ -139,6 +138,7 @@ import {
   finishTrackPointsFromDoubleClick,
   trackPointDrawing,
   trackPointState,
+  undoLastTrackPoint,
   updateTrackPointParams,
 } from '@/modules/acoustic/trackPointState.js'
 import { signalTransmissionControls } from '@/modules/acoustic/signalTransmissionControls.js'
@@ -261,11 +261,6 @@ const terrainReceiver = computed(() => (
 
 const headingDeg = computed(() => ((camera.value.yaw * 180 / Math.PI) % 360 + 360) % 360)
 const headingLabel = computed(() => `${Math.round(headingDeg.value).toString().padStart(3, '0')}°`)
-const sourceAttribution = computed(() => (
-  BATHYMETRY_SOURCE_OPTIONS.find(option => option.value === bathymetrySourceState.source)
-  || BATHYMETRY_SOURCE_OPTIONS[0]
-).attribution)
-
 /** 与地形着色共用同一套色带，生成左下角之外的高程/水深图例。 */
 const terrainLegend = computed(() => {
   const current = grid.value
@@ -345,8 +340,6 @@ const compassTicks = computed(() => {
   }
   return ticks
 })
-
-const { fps } = useFrameRate()
 
 let resizeObserver = null
 let drawRaf = 0
@@ -443,6 +436,8 @@ function queueOceanCurrentLoad() {
 }
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
+/** 右键短按撤销；超过该时长或发生拖动时保留原有视角旋转。 */
+const TRACK_RIGHT_CLICK_MAX_MS = 350
 
 /** 首次加载地形时固定使用 100 km × 100 km，避免直接运行时被传播距离提前改写。 */
 const DEFAULT_TERRAIN_SPAN_KM = 100
@@ -473,8 +468,8 @@ function sceneControls() {
     || (props.fields || []).some(layer => layer?.field?.signalExcess)
   if (seActive) {
     const pdMode = signalExcessState.displayMode === 'pd'
-    const dbMin = pdMode ? 0 : Number(signalExcessState.dbMin)
-    const dbMax = pdMode ? 100 : Number(signalExcessState.dbMax)
+    const dbMin = pdMode ? Number(signalExcessState.pdMin) : Number(signalExcessState.dbMin)
+    const dbMax = pdMode ? Number(signalExcessState.pdMax) : Number(signalExcessState.dbMax)
     if (Number.isFinite(dbMin) && Number.isFinite(dbMax) && dbMax > dbMin) {
       controls.dbMin = dbMin
       controls.dbMax = dbMax
@@ -492,6 +487,7 @@ function sceneControls() {
         high,
         pd: pdMode,
         sigma: Math.max(1e-6, Number(seParams.sigma) || 6),
+        threeColor: signalExcessState.threeColor === true,
       }
     }
   }
@@ -662,7 +658,7 @@ function drawTrack() {
       const source = project(point.lon, point.lat, -depth)
       if (!source || !Number.isFinite(source.x) || !Number.isFinite(source.y)) return null
       const seabed = project(point.lon, point.lat, Number(point.elevation) || 0)
-      return { source, seabed, depth }
+      return { source, seabed, depth, point, index }
     })
     .filter(Boolean)
   if (!projected.length) return
@@ -689,6 +685,34 @@ function drawTrack() {
     ctx.strokeStyle = 'rgba(56, 214, 255, 0.94)'
     ctx.lineWidth = 2.4
     ctx.stroke()
+
+    // 距离标注与撤销操作相互独立：只要存在相邻航迹点就常驻显示大圆距离。
+    ctx.font = "600 10px 'Microsoft YaHei', sans-serif"
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    for (let index = 1; index < projected.length; index += 1) {
+      const previous = projected[index - 1]
+      const current = projected[index]
+      if (current.index !== previous.index + 1) continue
+      const distanceKm = greatCircleDistanceKm(
+        previous.point.lon, previous.point.lat,
+        current.point.lon, current.point.lat,
+      )
+      const label = distanceKm < 1
+        ? `${Math.round(distanceKm * 1000)} m`
+        : distanceKm < 10 ? `${distanceKm.toFixed(2)} km`
+          : distanceKm < 100 ? `${distanceKm.toFixed(1)} km` : `${Math.round(distanceKm)} km`
+      const x = (previous.source.x + current.source.x) / 2
+      const y = (previous.source.y + current.source.y) / 2
+      const labelWidth = ctx.measureText(label).width + 10
+      ctx.fillStyle = 'rgba(5, 24, 38, 0.82)'
+      ctx.fillRect(x - labelWidth / 2, y - 9, labelWidth, 18)
+      ctx.strokeStyle = 'rgba(126, 247, 255, 0.72)'
+      ctx.lineWidth = 1
+      ctx.strokeRect(x - labelWidth / 2, y - 9, labelWidth, 18)
+      ctx.fillStyle = '#e8fbff'
+      ctx.fillText(label, x, y)
+    }
   }
   projected.forEach(({ source }, index) => {
     ctx.beginPath()
@@ -1438,6 +1462,7 @@ function onPointerDown(event) {
     pitch: camera.value.pitch,
     panX: camera.value.panX,
     panY: camera.value.panY,
+    startedAt: performance.now(),
     moved: false,
   }
 }
@@ -1499,6 +1524,7 @@ function onPointerUp(event) {
   const moved = dragState.moved
   const mode = dragState.mode
   const aisVessel = dragState.vessel
+  const heldMs = performance.now() - (Number(dragState.startedAt) || performance.now())
   dragState = null
   settleInteraction()
   try { canvasEl.value?.releasePointerCapture?.(event.pointerId) } catch {}
@@ -1506,6 +1532,20 @@ function onPointerUp(event) {
     selectAisVessel(aisVessel, '')
     startSelectedAisTracking(aisVessel)
     syncAisMotionAnimation()
+    return
+  }
+  if (
+    !moved
+    && mode === 'rotate'
+    && event.type !== 'pointercancel'
+    && trackPointDrawing.value
+    && heldMs <= TRACK_RIGHT_CLICK_MAX_MS
+  ) {
+    if (undoLastTrackPoint()) {
+      trackPointAnchor.value = null
+      station.value = null
+      scheduleDraw()
+    }
     return
   }
   if (!moved && mode === 'pan' && event.type !== 'pointercancel') {
@@ -1841,9 +1881,8 @@ onBeforeUnmount(() => {
 .terrain-legend-title { display: block; margin-bottom: 4px; color: #cfe9f6; font-size: 10px; }
 .terrain-legend-bar { height: 7px; border: 1px solid #2c4c62; border-radius: 2px; }
 .terrain-legend-ticks { display: flex; justify-content: space-between; margin-top: 3px; color: #8fb8cc; font: 9px ui-monospace, monospace; }
-.terrain-status { position: absolute; bottom: 0; left: 0; right: 0; z-index: 6; height: 24px; display: flex; align-items: center; gap: 8px; padding: 0 14px; box-sizing: border-box; background: #101e30; border-top: 1px solid #304256; font-size: 10px; }
+.terrain-status { position: absolute; bottom: 0; left: 0; right: 0; z-index: 6; height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 14px; box-sizing: border-box; background: #101e30; border-top: 1px solid #304256; font-size: 10px; }
 .terrain-status i { width: 6px; height: 6px; border-radius: 50%; background: #00c8b0; }.terrain-status a { margin-left: 8px; color: #83a9c0; text-decoration: none; }.terrain-warn { color: #f1c38c; }
-.terrain-fps { color: #8fd8ff; white-space: nowrap; }
 .terrain-source { display: flex; gap: 2px; margin-left: auto; }
 .terrain-source button { padding: 1px 7px; border: 1px solid #35516a; border-radius: 3px; background: #14283c; color: #9bbdd3; font: inherit; font-size: 10px; line-height: 16px; cursor: pointer; }
 .terrain-source button:hover { border-color: #5c90b3; color: #dff6ff; }

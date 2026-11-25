@@ -1,6 +1,5 @@
-// 引入 createApp用于创建 Vue 实例
 import { createApp } from 'vue'
-// 引入 App 根组件
 import App from './App.vue'
+import { router } from './router/index.js'
 
-createApp(App).mount('#app')
+createApp(App).use(router).mount('#app')

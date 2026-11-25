@@ -24,6 +24,8 @@ export const WATER_COLOR_STOPS = Object.freeze([
   [0.66, [14, 58, 64]],
   [0.84, [10, 42, 50]],
   [1, [6, 28, 36]],
+  // [0, [31, 111, 120]],
+  // [1, [31, 111, 120]],
 ])
 
 // 高程分层设色（hypsometric tint）：低地绿、丘陵黄绿、山地赭黄、峰顶灰白。
@@ -36,6 +38,8 @@ export const LAND_COLOR_STOPS = Object.freeze([
   [0.8, [200, 152, 82]],
   [0.9, [200, 170, 132]],
   [1, [240, 240, 228]],
+  // [0, [31, 111, 120]],
+  // [1, [31, 111, 120]],
 ])
 
 export function sampleColorStops(t, stops) {

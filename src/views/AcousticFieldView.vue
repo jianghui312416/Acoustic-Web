@@ -735,7 +735,7 @@
 
     <div v-if="volumeData && !cleanGlobeView" class="legend-corner">
       <div class="legend-bar" :style="{ background: colorGradient }"></div>
-      <div class="legend-labels"><span>{{ volumeLegend.inRangeMin }} dB</span><span>{{ volumeLegend.inRangeMax }} dB</span></div>
+      <div class="legend-labels"><span>{{ volumeLegend.inRangeMin }} {{ volumeLegend.unit }}</span><span>{{ volumeLegend.inRangeMax }} {{ volumeLegend.unit }}</span></div>
     </div>
 
     <div v-if="loading" class="loading-mask">
@@ -746,11 +746,13 @@
 
     <!-- 底部状态栏：鼠标经纬度 / 高程（水下为负）/ 层级 -->
     <div class="coord-status">
-      <span>经度：<b>{{ coordStatus.lon }}</b></span>
-      <span>纬度：<b>{{ coordStatus.lat }}</b></span>
-      <span>高度：<b>{{ coordStatus.height }}</b></span>
-      <span>层级：<b>{{ coordStatus.level }}</b></span>
-      <span>帧率：<b>{{ fps }}</b></span>
+      <div class="coord-metrics">
+        <span>经度：<b>{{ coordStatus.lon }}</b></span>
+        <span>纬度：<b>{{ coordStatus.lat }}</b></span>
+        <span>高度：<b>{{ coordStatus.height }}</b></span>
+        <span>层级：<b>{{ coordStatus.level }}</b></span>
+      </div>
+      <UserMenu inline />
     </div>
 
     <!-- 旧布局保留在源码中作为兼容参考，不参与渲染。 -->
@@ -965,7 +967,7 @@
               <span v-else>未显示</span>
             </p>
             <p v-if="omni2dVisible && omni2dStyle === 'sonar'" class="hint omni-legend">
-              <span class="lg-bar" :style="{ background: colorGradient }" />
+              <span class="lg-bar" :style="{ background: omniColorGradient }" />
               <span>{{ fmt(colorRange.min, 0) }} ~ {{ fmt(colorRange.max, 0) }} dB（与右侧色标一致）</span>
             </p>
           </div>
@@ -1262,8 +1264,8 @@
     <div v-if="volumeData && !cleanGlobeView" class="legend-corner">
       <div class="legend-bar" :style="{ background: colorGradient }"></div>
       <div class="legend-labels">
-        <span>{{ volumeLegend.inRangeMin }} dB 红</span>
-        <span>{{ volumeLegend.inRangeMax }} dB 蓝</span>
+        <span>{{ volumeLegend.inRangeMin }} {{ volumeLegend.unit }}</span>
+        <span>{{ volumeLegend.inRangeMax }} {{ volumeLegend.unit }}</span>
       </div>
       <p class="legend-out-range">
         <span class="legend-swatch"></span>
@@ -1280,7 +1282,6 @@
 
 <script setup>
 import { ref, shallowRef, shallowReactive, computed, watch, onMounted, onActivated, onDeactivated, onBeforeUnmount, nextTick } from 'vue'
-import { useFrameRate } from '@/composables/useFrameRate.js'
 import { Cesium, createCesiumViewer } from '@/utils/cesium.js'
 import {
   SoundField,
@@ -1320,6 +1321,7 @@ import TerrainGlobeSelector from '@/components/terrain/TerrainGlobeSelector.vue'
 import AisGlobalOverlay from '@/components/ais/AisGlobalOverlay.vue'
 import AcousticRunPanel from '@/components/terrain/AcousticRunPanel.vue'
 import StationPositionCard from '@/components/terrain/StationPositionCard.vue'
+import UserMenu from '@/components/layout/UserMenu.vue'
 import SoundSpeedProfile from '@/components/terrain/SoundSpeedProfile.vue'
 import AmbientNoiseProbe from '@/components/terrain/AmbientNoiseProbe.vue'
 import SignalTransmissionControls from '@/components/acoustic/SignalTransmissionControls.vue'
@@ -1368,11 +1370,16 @@ import {
   SELECTED_VESSEL_MAX_RANGE_NM,
 } from '@/utils/vesselNoiseSimulation.js'
 import { signalExcessState } from '@/modules/acoustic/signalExcessState.js'
-import { createSignalExcessField } from '@/utils/signalExcess.js'
+import {
+  buildDetectionClassGradient,
+  createSignalExcessField,
+  SIGNAL_EXCESS_COLOR_STOPS,
+} from '@/utils/signalExcess.js'
 import { normalizeLongitude, normalizeTerrainBounds } from '@/utils/terrainPreview.js'
 import {
   acousticSceneState,
   activeVolumeColorStops,
+  contrastedVolumeColorStops,
   opacityControlToAlphaScale,
   volumeRenderingControls,
 } from '@/modules/acoustic/volumeRenderingControls.js'
@@ -1483,6 +1490,8 @@ const DEFAULT_TERRAIN_SPAN_KM = 100
 /** 到达结构保持 50 m 精度；三维声场体每 500 m 更新一次，避免重复重算。 */
 const SIGNAL_ARRIVAL_WAYPOINT_SPACING_M = 50
 const SIGNAL_FIELD_WAYPOINT_SPACING_M = 500
+/** 后端有四个独立声场进程；航迹点按四个一组提交，避免结果无限堆积在浏览器内存。 */
+const TRACK_FIELD_CONCURRENCY = 4
 const terrainRadiusKm = ref(DEFAULT_TERRAIN_SPAN_KM / 6)
 /** 历史声场与工作区声场共用同一套胶囊 / 垂直切面 / 动态声线数据。 */
 const runHistoryLayers = shallowRef([])
@@ -1733,6 +1742,7 @@ const signalExcessParams = computed(() => {
     fullDepth: signalExcessState.fullDepth,
     sigma: signalExcessState.sigma,
     displayMode: signalExcessState.displayMode,
+    threeColor: signalExcessState.threeColor,
   }
 })
 /** 把单个 TL 场包成 SE 场；未启用或参数无效时原样返回。 */
@@ -2406,7 +2416,7 @@ function runAtTerrainStation(point) {
   runTerrainField()
 }
 
-function applyTrackPointParamsToCalc(point, index) {
+function applyTrackPointParams(target, point, index) {
   const params = trackPointState.params[index] || {}
   const sourceDepth = Number(params.sourceDepthM)
   const frequency = Number(params.frequencyHz)
@@ -2415,19 +2425,41 @@ function applyTrackPointParamsToCalc(point, index) {
   const grazingMax = Number(params.grazingAngleMax)
   const lineCount = Number(params.lineCount)
   const sector = Number(params.sector)
-  calcParams.value.coordX = Number(normalizeLongitude(Number(point.lon)).toFixed(6))
-  calcParams.value.coordY = Number(Number(point.lat).toFixed(6))
-  if (Number.isFinite(sourceDepth)) calcParams.value.srcDepth = Math.max(0, sourceDepth)
+  target.coordX = Number(normalizeLongitude(Number(point.lon)).toFixed(6))
+  target.coordY = Number(Number(point.lat).toFixed(6))
+  if (Number.isFinite(sourceDepth)) target.srcDepth = Math.max(0, sourceDepth)
   if (Number.isFinite(frequency) && frequency > 0) {
-    calcParams.value.minFreq = frequency
-    calcParams.value.maxFreq = frequency
+    target.minFreq = frequency
+    target.maxFreq = frequency
   }
-  if (Number.isFinite(range) && range > 0) calcParams.value.range = range
-  if (Number.isFinite(grazingMin)) calcParams.value.grazingAngleMin = Math.max(-90, Math.min(90, grazingMin))
-  if (Number.isFinite(grazingMax)) calcParams.value.grazingAngleMax = Math.max(-90, Math.min(90, grazingMax))
-  if (Number.isFinite(lineCount)) calcParams.value.lineCount = Math.max(0, Math.round(lineCount))
-  if (Number.isFinite(sector)) calcParams.value.sector = Math.max(1, Math.min(360, Math.round(sector)))
-  if (params.model === 'bellhop' || params.model === 'ram') calcParams.value.model = params.model
+  if (Number.isFinite(range) && range > 0) target.range = range
+  if (Number.isFinite(grazingMin)) target.grazingAngleMin = Math.max(-90, Math.min(90, grazingMin))
+  if (Number.isFinite(grazingMax)) target.grazingAngleMax = Math.max(-90, Math.min(90, grazingMax))
+  if (Number.isFinite(lineCount)) target.lineCount = Math.max(0, Math.round(lineCount))
+  if (Number.isFinite(sector)) target.sector = Math.max(1, Math.min(360, Math.round(sector)))
+  if (params.model === 'bellhop' || params.model === 'ram') target.model = params.model
+  return target
+}
+
+function trackPointCalculationParams(base, point, index) {
+  return applyTrackPointParams(JSON.parse(JSON.stringify(base)), point, index)
+}
+
+async function requestTrackPointField(params, index) {
+  await validateSourceDepthAgainstTerrain(params)
+  params.regionType = await detectSeaIceRegion(params)
+  const payload = portalParamsFor(params, {
+    range: Number(params.range),
+    minFreq: Number(params.minFreq),
+    maxFreq: Number(params.maxFreq),
+    sector: Number(params.sector),
+  })
+  const response = await analyse3dTLRDByModel(
+    payload,
+    params.model,
+    params.regionType === 'ice',
+  )
+  return { index, params, response }
 }
 
 async function runTrackPointFields() {
@@ -2444,43 +2476,98 @@ async function runTrackPointFields() {
   if (analysisMode.value !== '3d') switchMode('3d')
   const original = JSON.parse(JSON.stringify(calcParams.value))
   trackFieldRunState.running = true
+  loading.value = true
   trackFieldRunState.error = ''
   trackFieldRunState.completedCount = 0
   trackFieldRunState.message = `准备计算 ${points.length} 个航迹点声场…`
+  const failures = []
+  let completedCount = 0
   try {
     archiveCurrent3dRun()
-    for (let index = 0; index < points.length; index += 1) {
-      const point = points[index]
-      applyTrackPointParamsToCalc(point, index)
-      terrainRunVisible.value = true
-      terrainRunMinimized.value = false
-      terrainRunTime.value = `${new Date().toLocaleTimeString('zh-CN', { hour12: false })} · 航迹点 ${index + 1}`
-      terrainSource.value = {
-        lon: Number(calcParams.value.coordX),
-        lat: Number(calcParams.value.coordY),
-        depth: Number(calcParams.value.srcDepth),
+    const jobs = points.map((point, index) => ({
+      point,
+      index,
+      params: trackPointCalculationParams(original, point, index),
+    }))
+    for (let batchStart = 0; batchStart < jobs.length; batchStart += TRACK_FIELD_CONCURRENCY) {
+      const batch = jobs.slice(batchStart, batchStart + TRACK_FIELD_CONCURRENCY)
+      const batchEnd = batchStart + batch.length
+      trackFieldRunState.message = `并行计算航迹点 ${batchStart + 1}–${batchEnd}/${points.length}…`
+      const results = await Promise.allSettled(
+        batch.map(job => requestTrackPointField(job.params, job.index))
+      )
+      for (let offset = 0; offset < results.length; offset += 1) {
+        const result = results[offset]
+        const index = batch[offset].index
+        if (result.status === 'rejected') {
+          failures.push({
+            index,
+            message: result.reason?.message || String(result.reason),
+          })
+          trackFieldRunState.error = `航迹点 ${index + 1} 声场计算失败：${failures.at(-1).message}`
+          continue
+        }
+        const record = result.value
+        try {
+          Object.assign(calcParams.value, record.params)
+          detectedSeaIce.value = record.params.regionType === 'ice'
+          terrainRunVisible.value = true
+          terrainRunMinimized.value = false
+          terrainRunTime.value = `${new Date().toLocaleTimeString('zh-CN', { hour12: false })} · 航迹点 ${index + 1}`
+          terrainSource.value = {
+            lon: Number(record.params.coordX),
+            lat: Number(record.params.coordY),
+            depth: Number(record.params.srcDepth),
+          }
+          terrainRadiusKm.value = Math.max(0.1, Number(record.params.range) * 1.852)
+          errorText.value = ''
+          trackFieldRunState.message = `装载航迹点 ${index + 1}/${points.length} 声场…`
+          await loadData({ response: record.response, regionType: record.params.regionType })
+          if (errorText.value || !soundField?.loaded || !raySourceData.value) {
+            throw new Error(errorText.value || `航迹点 ${index + 1} 声场装载失败`)
+          }
+          const layerCount = runHistoryLayers.value.length
+          archiveCurrent3dRun()
+          if (runHistoryLayers.value.length <= layerCount) {
+            throw new Error(`航迹点 ${index + 1} 声场归档失败`)
+          }
+          completedCount += 1
+          trackFieldRunState.completedCount = completedCount
+
+          // 归档层已经持有解析结果与体纹理。立即清空临时 current 引用，避免后续点
+          // 失败并结束 loading 后，最后一个成功点同时以 current 和历史层出现：GPU
+          // 去重会把它登记为 current，Canvas 随后又按历史层 ID 重复绘制。
+          terrainRunVisible.value = false
+          volumeData.value = null
+          raySourceData.value = null
+          currentVolumeTexture = null
+          terrainTexture.value = null
+        } catch (error) {
+          failures.push({ index, message: error?.message || String(error) })
+          trackFieldRunState.error = `航迹点 ${index + 1} 处理失败：${failures.at(-1).message}`
+        } finally {
+          record.response = null
+        }
+        // loadData 会在单个结果装载完毕后清除 loading；航线任务尚未结束时
+        // 立即恢复整体忙状态，防止其他入口插入一次共享场景计算。
+        loading.value = true
+        await nextTick()
       }
-      terrainRadiusKm.value = Math.max(0.1, Number(calcParams.value.range) * 1.852)
-      errorText.value = ''
-      trackFieldRunState.message = `正在计算航迹点 ${index + 1}/${points.length}…`
-      await loadData()
-      if (errorText.value || !soundField?.loaded || !raySourceData.value) {
-        throw new Error(errorText.value || `航迹点 ${index + 1} 声场计算失败`)
-      }
-      const layerCount = runHistoryLayers.value.length
-      archiveCurrent3dRun()
-      if (runHistoryLayers.value.length <= layerCount) {
-        throw new Error(`航迹点 ${index + 1} 声场归档失败`)
-      }
-      trackFieldRunState.completedCount = index + 1
-      await nextTick()
     }
     terrainRunVisible.value = false
-    trackFieldRunState.message = `已完成 ${points.length} 个航迹点声场`
+    if (failures.length) {
+      const failedPoints = failures.map(item => item.index + 1).join('、')
+      trackFieldRunState.error = `航迹点 ${failedPoints} 计算失败，其余声场已继续完成`
+      trackFieldRunState.message = `已完成 ${completedCount}/${points.length} 个航迹点声场`
+    } else {
+      trackFieldRunState.error = ''
+      trackFieldRunState.message = `已完成 ${points.length} 个航迹点声场`
+    }
   } catch (error) {
     trackFieldRunState.error = error?.message || String(error)
   } finally {
     trackFieldRunState.running = false
+    loading.value = false
     Object.assign(calcParams.value, original)
   }
 }
@@ -2711,8 +2798,6 @@ const chartRefreshToken = ref(0)
 
 /** 底部状态栏：鼠标所在经纬度 / 高程(水下为负) / 层级 */
 const coordStatus = ref({ lon: '-', lat: '-', height: '-', level: '-' })
-/** 底部状态栏帧率：采样 requestAnimationFrame 间隔，反映主线程/渲染压力。 */
-const { fps } = useFrameRate()
 let coordHandler = null
 let coordRaf = 0
 
@@ -3126,7 +3211,13 @@ const profileDbRange = computed(() => {
   if (!params) {
     return { min: Number(volumeRenderingControls.dbMin), max: Number(volumeRenderingControls.dbMax) }
   }
-  if (params.displayMode === 'pd') return { min: 0, max: 100 }
+  if (params.displayMode === 'pd') {
+    const rawMin = Number(signalExcessState.pdMin)
+    const rawMax = Number(signalExcessState.pdMax)
+    const min = Math.min(99, Math.max(0, Number.isFinite(rawMin) ? rawMin : 0))
+    const max = Math.min(100, Math.max(min + 1, Number.isFinite(rawMax) ? rawMax : 100))
+    return { min, max }
+  }
   const min = Number(signalExcessState.dbMin)
   const max = Number(signalExcessState.dbMax)
   if (Number.isFinite(min) && Number.isFinite(max) && max > min) return { min, max }
@@ -3429,8 +3520,12 @@ const colorStops = ref(
 const volumeLegend = computed(() => ({
   ...VOLUME_TL_LEGEND,
   gradient: colorGradient.value,
-  inRangeMin: fmt(colorRange.value.min, 1),
-  inRangeMax: fmt(colorRange.value.max, 1),
+  inRangeMin: fmt(signalExcessParams.value ? profileDbRange.value.min : colorRange.value.min, 1),
+  inRangeMax: fmt(signalExcessParams.value ? profileDbRange.value.max : colorRange.value.max, 1),
+  unit: signalExcessParams.value?.displayMode === 'pd' ? '%' : 'dB',
+  outOfRangeLabel: signalExcessParams.value?.threeColor
+    ? 'Pd < 25% 或目标深度范围外（透明）'
+    : signalExcessParams.value ? '目标深度范围外（透明）' : VOLUME_TL_LEGEND.outOfRangeLabel,
 }))
 
 // 面板折叠状态：默认展开「计算参数」与「显示控制」
@@ -3811,8 +3906,9 @@ watch(
     volumeRenderingControls.dbMin,
     volumeRenderingControls.dbMax,
     volumeRenderingControls.opacity,
-    volumeRenderingControls.alphaPower,
-    volumeRenderingControls.sampling,
+    volumeRenderingControls.density,
+    volumeRenderingControls.contrast,
+    volumeRenderingControls.edgeSharpness,
     volumeRenderingControls.colormap,
   ],
   () => {
@@ -5681,8 +5777,34 @@ function colorStopsToSdk() {
   return activeVolumeColorStops(volumeRenderingControls.colormap)
 }
 
+/** CPU 图层与图例使用 GPU 同款对比度变换后的色标。 */
+function displayedTlColorStopsToSdk() {
+  return contrastedVolumeColorStops(colorStopsToSdk(), volumeRenderingControls.contrast)
+}
+
+/** 当前体模式的显示色标：TL、SE 和 Pd 均与 GPU 对比度公式一致。 */
+function activeDisplayedColorStopsToSdk() {
+  if (signalExcessParams.value) {
+    return contrastedVolumeColorStops(SIGNAL_EXCESS_COLOR_STOPS, volumeRenderingControls.contrast)
+  }
+  return displayedTlColorStopsToSdk()
+}
+
 /** 当前色标对应的 CSS 渐变（图例实时预览） */
-const colorGradient = computed(() => buildTlGradient(colorStopsToSdk()))
+const colorGradient = computed(() => {
+  const params = signalExcessParams.value
+  if (params?.threeColor) {
+    return buildDetectionClassGradient(
+      profileDbRange.value.min,
+      profileDbRange.value.max,
+      params.displayMode,
+      params.sigma,
+    )
+  }
+  return buildTlGradient(activeDisplayedColorStopsToSdk())
+})
+/** 二维 TL 俯视图始终解释原始 TL，不随 SE/Pd 模式切换色带。 */
+const omniColorGradient = computed(() => buildTlGradient(displayedTlColorStopsToSdk()))
 
 function isOpen(key) {
   return !collapsedSections.value[key]
@@ -5806,7 +5928,7 @@ function syncOmni2dLayer() {
     // 与三维体保持一致的筛选 / 色标口径：声呐风格下该范围同时作为射线分级范围
     valueRange: { min: valueRange.value.min, max: valueRange.value.max },
     colorRange: { min: colorRange.value.min, max: colorRange.value.max },
-    stops: colorStopsToSdk(),
+    stops: displayedTlColorStopsToSdk(),
     rayCount: OMNI_RAY_COUNT,
     pointVisible: isCurrentVolumePointVisible,
   })
@@ -5880,8 +6002,9 @@ function syncHistoricalSoundFields() {
     renderer.setDisplay({
       valueRange: { min: valueRange.value.min, max: Number(fomValue.value) },
       colorRange: { min: colorRange.value.min, max: colorRange.value.max },
-      alphaPower: Number(volumeRenderingControls.alphaPower),
-      sampling: Number(volumeRenderingControls.sampling),
+      density: Number(volumeRenderingControls.density),
+      contrast: Number(volumeRenderingControls.contrast),
+      edgeSharpness: Number(volumeRenderingControls.edgeSharpness),
       alphaScale: volumeOpacity.value,
       valueAlphaRange: [valueAlphaRange.value.min, valueAlphaRange.value.max],
       sliceClip: { enabled: false },
@@ -5910,8 +6033,9 @@ function syncSoundField(options = {}) {
     valueRange: { min: valueRange.value.min, max: Number(fomValue.value) },
     // 色标按自定义 dB 范围映射：下限=红，上限=蓝（红→蓝渐变方式不变）
     colorRange: { min: colorRange.value.min, max: colorRange.value.max },
-    alphaPower: Number(volumeRenderingControls.alphaPower),
-    sampling: Number(volumeRenderingControls.sampling),
+    density: Number(volumeRenderingControls.density),
+    contrast: Number(volumeRenderingControls.contrast),
+    edgeSharpness: Number(volumeRenderingControls.edgeSharpness),
     alphaScale: volumeOpacity.value,
     valueAlphaRange: [valueAlphaRange.value.min, valueAlphaRange.value.max],
     sliceClip: getSliceClipOptions(),
@@ -6262,6 +6386,7 @@ function updateSliceCurtain() {
       depthBottomIndex: curtain.volume.depth - 1,
       depthRevealMax: curtain.volume.depth - 1,
       alphaScale: 0.9,
+      contrast: Number(volumeRenderingControls.contrast),
       sliceClip: { enabled: false },
       colorStops: colorStopsToSdk(),
     })
@@ -6788,18 +6913,20 @@ function seaIceQueryBounds(lonDeg, latDeg, rangeNm) {
  * 海区判定与声学模型无关：RAM/KRAKEN 也必须在点选位置后切换到
  * 各自的冰区 / 非冰区三维 Plugin。
  */
-async function detectModelSeaIce() {
-  const lon = Number(calcParams.value.coordX)
-  const lat = Number(calcParams.value.coordY)
-  const rangeNm = Number(calcParams.value.range)
-  if (![lon, lat, rangeNm].every(Number.isFinite) || rangeNm <= 0) return
+async function detectSeaIceRegion(params) {
+  const lon = Number(params.coordX)
+  const lat = Number(params.coordY)
+  const rangeNm = Number(params.range)
+  if (![lon, lat, rangeNm].every(Number.isFinite) || rangeNm <= 0) {
+    return params.regionType === 'ice' ? 'ice' : 'normal'
+  }
   const bounds = seaIceQueryBounds(lon, lat, rangeNm)
-  if (!bounds) return
+  if (!bounds) return params.regionType === 'ice' ? 'ice' : 'normal'
   try {
     const response = await getEnvDataRegion({
-      dataSource: calcParams.value.dataset,
+      dataSource: params.dataset,
       dataType: 'DT_ENV_ICE_THICKNESS',
-      time: normalizePortalTime(calcParams.value.time),
+      time: normalizePortalTime(params.time),
       timeRes: 0,
       z: 0,
       ...bounds,
@@ -6816,15 +6943,19 @@ async function detectModelSeaIce() {
       }
       if (hasSeaIce) break
     }
-    detectedSeaIce.value = hasSeaIce
-    calcParams.value.regionType = hasSeaIce ? 'ice' : 'normal'
+    return hasSeaIce ? 'ice' : 'normal'
   } catch (error) {
     console.warn('[海冰检测] 区域冰厚查询失败，沿用当前海区设置：', error?.message ?? error)
-    detectedSeaIce.value = calcParams.value.regionType === 'ice'
+    return params.regionType === 'ice' ? 'ice' : 'normal'
   }
 }
 
-async function loadData() {
+async function detectModelSeaIce() {
+  calcParams.value.regionType = await detectSeaIceRegion(calcParams.value)
+  detectedSeaIce.value = calcParams.value.regionType === 'ice'
+}
+
+async function loadData(precomputed = null) {
   loading.value = true
   errorText.value = ''
   runtimeError.value = ''
@@ -6850,8 +6981,13 @@ async function loadData() {
   bottomTypeTimer = 0
   bottomTypeSegments.value = []
   bottomTypeState.value = 'idle'
-  loadingMessage.value = '检查声源区域海冰覆盖…'
-  await detectModelSeaIce()
+  if (precomputed?.response) {
+    calcParams.value.regionType = precomputed.regionType === 'ice' ? 'ice' : 'normal'
+    detectedSeaIce.value = calcParams.value.regionType === 'ice'
+  } else {
+    loadingMessage.value = '检查声源区域海冰覆盖…'
+    await detectModelSeaIce()
+  }
   loadingMessage.value = '调用声场计算接口…'
 
   if (!soundField) {
@@ -6878,7 +7014,7 @@ async function loadData() {
     currentVolumeTexture = null
     terrainTexture.value = null
 
-    await loadTlrdData()
+    await loadTlrdData(precomputed?.response || null)
 
     volumeData.value = soundField.volume
     valueRange.value = { min: VOLUME_TL_COLOR_MIN, max: VOLUME_TL_COLOR_MAX }
@@ -7249,15 +7385,15 @@ function scheduleBottomTypesForAzimuth(azimuthDeg, delay = 260) {
  * 这类参数错误原本会被门户包装成 HTTP 500；在本地即可确定时直接拦截，
  * 同时保留门户校验作为地形不可用或两套环境数据存在差异时的最终兜底。
  */
-async function validateSourceDepthAgainstTerrain() {
+async function validateSourceDepthAgainstTerrain(params = calcParams.value) {
   const provider = viewer?.scene?.terrainProvider
   // 椭球地形或没有瓦片可用性的提供器无法做 sampleTerrainMostDetailed，
   // 直接交给门户校验，避免每次计算都打印警告。
   if (!canSampleTerrain(provider)) return
 
-  const lon = Number(calcParams.value.coordX)
-  const lat = Number(calcParams.value.coordY)
-  const sourceDepth = Number(calcParams.value.srcDepth)
+  const lon = Number(params.coordX)
+  const lat = Number(params.coordY)
+  const sourceDepth = Number(params.srcDepth)
   if (![lon, lat, sourceDepth].every(Number.isFinite)) return
 
   try {
@@ -7286,17 +7422,20 @@ async function validateSourceDepthAgainstTerrain() {
 }
 
 /** 按当前模型与海区调用对应接口，计算「标准格式」三维声场。 */
-async function loadTlrdData() {
-  loadingMessage.value = '校验声源位置与当地水深…'
-  await validateSourceDepthAgainstTerrain()
-  const payload = commonPortalParams({
-    range: Number(calcParams.value.range),
-    minFreq: Number(calcParams.value.minFreq),
-    maxFreq: Number(calcParams.value.maxFreq),
-    sector: Number(calcParams.value.sector),
-  })
-  const ice = calcParams.value.regionType === 'ice'
-  let tlrdJson = await analyse3dTLRDByModel(payload, calcParams.value.model, ice)
+async function loadTlrdData(precomputedResponse = null) {
+  let tlrdJson = precomputedResponse
+  if (!tlrdJson) {
+    loadingMessage.value = '校验声源位置与当地水深…'
+    await validateSourceDepthAgainstTerrain()
+    const payload = commonPortalParams({
+      range: Number(calcParams.value.range),
+      minFreq: Number(calcParams.value.minFreq),
+      maxFreq: Number(calcParams.value.maxFreq),
+      sector: Number(calcParams.value.sector),
+    })
+    const ice = calcParams.value.regionType === 'ice'
+    tlrdJson = await analyse3dTLRDByModel(payload, calcParams.value.model, ice)
+  }
   const parsed = parseAnalyse3DTlrd(tlrdJson)
   // 图表与切面均可直接消费解析后的紧凑模型。尽早断开原始多层数组引用，避免
   // 它在后续地形采样和声线请求期间与 Float32/RGBA 体同时占用数 GB 内存。
@@ -9198,12 +9337,12 @@ input[type='range']:disabled {
   right: 0;
   bottom: 0;
   z-index: 13;
-  height: 28px;
+  height: 32px;
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 26px;
-  padding: 0 16px;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 0 12px 0 16px;
   box-sizing: border-box;
   color: #cfe3f0;
   font-size: 13px;
@@ -9213,6 +9352,16 @@ input[type='range']:disabled {
   background: linear-gradient(180deg, rgba(8, 26, 46, 0) 0%, rgba(8, 26, 46, 0.9) 60%);
   pointer-events: none;
   white-space: nowrap;
+  overflow: visible;
+}
+
+.coord-metrics {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
   overflow: hidden;
 }
 .coord-status span { color: #cfe3f0; }

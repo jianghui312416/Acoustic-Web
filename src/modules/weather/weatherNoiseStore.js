@@ -39,7 +39,7 @@ export const weatherNoiseState = reactive({
   regionalNoiseKey: '',
   oceanCurrentOverlay: false,
   oceanCurrentDynamic: false,
-  oceanCurrentDepth: 'all',
+  oceanCurrentDepth: '',
   regionalOceanCurrent: null,
   regionalOceanCurrentLoading: false,
   regionalOceanCurrentError: '',
@@ -343,9 +343,10 @@ export async function loadRegionalOceanCurrent(options = {}) {
     weatherNoiseState.regionalOceanCurrent = result
     weatherNoiseState.regionalOceanCurrentKey = key
     const depths = result.depths_m || []
-    if (weatherNoiseState.oceanCurrentDepth !== 'all' &&
-        !depths.some(depth => Math.abs(Number(depth) - Number(weatherNoiseState.oceanCurrentDepth)) < 1e-6)) {
-      weatherNoiseState.oceanCurrentDepth = 'all'
+    const hasSelectedDepth = weatherNoiseState.oceanCurrentDepth !== '' &&
+      depths.some(depth => Math.abs(Number(depth) - Number(weatherNoiseState.oceanCurrentDepth)) < 1e-6)
+    if (!hasSelectedDepth) {
+      weatherNoiseState.oceanCurrentDepth = depths.length ? String(depths[0]) : ''
     }
     return result
   } catch (error) {

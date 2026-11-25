@@ -50,7 +50,9 @@
       <nav class="module-list" aria-label="业务模块">
         <section class="module-group weather-noise-module" :class="{ active: weatherNoiseOpen }">
           <button type="button" class="module-entry" :class="{ active: weatherNoiseOpen }" title="预报天气（海面10米风速、降雨、海况）与环境噪声" aria-label="天气与环境噪声" @click="weatherNoiseOpen = !weatherNoiseOpen">
-            <span class="module-icon weather-module-icon" aria-hidden="true">🌊</span>
+            <span class="module-icon weather-module-icon" aria-hidden="true">
+              <span class="module-icon-emoji">🌊</span>
+            </span>
             <span class="module-label">天气与环境噪声</span>
             <span class="module-chevron" :class="{ open: weatherNoiseOpen }" aria-hidden="true">›</span>
           </button>
@@ -251,12 +253,16 @@
               <input v-model.number="visualControls.opacity" type="range" min="0" max="1" step="0.01" @input="normalizeControls" />
             </label>
             <label class="feature-slider">
-              <span title="归一化纹理坐标中的最大步长；实际步长会按三维体素分辨率自适应缩小">最大采样步长 <b>{{ formatControl(visualControls.sampling, 3) }}</b></span>
-              <input v-model.number="visualControls.sampling" type="range" min="0.004" max="0.03" step="0.001" title="体素分辨率自适应采样上限" @input="normalizeControls" />
+              <span title="提高沿视线累计的光学密度，使声场体更实、更容易辨认">体密度 <b>{{ formatControl(visualControls.density, 2) }}×</b></span>
+              <input v-model.number="visualControls.density" type="range" min="0.25" max="8" step="0.05" title="声场体光学密度倍率" @input="normalizeControls" />
             </label>
             <label class="feature-slider">
-              <span>透明度指数 <b>{{ formatControl(visualControls.alphaPower, 1) }}</b></span>
-              <input v-model.number="visualControls.alphaPower" type="range" min="0.35" max="3" step="0.05" @input="normalizeControls" />
+              <span title="拉开相邻 TL 颜色差异；下方色标同步变化并保持与 TL 数值对应">细节对比度 <b>{{ formatControl(visualControls.contrast, 2) }}×</b></span>
+              <input v-model.number="visualControls.contrast" type="range" min="0.5" max="3" step="0.05" title="TL 色彩对比度倍率" @input="normalizeControls" />
+            </label>
+            <label class="feature-slider">
+              <span title="收紧体素覆盖度的边界羽化，不改变 TL 色标映射">边缘锐度 <b>{{ formatControl(visualControls.edgeSharpness, 2) }}×</b></span>
+              <input v-model.number="visualControls.edgeSharpness" type="range" min="0.5" max="4" step="0.05" title="声场体边缘锐度倍率" @input="normalizeControls" />
             </label>
 
             <label class="feature-select">
@@ -562,6 +568,7 @@ import {
   VOLUME_COLORMAPS,
   acousticSceneState,
   activeVolumeColorStops,
+  contrastedVolumeColorStops,
   clampVolumeRenderingControls,
   volumeRenderingControls,
 } from '@/modules/acoustic/volumeRenderingControls.js'
@@ -651,9 +658,13 @@ const volumeControlsAvailable = computed(() => props.viewMode === 'terrain' && a
 function stopsToGradient(stops) {
   return `linear-gradient(90deg, ${(stops || []).map(([t, rgb]) => `rgb(${rgb.join(',')}) ${(Number(t) * 100).toFixed(1)}%`).join(', ')})`
 }
-const volumeColorGradient = computed(() => stopsToGradient(activeVolumeColorStops(visualControls.colormap)))
+const displayedVolumeColorStops = computed(() => contrastedVolumeColorStops(
+  activeVolumeColorStops(visualControls.colormap),
+  visualControls.contrast,
+))
+const volumeColorGradient = computed(() => stopsToGradient(displayedVolumeColorStops.value))
 // 垂直切面的色标类型跟随三维体绘制的色图，两者保持同一色带。
-const sliceColorGradient = computed(() => stopsToGradient(activeVolumeColorStops(visualControls.colormap)))
+const sliceColorGradient = computed(() => stopsToGradient(displayedVolumeColorStops.value))
 const rotationAxes = Object.freeze([
   { key: 'rotationX', label: 'X' },
   { key: 'rotationY', label: 'Y' },
@@ -933,7 +944,7 @@ onBeforeUnmount(() => {
   align-items: center;
   padding: 4px 8px;
   border-radius: 5px;
-  background: #f7fbff;
+  background: #0e1b2c;
   box-shadow: 0 4px 14px rgba(0, 8, 18, 0.28);
 }
 
@@ -1061,14 +1072,14 @@ onBeforeUnmount(() => {
 }
 
 .module-icon-emoji {
-  font-size: 18px;
+  font-size: 15px;
   line-height: 1;
 }
 
 .module-label {
   min-width: 0;
   overflow: hidden;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 650;
   letter-spacing: 0.5px;
   text-overflow: ellipsis;
@@ -1209,11 +1220,11 @@ onBeforeUnmount(() => {
 <style scoped>
 .app-sidebar { width: 320px; background: linear-gradient(#101d2e, #0b1420); box-shadow: none; }
 .sidebar-scroll { padding: 4px 7px 12px; flex: 1; }
-.run-button { height: 28px; font-size: 12px; letter-spacing: 0; color: #00d4b5; background: #10373c; box-shadow: none; }
-.brand-row { margin: 8px -7px 0; padding: 10px 8px; border: 0; border-bottom: 1px solid #203348; border-radius: 0; background: #0e1b2c; }
+.run-button { height: 28px; font-size: 13px; letter-spacing: 0; color: #00d4b5; background: #10373c; box-shadow: none; }
+.brand-row { margin: 1px -7px 0; padding: 4px 15px; border: 0; border-bottom: 1px solid #203348; border-radius: 0; background: #0e1b2c; }
 .brand-lockup { padding: 2px 4px; border-radius: 0; box-shadow: none; }
-.brand-lockup img { width: 88px; height: 24px; object-fit: contain; }
-.view-chip { width: 36px; height: 27px; background: #182a40; color: #98c9e4; }
+.brand-lockup img { width: 100px; height: 40px; object-fit: contain; }
+.view-chip { width: 36px; height: 29px; background: #182a40; color: #98c9e4; }
 .view-chip svg { width: 16px; height: 16px; }
 .module-list { margin-top: 8px; }
 .module-entry { min-height: 46px; background: #132133; border-color: #20364b; border-radius: 9px; }

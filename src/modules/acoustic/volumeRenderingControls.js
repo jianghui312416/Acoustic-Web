@@ -102,14 +102,18 @@ export const volumeRenderingControls = reactive({
   volumeVisible: true,
   /** 整体不透明度：0 = 完全不可见，1 = 完整显示。 */
   opacity: 1,
-  sampling: 0.01,
-  alphaPower: 1.3,
+  /** 体密度：放大沿视线累计的光学密度，默认 3×。 */
+  density: 3,
+  /** 细节对比度：围绕色带中点拉开 TL 色彩差异，默认 2×。 */
+  contrast: 2,
+  /** 边缘锐度：只收紧体边缘覆盖度，不改变 TL 到颜色的映射。 */
+  edgeSharpness: 1,
   colormap: 'bellhop',
   /** 体绘制固定按原始方位/距离/深度节点（最近邻）显示，不再提供插值开关。 */
   strictNearest: true,
-  /** 参考工程 fieldColor 的 TL 映射域为 45–128 dB，默认 dB 范围与之对齐。 */
-  dbMin: 45,
-  dbMax: 128,
+  /** 默认 TL 映射范围。 */
+  dbMin: 60,
+  dbMax: 120,
   rotationX: 0,
   rotationY: 0,
   rotationZ: 0,
@@ -131,6 +135,56 @@ export function activeVolumeColorStops(id = volumeRenderingControls.colormap) {
   return palette.stops.map(([position, rgb]) => [position, [...rgb]])
 }
 
+/**
+ * 生成与体渲染“细节对比度”完全一致的显示色标。
+ *
+ * 色标位置仍表示线性的原始 TL 值；颜色采样位置使用 GPU 同款公式：
+ * `clamp((t - 0.5) * contrast + 0.5, 0, 1)`。
+ * 因此图例、二维俯视图和垂直切面可以准确解释体渲染中的颜色。
+ */
+export function contrastedVolumeColorStops(
+  stops = activeVolumeColorStops(),
+  contrast = volumeRenderingControls.contrast,
+) {
+  const source = (Array.isArray(stops) ? stops : [])
+    .filter(([position, rgb]) => Number.isFinite(Number(position)) && Array.isArray(rgb) && rgb.length >= 3)
+    .map(([position, rgb]) => [
+      Math.min(1, Math.max(0, Number(position))),
+      rgb.slice(0, 3).map((channel) => Math.min(255, Math.max(0, Number(channel) || 0))),
+    ])
+    .sort((left, right) => left[0] - right[0])
+  if (source.length < 2) return activeVolumeColorStops()
+
+  const factorNumber = Number(contrast)
+  const factor = Math.min(3, Math.max(0.5, Number.isFinite(factorNumber) ? factorNumber : 2))
+  const sample = (position) => {
+    const x = Math.min(1, Math.max(0, position))
+    for (let index = 0; index < source.length - 1; index += 1) {
+      const [start, startColor] = source[index]
+      const [end, endColor] = source[index + 1]
+      if (x > end && index < source.length - 2) continue
+      const ratio = Math.min(1, Math.max(0, (x - start) / Math.max(1e-6, end - start)))
+      return startColor.map((channel, channelIndex) =>
+        Math.round(channel + (endColor[channelIndex] - channel) * ratio))
+    }
+    return source[source.length - 1][1].map(Math.round)
+  }
+
+  // 原色带的每个折点反算到线性 TL 轴；再补首尾即可精确表达分段线性变换。
+  const positions = [0, 1]
+  for (const [sourcePosition] of source) {
+    const displayPosition = (sourcePosition - 0.5) / factor + 0.5
+    if (displayPosition > 0 && displayPosition < 1) positions.push(displayPosition)
+  }
+  positions.sort((left, right) => left - right)
+  return positions
+    .filter((position, index) => index === 0 || Math.abs(position - positions[index - 1]) > 1e-8)
+    .map((position) => [
+      position,
+      sample(Math.min(1, Math.max(0, (position - 0.5) * factor + 0.5))),
+    ])
+}
+
 /** 将 UI 的 0–1 不透明度原样传给 GPU。 */
 export function opacityControlToAlphaScale(value) {
   const number = Number(value)
@@ -150,12 +204,13 @@ export function clampVolumeRenderingControls(controls = volumeRenderingControls)
   controls.terrainCoastline = controls.terrainCoastline === true
   controls.terrainShadows = controls.terrainShadows === true
   controls.opacity = clamp(controls.opacity, 0, 1, 1)
-  controls.sampling = clamp(controls.sampling, 0.004, 0.03, 0.01)
-  controls.alphaPower = clamp(controls.alphaPower, 0.35, 3, 1.3)
+  controls.density = clamp(controls.density, 0.25, 8, 3)
+  controls.contrast = clamp(controls.contrast, 0.5, 3, 2)
+  controls.edgeSharpness = clamp(controls.edgeSharpness, 0.5, 4, 1)
   // 最近邻为固定行为（接口已移除开关），这里强制保持，避免旧设置残留为插值模式。
   controls.strictNearest = true
-  controls.dbMin = clamp(controls.dbMin, 0, 199, 45)
-  controls.dbMax = clamp(controls.dbMax, controls.dbMin + 1, 200, 128)
+  controls.dbMin = clamp(controls.dbMin, 0, 199, 60)
+  controls.dbMax = clamp(controls.dbMax, controls.dbMin + 1, 200, 120)
   controls.rotationX = clamp(controls.rotationX, 0, 359, 0)
   controls.rotationY = clamp(controls.rotationY, 0, 359, 0)
   controls.rotationZ = clamp(controls.rotationZ, 0, 359, 0)

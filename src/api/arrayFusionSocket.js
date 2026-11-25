@@ -1,4 +1,5 @@
 import { normalizeFusionFrame } from '@/modules/array-fusion/arrayFusionModel.js'
+import { withAccessToken } from '@/api/authHttp.js'
 
 export const ARRAY_FUSION_WS_URL = String(import.meta.env.VITE_ARRAY_FUSION_WS_URL || '').trim()
 
@@ -25,7 +26,7 @@ export function createArrayFusionSocket({
 
     publishStatus('connecting', '连接阵列数据…')
     try {
-      socket = new WebSocket(url)
+      socket = new WebSocket(withAccessToken(url))
     } catch (error) {
       publishStatus('error', `连接失败：${error.message}`)
       scheduleReconnect()

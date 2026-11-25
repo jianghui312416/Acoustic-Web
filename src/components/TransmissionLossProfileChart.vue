@@ -115,6 +115,7 @@ import echarts from '@/plugins/echarts.js'
 import { internalAzimuthToCompassBearing } from '@/sdk'
 import {
   activeVolumeColorStops,
+  contrastedVolumeColorStops,
   volumeRenderingControls,
 } from '@/modules/acoustic/volumeRenderingControls.js'
 import {
@@ -141,9 +142,11 @@ import { fractionalAxisIndex, resolveRayFlow, rayChartViewport } from '@/utils/r
 import { parseAnalyse2DRtrd } from '@/sdk/ncFieldModel.js'
 import {
   SIGNAL_EXCESS_COLOR_STOPS,
+  detectionClassColor,
   resolveSignalExcessDepthRange,
   resolveSignalExcessOffset,
   signalExcessValueForTl,
+  standardNormalCdf,
 } from '@/utils/signalExcess.js'
 
 const props = defineProps({
@@ -640,16 +643,27 @@ function nmTickPlan(valuesMeters, targetTicks) {
 /* ────────────────────────────── 图表渲染 ────────────────────────────── */
 
 /** 垂直切面的 TL 色标类型跟随三维体绘制的色图（bellhop / viridis / jet…）。 */
-const tlColorStops = computed(() => activeVolumeColorStops(volumeRenderingControls.colormap))
+const tlColorStops = computed(() => contrastedVolumeColorStops(
+  activeVolumeColorStops(volumeRenderingControls.colormap),
+  volumeRenderingControls.contrast,
+))
+const seColorStops = computed(() => contrastedVolumeColorStops(
+  SIGNAL_EXCESS_COLOR_STOPS,
+  volumeRenderingControls.contrast,
+))
 
 /** 当前色带：TL 使用与体绘制相同的色图；信号余量模式使用发散 SE/Pd 色标。 */
 function valueColorStopsSource() {
-  return seActive.value ? SIGNAL_EXCESS_COLOR_STOPS : tlColorStops.value
+  return seActive.value ? seColorStops.value : tlColorStops.value
 }
 
 /** 色带 CSS 颜色列表（供 ECharts visualMap 使用）。 */
 function valueColorStops() {
-  return valueColorStopsSource().map(([, rgb]) => `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`)
+  // ECharts 的颜色数组不支持非均匀 stop 位置；均匀密集采样后才能保持与体色标一致。
+  return Array.from({ length: 65 }, (_, index) => {
+    const [r, g, b] = sampleDisplayTlColor(index / 64)
+    return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`
+  })
 }
 
 /** 连续色标采样；直接读取已规范化的常量色标，避免在大网格热循环中反复分配。 */
@@ -677,7 +691,8 @@ function sampleDisplayTlColor(value) {
 function createSmoothTlTexture(profileData) {
   const modeKey = seActive.value ? (sePdMode.value ? 'pd' : 'se') : 'tl'
   const schemeKey = seActive.value ? '' : volumeRenderingControls.colormap
-  const rangeKey = `${modeKey}:${schemeKey}:${props.dbMin}:${props.dbMax}`
+  const threeColor = seActive.value && seParams.value?.threeColor === true
+  const rangeKey = `${modeKey}:${schemeKey}:${volumeRenderingControls.contrast}:${props.dbMin}:${props.dbMax}:${threeColor ? 'three' : 'continuous'}`
   if (smoothTextureCanvas && smoothTextureProfile === profileData && smoothTextureRange === rangeKey) {
     return smoothTextureCanvas
   }
@@ -699,12 +714,19 @@ function createSmoothTlTexture(profileData) {
     const value = Number(point?.[2])
     if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isFinite(value)) continue
     if (x < 0 || x >= width || y < 0 || y >= height) continue
-    const [r, g, b] = sampleDisplayTlColor((value - min) / (max - min))
+    let color = null
+    if (threeColor) {
+      const sigma = Math.max(1e-6, Number(seParams.value?.sigma) || 6)
+      const probability = sePdMode.value ? value : standardNormalCdf(value / sigma) * 100
+      color = detectionClassColor(probability)
+    } else {
+      color = sampleDisplayTlColor((value - min) / (max - min))
+    }
     const offset = (y * width + x) * 4
-    pixels.data[offset] = Math.round(r)
-    pixels.data[offset + 1] = Math.round(g)
-    pixels.data[offset + 2] = Math.round(b)
-    pixels.data[offset + 3] = 255
+    pixels.data[offset] = Math.round(color?.[0] || 0)
+    pixels.data[offset + 1] = Math.round(color?.[1] || 0)
+    pixels.data[offset + 2] = Math.round(color?.[2] || 0)
+    pixels.data[offset + 3] = color ? 255 : 0
   }
   sourceContext.putImageData(pixels, 0, 0)
 
@@ -713,7 +735,7 @@ function createSmoothTlTexture(profileData) {
   target.height = Math.min(1024, Math.max(256, height * 4))
   const targetContext = target.getContext('2d')
   if (!targetContext) return source
-  targetContext.imageSmoothingEnabled = true
+  targetContext.imageSmoothingEnabled = !threeColor
   targetContext.imageSmoothingQuality = 'high'
   targetContext.clearRect(0, 0, target.width, target.height)
   targetContext.drawImage(source, 0, 0, target.width, target.height)
@@ -1279,7 +1301,7 @@ async function renderChart() {
           return ''
         },
       },
-      grid: { left: 62, right: 16, top: 16, bottom: 36 },
+      grid: {show: true,left: 62, right: 16, top: 16, bottom: 36 ,backgroundColor:'#6096cc'},
       // 热力图必须用类目轴；用 interval 抽稀 + formatter 取整，得到 100/500/1000 这类
       // 整齐刻度，位置仍是真实数据位置；声线图使用同一数值范围即可逐点对应。
       xAxis: {
@@ -1397,6 +1419,7 @@ watch(
     props.dbMin,
     props.dbMax,
     volumeRenderingControls.colormap,
+    volumeRenderingControls.contrast,
     props.signalExcess,
     props.receiverMarker,
     props.receiverPlacementEnabled,

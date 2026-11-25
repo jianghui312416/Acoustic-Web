@@ -133,19 +133,16 @@ export function oceanCurrentOverlayActive(state) {
 }
 
 /** 从HYCOM u/v三维响应构造当前所选深度的速度与流向原生网格。 */
-export function oceanCurrentRegional(current, depthSelection = 'all') {
+export function oceanCurrentRegional(current, depthSelection) {
   const data = current?.data
   const depths = current?.depths_m
   if (!current?.grid || !data || !Array.isArray(depths)) return null
-  let u = data.depth_mean_u_mps
-  let v = data.depth_mean_v_mps
-  if (depthSelection !== 'all') {
-    const requested = Number(depthSelection)
-    const index = depths.findIndex(depth => Math.abs(Number(depth) - requested) < 1e-6)
-    if (index < 0) return null
-    u = data.u_mps?.[index]
-    v = data.v_mps?.[index]
-  }
+  const requested = Number(depthSelection)
+  const index = depths.findIndex(depth => Math.abs(Number(depth) - requested) < 1e-6)
+  if (index < 0) return null
+  const selectedDepthM = Number(depths[index])
+  const u = data.u_mps?.[index]
+  const v = data.v_mps?.[index]
   if (!Array.isArray(u) || !Array.isArray(v)) return null
   const speed = u.map((row, rowIndex) => row.map((value, column) => {
     const east = Number(value)
@@ -160,6 +157,7 @@ export function oceanCurrentRegional(current, depthSelection = 'all') {
   }))
   return {
     ...current,
+    selected_depth_m: selectedDepthM,
     data: {
       ...data,
       current_speed_mps: speed,
@@ -420,7 +418,7 @@ function axisCellEdges(axis) {
 }
 
 /** 静态贴纸：每个0.25°原生网格单元使用一个固定值和固定颜色，不做插值。 */
-function drawRegionalFill(ctx, scene, width, height, grid, field, sampler) {
+function drawRegionalFill(ctx, scene, width, height, grid, field, sampler, elevationM = 0) {
   const bounds = grid?.bounds
   if (!bounds) return
   const dataRange = fieldDataRange(sampler.values)
@@ -438,8 +436,8 @@ function drawRegionalFill(ctx, scene, width, height, grid, field, sampler) {
       const value = num(sampler.values[row]?.[column])
       if (!Number.isFinite(value)) continue
       const points = [
-        scene.project(west, north, 0), scene.project(east, north, 0),
-        scene.project(east, south, 0), scene.project(west, south, 0),
+        scene.project(west, north, elevationM), scene.project(east, north, elevationM),
+        scene.project(east, south, elevationM), scene.project(west, south, elevationM),
       ]
       if (!points.every(point => point && Number.isFinite(point.x) && Number.isFinite(point.y))) continue
       if (points.every(point => point.x < 0) || points.every(point => point.x > width) ||
@@ -457,12 +455,12 @@ function drawRegionalFill(ctx, scene, width, height, grid, field, sampler) {
 }
 
 /** 雨：无流场方向，用相位驱动垂直下落短竖线。 */
-function drawRainDrops(ctx, scene, width, height, grid, field, sampler, dataRange, rgba, elapsedMs) {
+function drawRainDrops(ctx, scene, width, height, grid, field, sampler, dataRange, rgba, elapsedMs, elevationM = 0) {
   const bounds = grid.bounds
   const span = Math.max(bounds.east - bounds.west, bounds.north - bounds.south)
   const particles = particlesFor(bounds)
   const time = (elapsedMs || 0) * 0.001
-  const projectAt = (lon, lat) => scene.project(lon, lat, 0)
+  const projectAt = (lon, lat) => scene.project(lon, lat, elevationM)
 
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
@@ -490,7 +488,7 @@ function drawRainDrops(ctx, scene, width, height, grid, field, sampler, dataRang
 }
 
 /** 风 / 海流 / 海况：粒子按流场真实平流；风和海流绘制拖尾，海况绘制浪峰线。 */
-function drawAdvectedFlow(ctx, scene, width, height, grid, field, sampler, dataRange, rgba, elapsedMs) {
+function drawAdvectedFlow(ctx, scene, width, height, grid, field, sampler, dataRange, rgba, elapsedMs, elevationM = 0) {
   const bounds = grid.bounds
   const span = Math.max(bounds.east - bounds.west, bounds.north - bounds.south)
   const isSea = field.key === 'sea'
@@ -506,7 +504,7 @@ function drawAdvectedFlow(ctx, scene, width, height, grid, field, sampler, dataR
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
 
-  const projectAt = (lon, lat) => scene.project(lon, lat, 0)
+  const projectAt = (lon, lat) => scene.project(lon, lat, elevationM)
 
   for (const particle of particles) {
     const intensity = normalizeRange(particle.speed, dataRange)
@@ -589,14 +587,14 @@ function drawAdvectedFlow(ctx, scene, width, height, grid, field, sampler, dataR
 }
 
 /** 动态网格线：雨为下落短竖线，风/海况按流场真实平流。 */
-function drawRegionalFlow(ctx, scene, width, height, grid, field, sampler, elapsedMs) {
+function drawRegionalFlow(ctx, scene, width, height, grid, field, sampler, elapsedMs, elevationM = 0) {
   const dataRange = fieldDataRange(sampler.values)
   if (!dataRange) return
   const rgba = (rgb, alpha) => `rgba(${rgb.join(',')},${alpha.toFixed(3)})`
   if (field.key === 'rain') {
-    drawRainDrops(ctx, scene, width, height, grid, field, sampler, dataRange, rgba, elapsedMs)
+    drawRainDrops(ctx, scene, width, height, grid, field, sampler, dataRange, rgba, elapsedMs, elevationM)
   } else {
-    drawAdvectedFlow(ctx, scene, width, height, grid, field, sampler, dataRange, rgba, elapsedMs)
+    drawAdvectedFlow(ctx, scene, width, height, grid, field, sampler, dataRange, rgba, elapsedMs, elevationM)
   }
 }
 
@@ -624,10 +622,12 @@ export function drawWeatherOverlay(canvas, scene, grid, field, regional, dynamic
   if (!width || !height) return
   const dpr = Math.min(2, globalThis.devicePixelRatio || 1)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  const selectedDepthM = field.key === 'ocean-current' ? Number(regional.selected_depth_m) : 0
+  const elevationM = Number.isFinite(selectedDepthM) ? -Math.abs(selectedDepthM) : 0
 
-  drawRegionalFill(ctx, scene, width, height, grid, field, sampler)
+  drawRegionalFill(ctx, scene, width, height, grid, field, sampler, elevationM)
   if (dynamic && field.key !== 'rain') {
-    drawRegionalFlow(ctx, scene, width, height, grid, field, sampler, elapsedMs)
+    drawRegionalFlow(ctx, scene, width, height, grid, field, sampler, elapsedMs, elevationM)
   }
 }
 

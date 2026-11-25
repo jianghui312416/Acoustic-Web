@@ -1,81 +1,61 @@
+import { http } from './authHttp.js'
 import { apiTimeoutMs } from '../config/runtimeConfig.js'
 
-/**
- * 通用 JSON 传输层。这里只处理网络、超时和 JSON 解码；
- * ResultCode 等业务协议由各领域 API 模块负责。
- */
-export async function postJson(url, payload, options = {}) {
-  const controller = new AbortController()
-  const timeoutMs = options.timeoutMs ?? apiTimeoutMs()
-  let timedOut = false
-  const onExternalAbort = () => controller.abort(options.signal?.reason)
-  if (options.signal?.aborted) onExternalAbort()
-  else options.signal?.addEventListener('abort', onExternalAbort, { once: true })
-  const timer = setTimeout(() => {
-    timedOut = true
-    controller.abort()
-  }, timeoutMs)
-
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...options.headers },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    })
-
-    let data = null
-    try {
-      data = await response.json()
-    } catch {
-      // 网关异常可能返回空内容或非 JSON，交给领域 API 结合 HTTP 状态处理。
-    }
-
-    return { response, data }
-  } catch (error) {
-    if (error?.name === 'AbortError' && timedOut) {
-      throw new Error(`接口请求超时（${timeoutMs} ms）`, { cause: error })
-    }
-    throw error
-  } finally {
-    clearTimeout(timer)
-    options.signal?.removeEventListener('abort', onExternalAbort)
+function compatResponse(response) {
+  return {
+    ok: response.status >= 200 && response.status < 300,
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
   }
 }
 
-/** GET JSON，超时和错误处理规则与 postJson 保持一致。 */
-export async function getJson(url, options = {}) {
-  const controller = new AbortController()
-  const timeoutMs = options.timeoutMs ?? apiTimeoutMs()
-  let timedOut = false
-  const onExternalAbort = () => controller.abort(options.signal?.reason)
-  if (options.signal?.aborted) onExternalAbort()
-  else options.signal?.addEventListener('abort', onExternalAbort, { once: true })
-  const timer = setTimeout(() => {
-    timedOut = true
-    controller.abort()
-  }, timeoutMs)
+function isTimeout(error) {
+  return error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT' ||
+    /timeout/i.test(String(error?.message || ''))
+}
 
+async function request(config, timeoutMs) {
   try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: { Accept: 'application/json', ...options.headers },
-      signal: controller.signal,
-    })
-    let data = null
-    try {
-      data = await response.json()
-    } catch {
-      // 交给调用方结合 HTTP 状态生成领域错误。
-    }
-    return { response, data }
+    const response = await http.request({ timeout: timeoutMs ?? apiTimeoutMs(), ...config })
+    return { response: compatResponse(response), data: response.data ?? null }
   } catch (error) {
-    if (error?.name === 'AbortError' && timedOut) {
-      throw new Error(`接口请求超时（${timeoutMs} ms）`, { cause: error })
+    if (error?.response) {
+      return { response: compatResponse(error.response), data: error.response.data ?? null }
+    }
+    if (isTimeout(error)) {
+      throw new Error(`接口请求超时（${timeoutMs ?? apiTimeoutMs()} ms）`, { cause: error })
     }
     throw error
-  } finally {
-    clearTimeout(timer)
-    options.signal?.removeEventListener('abort', onExternalAbort)
   }
+}
+
+/**
+ * 通用 JSON 传输层。返回兼容 fetch 的 { response, data }；
+ * 认证头、超时和登录失效跳转统一由 Axios 实例处理。
+ */
+export function postJson(url, payload, options = {}) {
+  return request(
+    {
+      method: 'POST',
+      url,
+      data: payload,
+      headers: { 'Content-Type': 'application/json', ...options.headers },
+      signal: options.signal,
+    },
+    options.timeoutMs
+  )
+}
+
+/** GET JSON，超时和错误处理规则与 postJson 保持一致。 */
+export function getJson(url, options = {}) {
+  return request(
+    {
+      method: 'GET',
+      url,
+      headers: { Accept: 'application/json', ...options.headers },
+      signal: options.signal,
+    },
+    options.timeoutMs
+  )
 }

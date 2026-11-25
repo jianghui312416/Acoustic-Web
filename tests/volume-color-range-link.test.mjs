@@ -23,7 +23,8 @@ test('terrain volume redraws whenever shared visual controls change', () => {
 test('vertical profile shares and reacts to the volume color range', () => {
   assert.match(acousticView, /:db-min="profileDbRange\.min"\s+:db-max="profileDbRange\.max"/)
   assert.match(acousticView, /return \{ min: Number\(volumeRenderingControls\.dbMin\), max: Number\(volumeRenderingControls\.dbMax\) \}/)
-  assert.match(profileChart, /const rangeKey = `\$\{modeKey\}:\$\{schemeKey\}:\$\{props\.dbMin\}:\$\{props\.dbMax\}`/)
+  assert.match(profileChart, /const rangeKey = `\$\{modeKey\}:\$\{schemeKey\}:\$\{volumeRenderingControls\.contrast\}:\$\{props\.dbMin\}:\$\{props\.dbMax\}:\$\{threeColor \? 'three' : 'continuous'\}`/)
   assert.match(profileChart, /props\.dbMin,[\s\S]*props\.dbMax,[\s\S]*\(\) => renderChart\(\)/)
+  assert.match(profileChart, /props\.dbMax,[\s\S]*volumeRenderingControls\.colormap,[\s\S]*volumeRenderingControls\.contrast/)
   assert.match(profileChart, /sampleDisplayTlColor\(\(value - min\) \/ \(max - min\)\)/)
 })

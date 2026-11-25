@@ -20,6 +20,8 @@ const workspaceJobCache = new Map()
 async function isWorkspaceJob(job) {
   const id = String(job?.job_id || '')
   if (!id) return false
+  // 后端 /jobs 已在汇总里给出工作区归属判定：刷新时无需逐个请求 params.json。
+  if (typeof job?.workspace_eligible === 'boolean') return job.workspace_eligible
   const updatedAt = Number(job?.updated_at_ms) || 0
   const cached = workspaceJobCache.get(id)
   if (cached && cached.updatedAt === updatedAt) return cached.eligible

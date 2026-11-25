@@ -180,13 +180,14 @@ uniform vec4 uWedge;
 uniform vec4 uPath;
 uniform vec2 uValue;
 uniform vec2 uDb;
-uniform vec2 uAlpha;
+// x = 基础透明度，y = 体密度倍率，z = TL 色彩对比度倍率，w = 边缘锐度倍率。
+uniform vec4 uAlpha;
 uniform vec3 uClipInfo;
 uniform float uFeatherM;
 // 信号余量派生模式：x=启用, y=常数偏移(SL-NL-DT+AG), z=目标最小深度, w=最大深度
 uniform vec4 uExcess;
-// x=Pd 模式(0/1), y=σ
-uniform vec2 uExcessMode;
+// x=Pd 模式(0/1), y=σ, z=三色探测分级(0/1)
+uniform vec3 uExcessMode;
 uniform int uHasBottomDepth;
 uniform int uStrictNearest;
 uniform int uDebugNoTerrain;
@@ -296,6 +297,9 @@ void main() {
   float nearOrder = 0.0;
   bool hasNearDepth = false;
   float opacity = clamp(uAlpha.x, 0.0, 1.0);
+  float density = clamp(uAlpha.y, 0.25, 8.0);
+  float contrast = clamp(uAlpha.z, 0.5, 3.0);
+  float edgeSharpness = clamp(uAlpha.w, 0.5, 4.0);
   if (opacity <= 0.003) discard;
   // Optical density per full ray length; keeps opacity stable across zoom/angle.
   const float STEP_DENSITY = 2.4;
@@ -483,16 +487,20 @@ void main() {
       coverage *= smoothstep(0.0, bandFeather, depthM - uExcess.z);
       coverage *= smoothstep(0.0, bandFeather, uExcess.w - depthM);
     }
+    // 仅改变边界覆盖度，不参与 TL 数值及色带映射。
+    coverage = pow(clamp(coverage, 0.0, 1.0), edgeSharpness);
     if (coverage <= 0.001) continue;
     float tl = mix(uValue.x, uValue.y, voxel.r);
     // Signal excess is a per-voxel transform of TL: SE = offset - TL, optionally
     // mapped to detection probability Pd = Φ(SE/σ). Derived in-shader so the
     // existing GPU TL texture can be reused without a second 3D texture.
     float value = tl;
+    float detectionProbability = -1.0;
     if (uExcess.x > 0.5) {
       float se = uExcess.y - tl;
+      detectionProbability = normalCdf(se / max(1e-6, uExcessMode.y)) * 100.0;
       if (uExcessMode.x > 0.5) {
-        value = normalCdf(se / max(1e-6, uExcessMode.y)) * 100.0;
+        value = detectionProbability;
       } else {
         value = se;
       }
@@ -501,7 +509,16 @@ void main() {
     // selected upper bound remain visible and use the last LUT color.
     float displayRatio = clamp((value - uDb.x) / max(1.0, uDb.y - uDb.x), 0.0, 1.0);
     if (uStrictNearest == 0) displayRatio = pow(displayRatio, 0.82);
-    vec3 color = texture(uColorLut, vec2(displayRatio, 0.5)).rgb;
+    displayRatio = clamp((displayRatio - 0.5) * contrast + 0.5, 0.0, 1.0);
+    vec3 color;
+    if (uExcessMode.z > 0.5) {
+      if (detectionProbability < 25.0) continue;
+      color = detectionProbability < 50.0
+        ? vec3(0.0)
+        : detectionProbability <= 75.0 ? vec3(1.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    } else {
+      color = texture(uColorLut, vec2(displayRatio, 0.5)).rgb;
+    }
 
     // Remember the first contributing sample's projected depth so the terrain
     // depth buffer can still let foreground ridges occlude the acoustic body.
@@ -515,7 +532,7 @@ void main() {
 
     // Alpha is normalised by the marched span, so the total optical depth stays
     // constant regardless of zoom or camera angle.
-    float stepAlpha = clamp(opacity * coverage * STEP_DENSITY * ds / span, 0.0, 1.0);
+    float stepAlpha = clamp(opacity * density * coverage * STEP_DENSITY * ds / span, 0.0, 1.0);
     accumColor += (1.0 - accumAlpha) * color * stepAlpha;
     accumAlpha += (1.0 - accumAlpha) * stepAlpha;
     if (accumAlpha >= 0.985) break;
@@ -1068,10 +1085,13 @@ export class TerrainWebGLRenderer {
     gl.uniform2f(u.uValue, Number(volume.valueMin) || 0, Number(volume.valueMax) || 1)
     gl.uniform2f(
       u.uDb,
-      Number.isFinite(Number(controls?.dbMin)) ? Number(controls.dbMin) : 45,
-      Number.isFinite(Number(controls?.dbMax)) ? Number(controls.dbMax) : 128,
+      Number.isFinite(Number(controls?.dbMin)) ? Number(controls.dbMin) : 60,
+      Number.isFinite(Number(controls?.dbMax)) ? Number(controls.dbMax) : 120,
     )
-    gl.uniform2f(u.uAlpha, opacity, 1)
+    const density = clamp(Number(controls?.density) || 3, 0.25, 8)
+    const contrast = clamp(Number(controls?.contrast) || 2, 0.5, 3)
+    const edgeSharpness = clamp(Number(controls?.edgeSharpness) || 1, 0.5, 4)
+    gl.uniform4f(u.uAlpha, opacity, density, contrast, edgeSharpness)
     const internalAzimuth = Number(controls?.clipAzimuthDeg)
     const compassAzimuth = Number.isFinite(internalAzimuth)
       ? ((90 - internalAzimuth) % 360 + 360) % 360
@@ -1091,14 +1111,15 @@ export class TerrainWebGLRenderer {
         Number.isFinite(Number(excess.offset)) ? Number(excess.offset) : 0,
         low, Math.max(low, high),
       )
-      gl.uniform2f(
+      gl.uniform3f(
         u.uExcessMode,
         excess.pd === true ? 1 : 0,
         Math.max(1e-6, Number(excess.sigma) || 6),
+        excess.threeColor === true ? 1 : 0,
       )
     } else {
       gl.uniform4f(u.uExcess, 0, 0, 0, 0)
-      gl.uniform2f(u.uExcessMode, 0, 6)
+      gl.uniform3f(u.uExcessMode, 0, 6, 0)
     }
     gl.uniform1i(u.uHasBottomDepth, volume.hasBottomDepth ? 1 : 0)
     const debug = globalThis.__acousticVolumeDebug ?? {}
