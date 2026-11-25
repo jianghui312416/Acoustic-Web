@@ -1397,7 +1397,11 @@ import {
 // 二维声场：栅格化为影像图层贴在 Cesium 球面（不再是小窗口图表）
 import { buildOmniField } from '@/utils/omniFieldModel.js'
 import { buildOmniFieldImage } from '@/utils/omniFieldImage.js'
-import { canSampleTerrain, maskVolumeByTerrain } from '@/sdk/terrainVolumeMask.js'
+import {
+  canSampleTerrain,
+  maskVolumeByTerrain,
+  sampleTerrainProfile,
+} from '@/sdk/terrainVolumeMask.js'
 import { acousticTerrainBounds } from '@/utils/bathymetry.js'
 import { loadAcousticJob, loadAcousticJobParams } from '@/api/jobWorkspaceApi.js'
 import { jobWorkspace, markJobClosed, markJobOpened } from '@/modules/acoustic/jobWorkspace.js'
@@ -1489,7 +1493,6 @@ const terrainSource = ref({ lon: 116, lat: 16, depth: 150 })
 const DEFAULT_TERRAIN_SPAN_KM = 100
 /** 到达结构保持 50 m 精度；三维声场体每 500 m 更新一次，避免重复重算。 */
 const SIGNAL_ARRIVAL_WAYPOINT_SPACING_M = 50
-const SIGNAL_FIELD_WAYPOINT_SPACING_M = 500
 /** 后端有四个独立声场进程；航迹点按四个一组提交，避免结果无限堆积在浏览器内存。 */
 const TRACK_FIELD_CONCURRENCY = 4
 const terrainRadiusKm = ref(DEFAULT_TERRAIN_SPAN_KM / 6)
@@ -2112,6 +2115,7 @@ async function ensureHistoryLayerDynamicRays(layer) {
       azimuth: portalBearing,
       rtimeRes: 0,
     })
+    await attachRayTerrainProfile(payload, params, portalBearing, Number(params.range))
     const ice = params.regionType === 'ice'
     const rayData = ice
       ? await analyseIce2dDynamicRTRD(payload)
@@ -2531,6 +2535,8 @@ async function runTrackPointFields() {
           if (runHistoryLayers.value.length <= layerCount) {
             throw new Error(`航迹点 ${index + 1} 声场归档失败`)
           }
+          const archivedLayer = runHistoryLayers.value.at(-1)
+          if (archivedLayer) archivedLayer.trackPointIndex = index
           completedCount += 1
           trackFieldRunState.completedCount = completedCount
 
@@ -3769,6 +3775,26 @@ function commonPortalParams(extra = {}) {
   return portalParamsFor(calcParams.value, extra)
 }
 
+/** 按切面箭头方位重新采样当前数字地球地形，并附到二维声线请求。 */
+async function attachRayTerrainProfile(payload, sourceParams, bearingDeg, rangeNm) {
+  try {
+    const terrainProfile = await sampleTerrainProfile(viewer?.scene?.terrainProvider, {
+      sourceLon: Number(sourceParams?.coordX),
+      sourceLat: Number(sourceParams?.coordY),
+      bearingDeg: Number(bearingDeg),
+      rangeM: Number(rangeNm) * 1852,
+      spacingM: 500,
+      minSamples: 32,
+      maxSamples: 512,
+    })
+    if (terrainProfile) payload.terrainProfile = terrainProfile
+  } catch (error) {
+    // 地形瓦片暂不可用时保留后端原有环境地形兜底，不阻断二维声线计算。
+    console.warn('[二维声线地形采样]', error?.message ?? error)
+  }
+  return payload
+}
+
 const soundResultCache = {
   '2d': null,
   '3d': null,
@@ -4583,14 +4609,6 @@ watch(() => trackFieldRunState.requestToken, () => {
   void runTrackPointFields()
 })
 
-function vesselSimulationIntent() {
-  if (skipVesselSimulationOnce) {
-    skipVesselSimulationOnce = false
-    return false
-  }
-  return Boolean(configuredSignalRoutePoints.value.length)
-}
-
 async function runSignalTransmission() {
   skipVesselSimulationOnce = false
   normalizeSignalTransmissionControls(signalTransmissionControls)
@@ -4608,6 +4626,15 @@ async function runSignalTransmission() {
   }
   const receiver = receiverArrayMarker.value
   const routePoints = configuredSignalRoutePoints.value
+  if (!selectedAisVessel.value) {
+    const missingFields = routePoints
+      .map((point, index) => reusableTrackFieldLayer(point, index) ? -1 : index + 1)
+      .filter(index => index > 0)
+    if (missingFields.length) {
+      errorText.value = `航迹点 ${missingFields.join('、')} 尚无可复用声场，请先完成“航线声场计算”。`
+      return false
+    }
+  }
   const sourceLon = Number(routePoints[0]?.lon)
   const sourceLat = Number(routePoints[0]?.lat)
   const receiverLon = Number(receiver.lon)
@@ -4625,15 +4652,6 @@ async function runSignalTransmission() {
       : '请填写有效的手动船舶航速。'
     return false
   }
-  const minuteStations = resampleTrackByDistance(
-    routePoints,
-    distancePerMinuteM(speedKn),
-  )
-  const sourceRoute = minuteStations.map((point) => ({
-    lon: Number(point.lon),
-    lat: Number(point.lat),
-    depth_m: sourceDepth,
-  }))
   const receiverDepth = Math.max(0.01, Number(signalTransmissionControls.receiverDepthM) || Number(receiver.depthM) || 30)
   const waterDepth = Math.max(1000, sourceDepth + 100, receiverDepth + 100)
   const depression = Math.min(90, Math.abs(Number(calcParams.value.grazingAngleMin) || 45))
@@ -5013,19 +5031,21 @@ function applyVesselFieldRecord(record) {
 
 async function activateVesselRouteSample(index) {
   if (!vesselPlaybackOpen.value || index < 0 || index >= vesselRouteSamples.value.length) return
+  const stationLabel = signalPlaybackMode.value ? 'Waypoint' : '分钟站位'
   vesselPlaybackSampleIndex.value = index
   vesselPlaybackBusy.value = !vesselFieldCache.has(index)
   vesselPlaybackError.value = ''
   vesselPlaybackStatus.value = vesselPlaybackBusy.value
-    ? `计算第 ${index + 1}/${vesselRouteSamples.value.length} 个分钟站位`
-    : `第 ${index + 1}/${vesselRouteSamples.value.length} 个分钟站位`
+    ? `计算 ${stationLabel} ${index + 1}/${vesselRouteSamples.value.length}`
+    : `${stationLabel} ${index + 1}/${vesselRouteSamples.value.length}`
   try {
     const record = await requestVesselFieldSample(index)
     if (!record || !vesselPlaybackOpen.value || vesselPlaybackSampleIndex.value !== index) return
     applyVesselFieldRecord(record)
     if (routePlaybackKind.value === 'signal') {
       const tlText = Number.isFinite(record.receiverTl) ? `接收点 TL ${record.receiverTl.toFixed(1)} dB` : '3D 声场就绪'
-      vesselPlaybackStatus.value = `站位 ${index + 1}/${vesselRouteSamples.value.length} · ${record.model.toUpperCase()} 声场 · ${tlText}`
+      const fieldSource = record.reusedTrackField ? '复用航迹点声场' : `${record.model.toUpperCase()} 声场`
+      vesselPlaybackStatus.value = `Waypoint ${index + 1}/${vesselRouteSamples.value.length} · ${fieldSource} · ${tlText}`
     } else {
       vesselPlaybackStatus.value = `站位 ${index + 1}/${vesselRouteSamples.value.length} · ${record.frequencyHz.toFixed(0)} Hz 代表频率`
     }
@@ -5130,14 +5150,91 @@ async function startVesselNoiseSimulation() {
   if (vesselPlaybackOpen.value && !vesselPlaybackError.value) setVesselPlaybackPlaying(true)
 }
 
+/** 保留用户选择的航迹点，只补充播放时按路程定位所需的累计距离。 */
+function routeWaypointSamples(points) {
+  let distanceM = 0
+  return (Array.isArray(points) ? points : []).map((point, index, source) => {
+    if (index > 0) distanceM += greatCircleDistanceM(source[index - 1], point)
+    return {
+      ...point,
+      lon: Number(point?.lon),
+      lat: Number(point?.lat),
+      distanceM,
+    }
+  })
+}
+
+/** 查找航线声场计算归档；优先使用明确的航迹点编号，坐标匹配兼容旧结果。 */
+function reusableTrackFieldLayer(point, index) {
+  const lon = Number(point?.lon)
+  const lat = Number(point?.lat)
+  const currentSource = sourcePoint.value || terrainSource.value
+  const currentMatches = terrainField.value && currentVolumeTexture
+    && Math.abs(Number(currentSource?.lon) - lon) < 1e-5
+    && Math.abs(Number(currentSource?.lat) - lat) < 1e-5
+  if (currentMatches) {
+    return {
+      field: terrainField.value,
+      texture: currentVolumeTexture,
+      source: currentSource,
+      radiusKm: Number(sourceRadiusKm.value) || Number(terrainRadiusKm.value),
+      params: calcParams.value,
+      trackPointIndex: index,
+    }
+  }
+  const layers = [...runHistoryLayers.value].reverse()
+  const coordinateMatches = layer => {
+    if (!layer?.field || !layer?.texture) return false
+    return Math.abs(Number(layer.source?.lon) - lon) < 1e-5
+      && Math.abs(Number(layer.source?.lat) - lat) < 1e-5
+  }
+  return layers.find(layer => Number(layer.trackPointIndex) === index && coordinateMatches(layer))
+    || layers.find(coordinateMatches)
+    || null
+}
+
+/** 将天气与环境噪声阶段已完成的三维声场放入播放缓存，避免完整链路重复计算。 */
+function primeSignalWaypointFieldCache(samples, receiver) {
+  let reused = 0
+  const losses = Array(samples.length).fill(null)
+  const distances = samples.map(sample => greatCircleDistanceM(sample, receiver))
+  samples.forEach((sample, index) => {
+    const layer = reusableTrackFieldLayer(sample, index)
+    if (!layer) return
+    const distanceM = distances[index]
+    const bearingDeg = initialBearingDeg(sample, receiver)
+    const params = layer.params || {}
+    const record = {
+      index,
+      sample,
+      parsed: layer.field,
+      texture: layer.texture,
+      receiverTl: sampleReceiverTlDb(layer.field, {
+        bearingDeg,
+        distanceM,
+        depthM: receiver.depthM,
+      }),
+      distanceM,
+      bearingDeg,
+      rangeNm: Math.max(0.1, Number(layer.radiusKm) / 1.852 || Number(params.range) || 1),
+      frequencyHz: (Number(params.minFreq) + Number(params.maxFreq)) / 2 || 100,
+      model: String(params.model || 'bellhop').toLowerCase(),
+      reusedTrackField: true,
+    }
+    vesselFieldCache.set(index, record)
+    losses[index] = record.receiverTl
+    reused += 1
+  })
+  vesselReceiverTlDb.value = losses
+  vesselReceiverDistancesM.value = distances
+  return reused
+}
+
 async function startSignalRouteFieldPlayback(result) {
   if (!configuredSignalRouteReady.value || !hydrophoneReceiverReady.value) return
   const speedKn = configuredSignalSpeedKn.value
   if (!(speedKn > 0)) return
-  const samples = resampleTrackByDistance(
-    configuredSignalRoutePoints.value,
-    SIGNAL_FIELD_WAYPOINT_SPACING_M,
-  )
+  const samples = routeWaypointSamples(configuredSignalRoutePoints.value)
   if (!samples.length) {
     vesselPlaybackError.value = '无法从当前航迹生成声场站位。'
     return
@@ -5157,8 +5254,7 @@ async function startSignalRouteFieldPlayback(result) {
   vesselPlaybackVessel.value = resolveVesselSimulationProfile(selectedAisVessel.value, speedKn)
   vesselPlaybackModel.value = selectedModel
   vesselPlaybackSpectrum.value = signalProfile
-  vesselReceiverTlDb.value = Array(samples.length).fill(null)
-  vesselReceiverDistancesM.value = samples.map(sample => greatCircleDistanceM(sample, receiverArrayMarker.value))
+  const reusedFieldCount = primeSignalWaypointFieldCache(samples, receiverArrayMarker.value)
   vesselTimeFrequencyWindowS.value = Math.max(1, Number(signalTransmissionControls.simulationDurationS) || 30)
   vesselPlaybackPreRollS.value = 0
   const routeDuration = routeDurationSeconds(samples, speedKn)
@@ -5177,7 +5273,9 @@ async function startSignalRouteFieldPlayback(result) {
   vesselPlaybackPlaying.value = false
   vesselPlaybackBusy.value = true
   vesselPlaybackError.value = ''
-  vesselPlaybackStatus.value = `连续仿真已启动 · 正在准备Waypoint 1/${samples.length}`
+  vesselPlaybackStatus.value = reusedFieldCount
+    ? `已复用 ${reusedFieldCount}/${samples.length} 个航迹点声场 · 正在准备 Waypoint 1`
+    : `连续仿真已启动 · 正在准备 Waypoint 1/${samples.length}`
   removeTerrainWindowFromDock('waveform')
   removeTerrainWindowFromDock('spectrogram')
   // 完整传输链路默认沿用体绘制的 custom 色标。
@@ -5193,7 +5291,7 @@ async function startSignalRouteFieldPlayback(result) {
   if (!vesselPlaybackError.value) {
     signalTransmissionSession.error = ''
     signalTransmissionSession.message = samples.length > 1
-      ? `连续传输中；到达结构每50米计算，${selectedModel.toUpperCase()} 声场体每500米更新`
+      ? `连续传输中；到达结构每50米计算，声场体按 ${samples.length} 个航迹点移动`
       : `固定发射位置实时传输中；${selectedModel.toUpperCase()} 声场与 Bellhop 到达结构持续更新`
   }
 }
@@ -6657,7 +6755,6 @@ function archiveCurrent3dRun() {
 
 function submitCalculation() {
   activeMapPick.value = ''
-  if (vesselSimulationIntent()) return startVesselNoiseSimulation()
   if (analysisMode.value === '3d') archiveCurrent3dRun()
   if (props.viewMode === 'terrain' && analysisMode.value === '3d') {
     terrainRunVisible.value = true
@@ -6833,7 +6930,12 @@ async function load2dData() {
     })
     const ice = calcParams.value.regionType === 'ice'
     const tlJson = await analyse2dTLRDByModel(payload, calcParams.value.model, ice)
-    const rayJson = isRayModel.value ? await request2dRay(payload, ice) : null
+    let rayJson = null
+    if (isRayModel.value) {
+      const rayPayload = { ...payload }
+      await attachRayTerrainProfile(rayPayload, calcParams.value, azimuth, fieldRangeNm)
+      rayJson = await request2dRay(rayPayload, ice)
+    }
 
     raySourceData.value = adapt2dTlResponse(tlJson, azimuth)
     staticRayData.value = rayJson
@@ -7180,7 +7282,15 @@ async function ensureRayDataForAzimuth(azimuthDeg) {
     lineCount: Number(calcParams.value.lineCount),
     rtimeRes: 0,
   })
-  const pendingRequest = request2dRay(payload, calcParams.value.regionType === 'ice')
+  const pendingRequest = (async () => {
+    await attachRayTerrainProfile(
+      payload,
+      calcParams.value,
+      portalBearing,
+      Number(calcParams.value.range)
+    )
+    return request2dRay(payload, calcParams.value.regionType === 'ice')
+  })()
   rayRequestByKey.set(key, pendingRequest)
   let result
   try {

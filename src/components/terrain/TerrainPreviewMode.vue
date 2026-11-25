@@ -714,7 +714,7 @@ function drawTrack() {
       ctx.fillText(label, x, y)
     }
   }
-  projected.forEach(({ source }, index) => {
+  projected.forEach(({ source, index }) => {
     ctx.beginPath()
     ctx.arc(source.x, source.y, 5.5, 0, Math.PI * 2)
     ctx.fillStyle = index === 0 ? '#7ef7ff' : '#38d6ff'
@@ -722,6 +722,28 @@ function drawTrack() {
     ctx.lineWidth = 1.6
     ctx.strokeStyle = '#ffffff'
     ctx.stroke()
+
+    const label = `Waypoint ${index + 1}`
+    ctx.font = "600 11px 'Microsoft YaHei', sans-serif"
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    const labelWidth = ctx.measureText(label).width + 12
+    const labelHeight = 19
+    const labelX = Math.max(
+      labelWidth / 2 + 4,
+      Math.min(width - labelWidth / 2 - 4, source.x),
+    )
+    const preferredY = source.y - 18
+    const labelY = preferredY - labelHeight / 2 < 4
+      ? source.y + 18
+      : preferredY
+    ctx.fillStyle = 'rgba(5, 24, 38, 0.88)'
+    ctx.fillRect(labelX - labelWidth / 2, labelY - labelHeight / 2, labelWidth, labelHeight)
+    ctx.strokeStyle = index === 0 ? 'rgba(126, 247, 255, 0.92)' : 'rgba(56, 214, 255, 0.82)'
+    ctx.lineWidth = 1
+    ctx.strokeRect(labelX - labelWidth / 2, labelY - labelHeight / 2, labelWidth, labelHeight)
+    ctx.fillStyle = '#f2fdff'
+    ctx.fillText(label, labelX, labelY)
   })
   ctx.restore()
 }

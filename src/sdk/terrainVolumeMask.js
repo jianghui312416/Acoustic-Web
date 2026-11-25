@@ -59,6 +59,50 @@ async function sampleInChunks(provider, positions, chunkSize) {
 }
 
 /**
+ * 沿二维切面方位重新采样数字地球地形，生成门户二维声线接口所需剖面。
+ * @param {object} terrainProvider GeoVis scene.terrainProvider
+ * @param {{sourceLon:number,sourceLat:number,bearingDeg:number,rangeM:number,spacingM?:number,minSamples?:number,maxSamples?:number,chunkSize?:number}} options
+ * @returns {Promise<{distanceM:number[],elevationM:number[],source:string}|null>}
+ */
+export async function sampleTerrainProfile(terrainProvider, options = {}) {
+  if (!canSampleTerrain(terrainProvider)) return null
+  const sourceLon = Number(options.sourceLon)
+  const sourceLat = Number(options.sourceLat)
+  const bearingDeg = Number(options.bearingDeg)
+  const rangeM = Number(options.rangeM)
+  if (![sourceLon, sourceLat, bearingDeg, rangeM].every(Number.isFinite) || rangeM <= 0) {
+    return null
+  }
+
+  const spacingM = Math.max(50, Number(options.spacingM) || 500)
+  const minSamples = Math.max(2, Math.floor(Number(options.minSamples) || 32))
+  const maxSamples = Math.max(minSamples, Math.floor(Number(options.maxSamples) || 512))
+  const sampleCount = Math.min(maxSamples, Math.max(minSamples, Math.ceil(rangeM / spacingM) + 1))
+  const distanceM = Array.from(
+    { length: sampleCount },
+    (_, index) => (rangeM * index) / Math.max(1, sampleCount - 1)
+  )
+  const positions = distanceM.map((distance) => {
+    const point = destinationLonLat(sourceLon, sourceLat, bearingDeg, distance)
+    return Cesium.Cartographic.fromDegrees(point.lon, point.lat)
+  })
+  const sampled = await sampleInChunks(
+    terrainProvider,
+    positions,
+    Math.max(32, Number(options.chunkSize) || 512)
+  )
+  const elevationM = sampled.map((point) => Number(point?.height))
+  if (elevationM.length !== distanceM.length || elevationM.some(value => !Number.isFinite(value))) {
+    return null
+  }
+  return {
+    distanceM: distanceM.map(value => Number(value.toFixed(3))),
+    elevationM: elevationM.map(value => Number(value.toFixed(3))),
+    source: 'GeoVis.sampleTerrainMostDetailed',
+  }
+}
+
+/**
  * @param {object} texture decodeTlrdPolarVolume 返回的可变纹理对象
  * @param {object} terrainProvider GeoVis scene.terrainProvider
  * @param {object} [options]

@@ -64,15 +64,24 @@ test('vessel run opens a synchronized hydrophone waveform with environmental pre
   assert.match(source, /if \(id === 'waveform'\) return '水听器时域波形'/)
 })
 
-test('signal arrivals stay at 50 m while the displayed sound field moves every 500 m', async () => {
+test('signal arrivals stay at 50 m while the displayed sound field moves by selected waypoints', async () => {
   assert.match(source, /const SIGNAL_ARRIVAL_WAYPOINT_SPACING_M = 50/)
-  assert.match(source, /const SIGNAL_FIELD_WAYPOINT_SPACING_M = 500/)
   assert.match(source, /waypoint_spacing_m: SIGNAL_ARRIVAL_WAYPOINT_SPACING_M/)
-  assert.match(source, /resampleTrackByDistance\([\s\S]*?configuredSignalRoutePoints\.value,[\s\S]*?SIGNAL_FIELD_WAYPOINT_SPACING_M/)
+  assert.match(source, /const samples = routeWaypointSamples\(configuredSignalRoutePoints\.value\)/)
+  assert.match(source, /primeSignalWaypointFieldCache\(samples, receiverArrayMarker\.value\)/)
+  assert.match(source, /reusableTrackFieldLayer\(sample, index\)/)
+  assert.match(source, /尚无可复用声场，请先完成“航线声场计算”/)
+  assert.doesNotMatch(source, /SIGNAL_FIELD_WAYPOINT_SPACING_M/)
   assert.match(source, /function setVesselPlaybackTime\([\s\S]*?routeSampleIndexAtTime[\s\S]*?activateVesselRouteSample\(index\)/)
   assert.match(source, /function applyVesselFieldRecord\([\s\S]*?sourcePoint\.value = \{[\s\S]*?record\.sample\.lon[\s\S]*?terrainSource\.value = \{[\s\S]*?record\.sample\.lon[\s\S]*?syncSoundField\(\)/)
   assert.match(source, /nextIndex < vesselRouteSamples\.value\.length[\s\S]*?requestVesselFieldSample\(nextIndex\)/)
   assert.doesNotMatch(source, /vesselRouteSamples\.value = result\.waypoints\.map/)
+})
+
+test('ordinary field recalculation is independent from receiver placement and route playback', () => {
+  const submit = source.match(/function submitCalculation\(\) \{[\s\S]*?\n\}/)?.[0] ?? ''
+  assert.doesNotMatch(submit, /hydrophoneReceiverReady|startVesselNoiseSimulation|vesselSimulationIntent/)
+  assert.match(submit, /analysisMode\.value === '3d' \? loadData\(\) : load2dData\(\)/)
 })
 
 test('signal playback invalidates old-depth rays and requests one dynamic 2d slice', async () => {
