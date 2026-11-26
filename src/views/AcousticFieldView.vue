@@ -1411,9 +1411,14 @@ import {
   jobWorkspace,
   markJobClosed,
   markJobOpened,
+  refreshJobWorkspace,
   saveWorkspaceDraft,
   workspaceRecordById,
 } from '@/modules/acoustic/jobWorkspace.js'
+import {
+  readSessionRestore,
+  writeSessionRestore,
+} from '@/modules/acoustic/sessionRestore.js'
 import { createDefaultNoiseScenario, validateNoiseScenario } from '@/utils/noiseTimeFrequency.js'
 import { useDraggablePanel } from '@/composables/useDraggablePanel.js'
 import {
@@ -1987,6 +1992,74 @@ watch(() => signalTransmissionSession.state, (state) => {
     label: '信号链工作区',
   })
 }, { flush: 'post' })
+
+// ---- 锁屏 / 休眠唤醒后的工作现场恢复 ----
+// 浏览器在锁屏时可能丢失 WebGL 上下文并重载整页，内存里的视图模式与已打开
+// 工作区会随之清空。这里把现场写入 sessionStorage，重载后自动还原。
+let sessionPersistTimer = 0
+let sessionPersistDisabled = false
+
+function persistSessionRestore() {
+  const openedJobIds = jobWorkspace.openedIds
+  writeSessionRestore({
+    viewMode: props.viewMode,
+    // 没有任何已打开声场时不自动重开工作区，尊重用户主动关闭后的状态。
+    activeWorkspaceId: openedJobIds.length ? jobWorkspace.activeWorkspaceId : '',
+    openedJobIds,
+  })
+}
+
+function scheduleSessionRestorePersist() {
+  if (sessionPersistDisabled || sessionPersistTimer) return
+  sessionPersistTimer = window.setTimeout(() => {
+    sessionPersistTimer = 0
+    persistSessionRestore()
+  }, 300)
+}
+
+function flushSessionOnVisibility() {
+  // 锁屏时页面转为 hidden，随后可能被冻结或重载；此处同步落盘。
+  if (document.visibilityState === 'hidden') persistSessionRestore()
+}
+
+watch(
+  () => [props.viewMode, jobWorkspace.activeWorkspaceId, jobWorkspace.openedIds],
+  scheduleSessionRestorePersist,
+)
+document.addEventListener('visibilitychange', flushSessionOnVisibility)
+window.addEventListener('pagehide', persistSessionRestore)
+
+/** 重载后按上次的视图模式与打开状态重建工作区（含历史声场与结果）。 */
+async function restoreLastSession() {
+  const session = readSessionRestore()
+  if (!session) return
+  const targetView = session.viewMode === 'terrain' ? 'terrain' : 'globe'
+  const workspaceId = String(session.activeWorkspaceId || '')
+  const openedIds = Array.isArray(session.openedJobIds)
+    ? [...new Set(session.openedJobIds.map(id => String(id || '')).filter(Boolean))]
+    : []
+  if (!workspaceId && !openedIds.length) {
+    if (targetView === 'terrain') emitViewMode('terrain')
+    return
+  }
+  try {
+    // 侧边栏与会话恢复都会调用刷新，store 内已做并发去重。
+    await refreshJobWorkspace()
+    const record = workspaceId ? workspaceRecordById(workspaceId) : null
+    const opened = new Set()
+    if (record) {
+      for (const id of record.job_ids || []) opened.add(String(id))
+      await openWorkspaceJob(workspaceId, { activate: targetView === 'terrain' })
+    }
+    for (const id of openedIds) {
+      if (opened.has(id)) continue
+      await openWorkspaceJob(id, { activate: false })
+    }
+  } catch (error) {
+    console.warn('[会话恢复] 恢复上次工作现场失败：', error?.message ?? error)
+  }
+  if (targetView === 'terrain') emitViewMode('terrain')
+}
 const { panelRef: terrainSliceRef, dragStyle: terrainSliceStyle, startDragging: startTerrainSliceDrag } = useDraggablePanel()
 const { panelRef: terrainProfileRef, dragStyle: terrainProfileStyle, startDragging: startTerrainProfileDrag } = useDraggablePanel()
 const terrainSliceAngleLabel = computed(() => {
@@ -8205,6 +8278,9 @@ onMounted(() => {
     })
     rootResizeObserver.observe(rootEl.value)
   }
+
+  // 数字地球就绪后再恢复上次现场，避免重建声场时缺少 viewer / 地形服务。
+  void restoreLastSession()
 })
 
 onActivated(async () => {
@@ -8228,6 +8304,14 @@ onDeactivated(() => {
 })
 
 onBeforeUnmount(() => {
+  window.clearTimeout(sessionPersistTimer)
+  sessionPersistTimer = 0
+  // 先落盘当前现场：下面的图层拆除会 markJobClosed 清空 openedIds。
+  persistSessionRestore()
+  // 拆除期间禁止 watcher 用清空后的状态覆盖刚保存的现场。
+  sessionPersistDisabled = true
+  document.removeEventListener('visibilitychange', flushSessionOnVisibility)
+  window.removeEventListener('pagehide', persistSessionRestore)
   closeVesselPlayback(false)
   for (const layer of runHistoryLayers.value) {
     if (layer.jobId) markJobClosed(layer.jobId)

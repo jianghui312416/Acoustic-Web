@@ -45,10 +45,14 @@ import {
   findModule,
   moduleCatalog,
 } from '@/config/moduleCatalog.js'
+import { readSessionRestore } from '@/modules/acoustic/sessionRestore.js'
 
 const viewRegistry = Object.freeze({
   'acoustic-field': defineAsyncComponent(() => import('@/views/AcousticFieldView.vue')),
 })
+
+// 锁屏 / 休眠唤醒常导致整页重载；沿用上次的视图模式，避免每次都退回全球视图。
+const restoredSession = readSessionRestore()
 
 const activeModuleId = ref(DEFAULT_MODULE_ID)
 const activeModule = computed(() => findModule(activeModuleId.value))
@@ -56,7 +60,7 @@ const activeSubmoduleId = ref(defaultSubmoduleId(activeModule.value))
 const submoduleSelectionVersion = ref(1)
 const sidebarCollapsed = ref(false)
 const thumbnailCollapsed = ref(false)
-const viewMode = ref('globe')
+const viewMode = ref(restoredSession?.viewMode === 'terrain' ? 'terrain' : 'globe')
 const runToken = ref(0)
 const signalRunToken = ref(0)
 const signalStopToken = ref(0)

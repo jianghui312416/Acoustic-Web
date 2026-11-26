@@ -131,30 +131,39 @@ async function isWorkspaceJob(job) {
   }
 }
 
-export async function refreshJobWorkspace() {
-  jobWorkspace.loading = true
-  jobWorkspace.error = ''
-  try {
-    const [jobs, remoteRecords] = await Promise.all([listAcousticJobs(), listWorkspaceRecords()])
-    const records = await migrateLegacyLocalRecords(remoteRecords)
-    jobWorkspace.records = Object.fromEntries(
-      records.map(normalizeWorkspaceRecord).filter(Boolean).map(record => [record.id, record])
-    )
-    const checked = await Promise.all(
-      jobs.map(async job => ({ job, eligible: job.openable !== false && await isWorkspaceJob(job) }))
-    )
-    const cards = workspaceJobs()
-    const referenced = new Set(cards.flatMap(card => card.job_ids))
-    jobWorkspace.jobs = [
-      ...cards,
-      ...checked.filter(item => item.eligible && !referenced.has(String(item.job.job_id))).map(item => item.job),
-    ]
-  } catch (error) {
-    jobWorkspace.error = error?.message || String(error)
-    jobWorkspace.jobs = workspaceJobs()
-  } finally {
-    jobWorkspace.loading = false
-  }
+let refreshPromise = null
+
+export function refreshJobWorkspace() {
+  // 侧边栏挂载与会话恢复都会触发刷新；并发时复用同一次请求，
+  // 避免重复拉取任务列表与逐个读取 params.json。
+  if (refreshPromise) return refreshPromise
+  refreshPromise = (async () => {
+    jobWorkspace.loading = true
+    jobWorkspace.error = ''
+    try {
+      const [jobs, remoteRecords] = await Promise.all([listAcousticJobs(), listWorkspaceRecords()])
+      const records = await migrateLegacyLocalRecords(remoteRecords)
+      jobWorkspace.records = Object.fromEntries(
+        records.map(normalizeWorkspaceRecord).filter(Boolean).map(record => [record.id, record])
+      )
+      const checked = await Promise.all(
+        jobs.map(async job => ({ job, eligible: job.openable !== false && await isWorkspaceJob(job) }))
+      )
+      const cards = workspaceJobs()
+      const referenced = new Set(cards.flatMap(card => card.job_ids))
+      jobWorkspace.jobs = [
+        ...cards,
+        ...checked.filter(item => item.eligible && !referenced.has(String(item.job.job_id))).map(item => item.job),
+      ]
+    } catch (error) {
+      jobWorkspace.error = error?.message || String(error)
+      jobWorkspace.jobs = workspaceJobs()
+    } finally {
+      jobWorkspace.loading = false
+    }
+  })()
+  refreshPromise.finally(() => { refreshPromise = null })
+  return refreshPromise
 }
 
 export function requestOpenJob(jobId) {
