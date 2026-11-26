@@ -1340,8 +1340,10 @@ import {
 } from '@/modules/acoustic/signalTransmissionNoise.js'
 import {
   clearTrackPoints,
-  resetTrackPoints,
+  ensureDrawingTrackRoute,
   restoreTrackPoints,
+  selectTrackRoute,
+  serializeTrackRoutes,
   trackFieldRunState,
   trackPointDrawing,
   trackPointState,
@@ -1416,7 +1418,7 @@ import {
   workspaceRecordById,
 } from '@/modules/acoustic/jobWorkspace.js'
 import {
-  readSessionRestore,
+  consumeSessionRestore,
   writeSessionRestore,
 } from '@/modules/acoustic/sessionRestore.js'
 import { createDefaultNoiseScenario, validateNoiseScenario } from '@/utils/noiseTimeFrequency.js'
@@ -2031,7 +2033,8 @@ window.addEventListener('pagehide', persistSessionRestore)
 
 /** 重载后按上次的视图模式与打开状态重建工作区（含历史声场与结果）。 */
 async function restoreLastSession() {
-  const session = readSessionRestore()
+  // 手动刷新会在这里清空存储并返回 null；只有标签页被丢弃后的重载才恢复。
+  const session = consumeSessionRestore()
   if (!session) return
   const targetView = session.viewMode === 'terrain' ? 'terrain' : 'globe'
   const workspaceId = String(session.activeWorkspaceId || '')
@@ -2801,6 +2804,17 @@ const configuredSignalRouteReady = computed(() => Boolean(
     ? selectedVesselRoute.value.length >= 2
     : trackPointState.points.length > 0 && trackPointState.finished
 ))
+/** 参与完整传输链路的多条发射航线（均需已结束且至少一个航迹点）。 */
+const readyTransmissionRoutes = computed(() => (
+  selectedAisVessel.value
+    ? []
+    : trackPointState.routes.filter(route => route.points.length > 0 && route.finished)
+))
+const transmissionRouteReady = computed(() => Boolean(
+  selectedAisVessel.value
+    ? selectedVesselRoute.value.length >= 2
+    : readyTransmissionRoutes.value.length > 0
+))
 const staticSignalChannelReady = computed(() => Boolean(
   !selectedAisVessel.value && trackPointState.finished && trackPointState.points.length === 1,
 ))
@@ -3181,6 +3195,7 @@ function captureWorkspaceSnapshot() {
         .map(key => [key, signalTransmissionControls[key]])
     ),
     track: {
+      routes: serializeTrackRoutes(),
       points: trackPointState.points,
       params: trackPointState.params,
       finished: trackPointState.finished,
@@ -4858,6 +4873,8 @@ function addTrackPointFeature(feature) {
   try { trackPointFeatures.push(feature.addTo(viewer.features) || feature) } catch {}
 }
 
+const TRACK_ROUTE_CESIUM_COLORS = ['#38d6ff', '#39e6d1', '#ff9d5c', '#65a8ff', '#f06fa9']
+
 function renderTrackPointFeatures() {
   if (!viewer?.features) return
   clearTrackPointFeatures()
@@ -4866,42 +4883,49 @@ function renderTrackPointFeatures() {
     viewer.scene?.requestRender?.()
     return
   }
-  const points = configuredSignalRoutePoints.value
-  if (!points.length) {
+  const routes = trackPointState.routes.filter(route => route.points.length)
+  if (!routes.length) {
     viewer.scene?.requestRender?.()
     return
   }
-  const color = Cesium.Color.fromCssColorString('#38d6ff')
-  for (const point of points) {
-    addTrackPointFeature(new Cesium.Point(
-      [point.lon, point.lat, TRACK_POINT_ALTITUDE_M],
-      {
-        color,
-        pixelSize: 12,
-        outlineColor: Cesium.Color.WHITE,
-        outlineWidth: 2,
-      }
-    ))
-  }
-  if (points.length >= 2) {
-    addTrackPointFeature(new Cesium.Polyline(
-      points.map((point) => [point.lon, point.lat, TRACK_POINT_ALTITUDE_M]),
-      {
-        colors: [color.withAlpha(0.92)],
-        width: 3,
-        followSurface: false,
-        onTerrain: false,
-      }
-    ))
-  }
+  routes.forEach((route, routeIndex) => {
+    const isActive = route.id === trackPointState.activeRouteId
+    const hex = isActive
+      ? TRACK_ROUTE_CESIUM_COLORS[0]
+      : TRACK_ROUTE_CESIUM_COLORS[(routeIndex + 1) % TRACK_ROUTE_CESIUM_COLORS.length]
+    const color = Cesium.Color.fromCssColorString(hex)
+    const points = route.points
+    for (const point of points) {
+      addTrackPointFeature(new Cesium.Point(
+        [point.lon, point.lat, TRACK_POINT_ALTITUDE_M],
+        {
+          color,
+          pixelSize: isActive ? 12 : 9,
+          outlineColor: Cesium.Color.WHITE,
+          outlineWidth: 2,
+        }
+      ))
+    }
+    if (points.length >= 2) {
+      addTrackPointFeature(new Cesium.Polyline(
+        points.map((point) => [point.lon, point.lat, TRACK_POINT_ALTITUDE_M]),
+        {
+          colors: [color.withAlpha(isActive ? 0.92 : 0.6)],
+          width: isActive ? 3 : 2,
+          followSurface: false,
+          onTerrain: false,
+        }
+      ))
+    }
+  })
   viewer.scene?.requestRender?.()
 }
 
 watch(
   () => signalTransmissionControls.selectTrackPoints,
   (enabled) => {
-    if (enabled && !selectedAisVessel.value) resetTrackPoints()
-    else if (!trackPointState.finished) clearTrackPoints()
+    // 打开选择时复用未完成的当前航线，或新建一条；不再清空已录入的其它航线。
+    if (enabled && !selectedAisVessel.value) ensureDrawingTrackRoute()
     renderTrackPointFeatures()
   }
 )
@@ -4993,29 +5017,67 @@ watch(() => trackFieldRunState.requestToken, () => {
   void runTrackPointFields()
 })
 
+/** 把 datetime-local 值转换为后端使用的 “YYYY-MM-DD HH:mm:ss”。 */
+function normalizeTransmitTimeString(value) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  const normalized = text.replace(' ', 'T')
+  const [date, time = '00:00:00'] = normalized.split('T')
+  const [hh = '00', mm = '00', ss = '00'] = String(time).split(':')
+  return `${date} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
+}
+
+/** 每个航迹点之后的航段航速；缺省回退到整体航速。 */
+function trackPointSpeedKn(params, fallback) {
+  const speed = Number(params?.speedKn)
+  const value = Number.isFinite(speed) && speed > 0 ? speed : fallback
+  return Math.min(60, Math.max(0.1, Number(value) || 0.1))
+}
+
 async function runSignalTransmission() {
   skipVesselSimulationOnce = false
   normalizeSignalTransmissionControls(signalTransmissionControls)
-  if (!configuredSignalRouteReady.value) {
+  if (!transmissionRouteReady.value) {
     if (selectedAisVessel.value) {
       errorText.value = '所选 AIS 船舶缺少有效位置或航向，无法生成 1 海里自动航迹。'
       return false
     }
-    errorText.value = '请在地形区域单击至少一个发射航迹点，并双击结束选择。双击位置不会计入航迹。'
+    errorText.value = '请至少完成一条发射航线（至少一个航迹点）后再运行完整传输链路。'
     return false
   }
   if (!hydrophoneReceiverReady.value) {
-    errorText.value = '请先打开“接收位置”，在海域选择水听器位置后再运行完整传输链路。'
+    errorText.value = '请先打开“测量航迹设置”，在海域选择水听器位置后再运行完整传输链路。'
     return false
   }
   const receiver = receiverArrayMarker.value
-  const routePoints = configuredSignalRoutePoints.value
+  const fallbackSpeedKn = configuredSignalSpeedKn.value
+  if (!(fallbackSpeedKn > 0)) {
+    errorText.value = selectedAisVessel.value
+      ? '所选 AIS 船舶缺少有效航速，无法按原航速生成航迹。'
+      : '请填写有效的手动船舶航速。'
+    return false
+  }
+  // AIS 使用自动生成的 1 海里航迹；手动模式提交全部已完成的发射航线。
+  const transmissionRoutes = selectedAisVessel.value
+    ? [{ id: 'ais', points: selectedVesselRoute.value, params: [], transmitTime: '' }]
+    : readyTransmissionRoutes.value.map(route => ({
+        id: route.id,
+        points: route.points,
+        params: route.params,
+        transmitTime: route.transmitTime,
+      }))
+  const primaryRoute = transmissionRoutes[0]
+  if (!selectedAisVessel.value && primaryRoute?.id) {
+    // 前端回放只展示一条航线，统一以第一条完成航线为准，避免与选中项错位。
+    selectTrackRoute(primaryRoute.id)
+  }
+  const routePoints = primaryRoute?.points || []
   if (!selectedAisVessel.value) {
     const missingFields = routePoints
       .map((point, index) => reusableTrackFieldLayer(point, index) ? -1 : index + 1)
       .filter(index => index > 0)
     if (missingFields.length) {
-      errorText.value = `航迹点 ${missingFields.join('、')} 尚无可复用声场，请先完成“航线声场计算”。`
+      errorText.value = `航线 1 的航迹点 ${missingFields.join('、')} 尚无可复用声场，请先完成“航线声场计算”。`
       return false
     }
   }
@@ -5029,13 +5091,6 @@ async function runSignalTransmission() {
   }
   const sourceProfile = liveSignalSourceProfile.value
   const sourceDepth = Math.max(0.01, Number(sourceProfile.sourceDepthM) || Number(signalTransmissionControls.navigationDepthM) || Number(calcParams.value.srcDepth) || 1)
-  const speedKn = configuredSignalSpeedKn.value
-  if (!(speedKn > 0)) {
-    errorText.value = selectedAisVessel.value
-      ? '所选 AIS 船舶缺少有效航速，无法按原航速生成航迹。'
-      : '请填写有效的手动船舶航速。'
-    return false
-  }
   const receiverDepth = Math.max(0.01, Number(signalTransmissionControls.receiverDepthM) || Number(receiver.depthM) || 30)
   const waterDepth = Math.max(1000, sourceDepth + 100, receiverDepth + 100)
   const depression = Math.min(90, Math.abs(Number(calcParams.value.grazingAngleMin) || 45))
@@ -5052,10 +5107,21 @@ async function runSignalTransmission() {
     .filter(item => Number.isFinite(item.frequency) && item.frequency > 0
       && item.frequency < signalTransmissionControls.sampleRate / 2
       && Number.isFinite(item.level))
+  // 每条航线：起始发射时间 + 航迹点（每个点携带其之后航段的航速）。
+  const sourceRoutes = transmissionRoutes.map(route => ({
+    transmit_time: normalizeTransmitTimeString(route.transmitTime) || String(calcParams.value.time || ''),
+    points: route.points.map((point, index) => ({
+      lon: Number(point.lon),
+      lat: Number(point.lat),
+      depth_m: sourceDepth,
+      speed_kn: trackPointSpeedKn(route.params[index], fallbackSpeedKn),
+    })),
+  }))
+  const primaryTransmitTime = normalizeTransmitTimeString(primaryRoute?.transmitTime) || calcParams.value.time
   const signalRequest = {
     channel_mode: 'waypoint',
     waypoint_spacing_m: SIGNAL_ARRIVAL_WAYPOINT_SPACING_M,
-    vessel_speed_kn: speedKn,
+    vessel_speed_kn: fallbackSpeedKn,
     request_id: requestId,
     frequencies_hz: sourceBands.map(item => item.frequency),
     source_band_levels_db: sourceBands.map(item => item.level),
@@ -5069,8 +5135,10 @@ async function runSignalTransmission() {
     source_lon: sourceLon,
     source_lat: sourceLat,
     source_depth_m: sourceDepth,
-    // 提交整条航迹；后端到达结构保持 50 m Waypoint 精度。
+    // 兼容旧后端的单航线字段；多航线统一走 source_routes。
     source_route: routePoints.map(point => ({ lon: Number(point.lon), lat: Number(point.lat), depth_m: sourceDepth })),
+    // 多航线结构：[{ transmit_time, points:[{ lon, lat, depth_m, speed_kn }] }]。
+    source_routes: sourceRoutes,
     receiver_lon: receiverLon,
     receiver_lat: receiverLat,
     receiver_depth_m: receiverDepth,
@@ -5091,7 +5159,7 @@ async function runSignalTransmission() {
     adc_full_scale_v: signalTransmissionControls.adcFullScaleV,
     dataSource: 'HYCOM',
     dataType: 'DT_ENV_SOUND',
-    time: calcParams.value.time,
+    time: primaryTransmitTime,
     timeRes: 0,
   }
   lastSignalRequest = cloneWorkspacePlain(signalRequest)
@@ -5132,8 +5200,8 @@ function stopSignalTransmission() {
 }
 
 function validateVesselSimulationSelections() {
-  if (!hydrophoneReceiverReady.value) return '请先打开“接收位置”并在海域选择水听器位置。'
-  if (trackPointState.points.length < 2 || !trackPointState.finished) return '请至少选择两个航迹点，并双击结束航迹选择。'
+  if (!hydrophoneReceiverReady.value) return '请先打开“测量航迹设置”并在海域选择水听器位置。'
+  if (trackPointState.points.length < 2 || !trackPointState.finished) return '请至少完成一条含两个航迹点的发射航线。'
   if (!selectedAisVessel.value && !(Number(signalTransmissionControls.vesselSpeedKn) > 0)) {
     return '未选择 AIS 船舶时，请先填写有效的手动船舶航速。'
   }

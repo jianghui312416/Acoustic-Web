@@ -71,6 +71,7 @@
       :point="trackPointCardPoint"
       @close="trackPointState.selectedIndex = -1"
       @update-params="updateTrackPointParams($event.index, $event.patch)"
+      @update-transmit-time="updateRouteTransmitTime($event.routeId, $event.value)"
     />
     <div v-if="terrainLegend" class="terrain-legend" aria-label="高程色带图例">
       <span class="terrain-legend-title">{{ terrainLegend.title }}</span>
@@ -134,11 +135,13 @@ import {
 import { SIGNAL_EXCESS_COLOR_STOPS, resolveSignalExcessDepthRange, resolveSignalExcessOffset } from '@/utils/signalExcess.js'
 import { signalExcessState } from '@/modules/acoustic/signalExcessState.js'
 import {
+  activeTrackRoute,
   addTrackPoint,
   finishTrackPointsFromDoubleClick,
   trackPointDrawing,
   trackPointState,
   undoLastTrackPoint,
+  updateRouteTransmitTime,
   updateTrackPointParams,
 } from '@/modules/acoustic/trackPointState.js'
 import { signalTransmissionControls } from '@/modules/acoustic/signalTransmissionControls.js'
@@ -201,9 +204,15 @@ const trackPointCardPoint = computed(() => {
   const point = trackPointState.points[index]
   const anchor = trackPointAnchor.value
   if (!point || !anchor) return null
+  const route = activeTrackRoute()
   return {
     ...point,
     index,
+    pointIndex: index,
+    routeIndex: trackPointState.routes.findIndex(item => item.id === trackPointState.activeRouteId),
+    routeId: route?.id || '',
+    isRouteStart: index === 0,
+    transmitTime: route?.transmitTime || '',
     params: trackPointState.params[index] || {},
     x: anchor.x,
     y: anchor.y,
@@ -636,6 +645,8 @@ function draw() {
   drawTrack()
 }
 
+const TRACK_ROUTE_COLORS = ['#38d6ff', '#39e6d1', '#ff9d5c', '#65a8ff', '#f06fa9']
+
 function drawTrack() {
   if (!trackCanvasEl.value || !props.active) return
   const canvas = trackCanvasEl.value
@@ -650,131 +661,145 @@ function drawTrack() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, width, height)
   const project = lastScene?.project
-  const points = trackPointState.points
-  if (typeof project !== 'function' || !points.length) return
-  const projected = points
-    .map((point, index) => {
-      const depth = Math.max(0, Number(trackPointState.params[index]?.sourceDepthM) || 0)
-      const source = project(point.lon, point.lat, -depth)
-      if (!source || !Number.isFinite(source.x) || !Number.isFinite(source.y)) return null
-      const seabed = project(point.lon, point.lat, Number(point.elevation) || 0)
-      return { source, seabed, depth, point, index }
-    })
-    .filter(Boolean)
-  if (!projected.length) return
+  if (typeof project !== 'function') return
+  const routes = trackPointState.routes.filter(route => route.points.length)
+  if (!routes.length) return
 
   ctx.save()
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
-  for (const { source, seabed } of projected) {
-    if (!seabed || !Number.isFinite(seabed.x) || !Number.isFinite(seabed.y)) continue
-    if (Math.abs(seabed.x - source.x) < 0.5 && Math.abs(seabed.y - source.y) < 0.5) continue
-    ctx.beginPath()
-    ctx.moveTo(seabed.x, seabed.y)
-    ctx.lineTo(source.x, source.y)
-    ctx.strokeStyle = 'rgba(126, 247, 255, 0.45)'
-    ctx.lineWidth = 1
-    ctx.stroke()
-  }
-  if (projected.length >= 2) {
-    ctx.beginPath()
-    projected.forEach(({ source }, index) => (index ? ctx.lineTo(source.x, source.y) : ctx.moveTo(source.x, source.y)))
-    ctx.strokeStyle = 'rgba(56, 214, 255, 0.28)'
-    ctx.lineWidth = 7
-    ctx.stroke()
-    ctx.strokeStyle = 'rgba(56, 214, 255, 0.94)'
-    ctx.lineWidth = 2.4
-    ctx.stroke()
+  routes.forEach((route, routeIndex) => {
+    const isActive = route.id === trackPointState.activeRouteId
+    const color = isActive
+      ? TRACK_ROUTE_COLORS[0]
+      : TRACK_ROUTE_COLORS[(routeIndex + 1) % TRACK_ROUTE_COLORS.length]
+    const baseAlpha = isActive ? 1 : 0.62
+    const points = route.points
+    const projected = points
+      .map((point, index) => {
+        const depth = Math.max(0, Number(route.params[index]?.sourceDepthM) || 0)
+        const source = project(point.lon, point.lat, -depth)
+        if (!source || !Number.isFinite(source.x) || !Number.isFinite(source.y)) return null
+        const seabed = project(point.lon, point.lat, Number(point.elevation) || 0)
+        return { source, seabed, depth, point, index }
+      })
+      .filter(Boolean)
+    if (!projected.length) return
+    ctx.globalAlpha = baseAlpha
 
-    // 距离标注与撤销操作相互独立：只要存在相邻航迹点就常驻显示大圆距离。
-    ctx.font = "600 10px 'Microsoft YaHei', sans-serif"
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    for (let index = 1; index < projected.length; index += 1) {
-      const previous = projected[index - 1]
-      const current = projected[index]
-      if (current.index !== previous.index + 1) continue
-      const distanceKm = greatCircleDistanceKm(
-        previous.point.lon, previous.point.lat,
-        current.point.lon, current.point.lat,
-      )
-      const label = distanceKm < 1
-        ? `${Math.round(distanceKm * 1000)} m`
-        : distanceKm < 10 ? `${distanceKm.toFixed(2)} km`
-          : distanceKm < 100 ? `${distanceKm.toFixed(1)} km` : `${Math.round(distanceKm)} km`
-      const middleX = (previous.source.x + current.source.x) / 2
-      const middleY = (previous.source.y + current.source.y) / 2
-      const segmentX = current.source.x - previous.source.x
-      const segmentY = current.source.y - previous.source.y
-      const segmentLength = Math.hypot(segmentX, segmentY)
-      // 标签沿线段法向移到线外。默认优先放在线段下方（垂直线则放右侧），
-      // 与航迹点上方的 Waypoint 标签错开；靠近画布边缘时自动换到另一侧。
-      let normalX = segmentLength > 1e-6 ? -segmentY / segmentLength : 0
-      let normalY = segmentLength > 1e-6 ? segmentX / segmentLength : 1
-      if (normalY < -0.15 || (Math.abs(normalY) <= 0.15 && normalX < 0)) {
-        normalX *= -1
-        normalY *= -1
-      }
-      const labelWidth = ctx.measureText(label).width + 10
-      const labelHeight = 18
-      const labelOffset = 18
-      const labelMargin = 4
-      const fitsCanvas = (candidateX, candidateY) => (
-        candidateX - labelWidth / 2 >= labelMargin &&
-        candidateX + labelWidth / 2 <= width - labelMargin &&
-        candidateY - labelHeight / 2 >= labelMargin &&
-        candidateY + labelHeight / 2 <= height - labelMargin
-      )
-      let x = middleX + normalX * labelOffset
-      let y = middleY + normalY * labelOffset
-      const oppositeX = middleX - normalX * labelOffset
-      const oppositeY = middleY - normalY * labelOffset
-      if (!fitsCanvas(x, y) && fitsCanvas(oppositeX, oppositeY)) {
-        x = oppositeX
-        y = oppositeY
-      }
-      x = clamp(x, labelWidth / 2 + labelMargin, width - labelWidth / 2 - labelMargin)
-      y = clamp(y, labelHeight / 2 + labelMargin, height - labelHeight / 2 - labelMargin)
-      ctx.fillStyle = 'rgba(5, 24, 38, 0.82)'
-      ctx.fillRect(x - labelWidth / 2, y - labelHeight / 2, labelWidth, labelHeight)
-      ctx.strokeStyle = 'rgba(126, 247, 255, 0.72)'
+    for (const { source, seabed } of projected) {
+      if (!seabed || !Number.isFinite(seabed.x) || !Number.isFinite(seabed.y)) continue
+      if (Math.abs(seabed.x - source.x) < 0.5 && Math.abs(seabed.y - source.y) < 0.5) continue
+      ctx.beginPath()
+      ctx.moveTo(seabed.x, seabed.y)
+      ctx.lineTo(source.x, source.y)
+      ctx.strokeStyle = 'rgba(126, 247, 255, 0.45)'
       ctx.lineWidth = 1
-      ctx.strokeRect(x - labelWidth / 2, y - labelHeight / 2, labelWidth, labelHeight)
-      ctx.fillStyle = '#e8fbff'
-      ctx.fillText(label, x, y)
+      ctx.stroke()
     }
-  }
-  projected.forEach(({ source, index }) => {
-    ctx.beginPath()
-    ctx.arc(source.x, source.y, 5.5, 0, Math.PI * 2)
-    ctx.fillStyle = index === 0 ? '#7ef7ff' : '#38d6ff'
-    ctx.fill()
-    ctx.lineWidth = 1.6
-    ctx.strokeStyle = '#ffffff'
-    ctx.stroke()
+    if (projected.length >= 2) {
+      ctx.beginPath()
+      projected.forEach(({ source }, index) => (index ? ctx.lineTo(source.x, source.y) : ctx.moveTo(source.x, source.y)))
+      ctx.globalAlpha = baseAlpha * 0.28
+      ctx.strokeStyle = color
+      ctx.lineWidth = 7
+      ctx.stroke()
+      ctx.globalAlpha = baseAlpha
+      ctx.strokeStyle = color
+      ctx.lineWidth = 2.4
+      ctx.stroke()
 
-    const label = `Waypoint ${index + 1}`
-    ctx.font = "600 11px 'Microsoft YaHei', sans-serif"
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    const labelWidth = ctx.measureText(label).width + 12
-    const labelHeight = 19
-    const labelX = Math.max(
-      labelWidth / 2 + 4,
-      Math.min(width - labelWidth / 2 - 4, source.x),
-    )
-    const preferredY = source.y - 18
-    const labelY = preferredY - labelHeight / 2 < 4
-      ? source.y + 18
-      : preferredY
-    ctx.fillStyle = 'rgba(5, 24, 38, 0.88)'
-    ctx.fillRect(labelX - labelWidth / 2, labelY - labelHeight / 2, labelWidth, labelHeight)
-    ctx.strokeStyle = index === 0 ? 'rgba(126, 247, 255, 0.92)' : 'rgba(56, 214, 255, 0.82)'
-    ctx.lineWidth = 1
-    ctx.strokeRect(labelX - labelWidth / 2, labelY - labelHeight / 2, labelWidth, labelHeight)
-    ctx.fillStyle = '#f2fdff'
-    ctx.fillText(label, labelX, labelY)
+      // 距离标注与撤销操作相互独立：只要存在相邻航迹点就常驻显示大圆距离。
+      ctx.font = "600 10px 'Microsoft YaHei', sans-serif"
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      for (let index = 1; index < projected.length; index += 1) {
+        const previous = projected[index - 1]
+        const current = projected[index]
+        if (current.index !== previous.index + 1) continue
+        const distanceKm = greatCircleDistanceKm(
+          previous.point.lon, previous.point.lat,
+          current.point.lon, current.point.lat,
+        )
+        const label = distanceKm < 1
+          ? `${Math.round(distanceKm * 1000)} m`
+          : distanceKm < 10 ? `${distanceKm.toFixed(2)} km`
+            : distanceKm < 100 ? `${distanceKm.toFixed(1)} km` : `${Math.round(distanceKm)} km`
+        const middleX = (previous.source.x + current.source.x) / 2
+        const middleY = (previous.source.y + current.source.y) / 2
+        const segmentX = current.source.x - previous.source.x
+        const segmentY = current.source.y - previous.source.y
+        const segmentLength = Math.hypot(segmentX, segmentY)
+        // 标签沿线段法向移到线外。默认优先放在线段下方（垂直线则放右侧），
+        // 与航迹点上方的 Waypoint 标签错开；靠近画布边缘时自动换到另一侧。
+        let normalX = segmentLength > 1e-6 ? -segmentY / segmentLength : 0
+        let normalY = segmentLength > 1e-6 ? segmentX / segmentLength : 1
+        if (normalY < -0.15 || (Math.abs(normalY) <= 0.15 && normalX < 0)) {
+          normalX *= -1
+          normalY *= -1
+        }
+        const labelWidth = ctx.measureText(label).width + 10
+        const labelHeight = 18
+        const labelOffset = 18
+        const labelMargin = 4
+        const fitsCanvas = (candidateX, candidateY) => (
+          candidateX - labelWidth / 2 >= labelMargin &&
+          candidateX + labelWidth / 2 <= width - labelMargin &&
+          candidateY - labelHeight / 2 >= labelMargin &&
+          candidateY + labelHeight / 2 <= height - labelMargin
+        )
+        let x = middleX + normalX * labelOffset
+        let y = middleY + normalY * labelOffset
+        const oppositeX = middleX - normalX * labelOffset
+        const oppositeY = middleY - normalY * labelOffset
+        if (!fitsCanvas(x, y) && fitsCanvas(oppositeX, oppositeY)) {
+          x = oppositeX
+          y = oppositeY
+        }
+        x = clamp(x, labelWidth / 2 + labelMargin, width - labelWidth / 2 - labelMargin)
+        y = clamp(y, labelHeight / 2 + labelMargin, height - labelHeight / 2 - labelMargin)
+        ctx.fillStyle = 'rgba(5, 24, 38, 0.82)'
+        ctx.fillRect(x - labelWidth / 2, y - labelHeight / 2, labelWidth, labelHeight)
+        ctx.strokeStyle = 'rgba(126, 247, 255, 0.72)'
+        ctx.lineWidth = 1
+        ctx.strokeRect(x - labelWidth / 2, y - labelHeight / 2, labelWidth, labelHeight)
+        ctx.fillStyle = '#e8fbff'
+        ctx.fillText(label, x, y)
+      }
+    }
+    projected.forEach(({ source, index }) => {
+      ctx.beginPath()
+      ctx.arc(source.x, source.y, 5.5, 0, Math.PI * 2)
+      ctx.fillStyle = index === 0 ? '#7ef7ff' : color
+      ctx.fill()
+      ctx.lineWidth = 1.6
+      ctx.strokeStyle = '#ffffff'
+      ctx.stroke()
+
+      const label = `Waypoint ${index + 1}`
+      ctx.font = "600 11px 'Microsoft YaHei', sans-serif"
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      const labelWidth = ctx.measureText(label).width + 12
+      const labelHeight = 19
+      const labelX = Math.max(
+        labelWidth / 2 + 4,
+        Math.min(width - labelWidth / 2 - 4, source.x),
+      )
+      const preferredY = source.y - 18
+      const labelY = preferredY - labelHeight / 2 < 4
+        ? source.y + 18
+        : preferredY
+      ctx.fillStyle = 'rgba(5, 24, 38, 0.88)'
+      ctx.fillRect(labelX - labelWidth / 2, labelY - labelHeight / 2, labelWidth, labelHeight)
+      ctx.strokeStyle = index === 0 ? 'rgba(126, 247, 255, 0.92)' : 'rgba(56, 214, 255, 0.82)'
+      ctx.lineWidth = 1
+      ctx.strokeRect(labelX - labelWidth / 2, labelY - labelHeight / 2, labelWidth, labelHeight)
+      ctx.fillStyle = '#f2fdff'
+      ctx.fillText(label, labelX, labelY)
+    })
   })
+  ctx.globalAlpha = 1
   ctx.restore()
 }
 

@@ -27,7 +27,7 @@
             type="button"
             class="view-chip"
             :class="{ active: viewMode === 'terrain' }"
-            title="地形预览（M）"
+            title="场景预览（M）"
             aria-label="地形预览"
             @click="$emit('select-view-mode', 'terrain')"
           >
@@ -57,7 +57,7 @@
             <span class="module-chevron" :class="{ open: weatherNoiseOpen }" aria-hidden="true">›</span>
           </button>
           <WeatherNoiseSidebar v-if="weatherNoiseOpen && viewMode === 'terrain'" @pick-on-map="$emit('select-view-mode', 'terrain')" />
-          <p v-else-if="weatherNoiseOpen" class="module-mode-hint">进入地形模式（M）加载场景的预报。</p>
+          <p v-else-if="weatherNoiseOpen" class="module-mode-hint">进入场景模式（M）加载场景的预报。</p>
         </section>
 
         <section class="module-group ais-monitor-module" :class="{ active: aisOpen }">
@@ -96,7 +96,7 @@
             <span class="module-chevron" :class="{ open: signalExcessOpen }" aria-hidden="true">›</span>
           </button>
           <SignalExcessPanel v-if="signalExcessOpen && volumeControlsAvailable" />
-          <p v-else-if="signalExcessOpen" class="module-mode-hint">进入地形模式并运行声场——声场体成为接收器。</p>
+          <p v-else-if="signalExcessOpen" class="module-mode-hint">进入场景模式并运行声场——声场体成为接收器。</p>
         </section>
 
         <section class="module-group" :class="{ active: sliceControlsOpen }">
@@ -209,7 +209,7 @@
             </template>
             <template v-else>
               <div class="feature-unavailable disabled"><span aria-hidden="true">📦</span><b>切片功能已禁用</b></div>
-              <p class="feature-unavailable-hint">请先进入地形模式并显示三维声场体</p>
+              <p class="feature-unavailable-hint">请先进入场景模式并显示三维声场体</p>
             </template>
           </div>
         </section>
@@ -304,7 +304,7 @@
             </template>
             <template v-else>
               <div class="feature-unavailable"><span aria-hidden="true">📦</span><b>未加载卷</b></div>
-              <p class="feature-unavailable-hint">进入地形模式并加载三维声场体</p>
+              <p class="feature-unavailable-hint">进入场景模式并加载三维声场体</p>
             </template>
           </div>
 

@@ -17,6 +17,8 @@ globalThis.sessionStorage = makeStorage()
 
 const {
   clearSessionRestore,
+  consumeSessionRestore,
+  isSessionRestoreAllowed,
   readSessionRestore,
   writeSessionRestore,
 } = await import('../src/modules/acoustic/sessionRestore.js')
@@ -61,4 +63,25 @@ test('clearing the session removes the saved state', () => {
   writeSessionRestore({ viewMode: 'terrain', activeWorkspaceId: 'ws', openedJobIds: ['x'] })
   clearSessionRestore()
   assert.equal(readSessionRestore(), null)
+})
+
+test('restores only when the tab was discarded by the browser, not on manual refresh', () => {
+  setUser('alice')
+  writeSessionRestore({ viewMode: 'terrain', activeWorkspaceId: 'ws', openedJobIds: ['x'] })
+
+  globalThis.document = { wasDiscarded: false }
+  assert.equal(isSessionRestoreAllowed(), false)
+  assert.equal(consumeSessionRestore(), null)
+  // 普通刷新后存储被清空，下一次不会恢复到刷新前的旧状态。
+  assert.equal(readSessionRestore(), null)
+
+  writeSessionRestore({ viewMode: 'terrain', activeWorkspaceId: 'ws', openedJobIds: ['x'] })
+  globalThis.document = { wasDiscarded: true }
+  assert.equal(isSessionRestoreAllowed(), true)
+  const restored = consumeSessionRestore()
+  assert.equal(restored.viewMode, 'terrain')
+  assert.equal(restored.activeWorkspaceId, 'ws')
+
+  delete globalThis.document
+  clearSessionRestore()
 })

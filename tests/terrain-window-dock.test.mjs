@@ -171,7 +171,7 @@ test('hydrophone plots require a selected receiver before they can open', () => 
   assert.match(signalState, /receiverReady: false/)
   assert.match(signalControls, /state\.showTimeFrequency" type="checkbox" :disabled="!state\.receiverReady"/)
   assert.match(signalControls, /state\.showWaveform" type="checkbox" :disabled="!state\.receiverReady"/)
-  assert.match(signalControls, /请先选择接收位置，再打开时频图或时域图/)
+  assert.match(signalControls, /请先设置测量航迹，再打开时频图或时域图/)
   assert.match(source, /watch\(hydrophoneReceiverReady, \(ready\) => \{\s*signalTransmissionControls\.receiverReady = Boolean\(ready\)/)
   assert.match(source, /:receiver-placed="hydrophoneReceiverReady"/)
 })

@@ -2,7 +2,7 @@
   <section class="track-point-card" :style="position" aria-label="航迹点参数">
     <header>
       <span>📍 {{ waterLabel }} · 源深 {{ sourceDepthLabel }} m</span>
-      <b>航迹点 {{ point.index + 1 }}</b>
+      <b>{{ routeLabel }}</b>
       <button type="button" aria-label="关闭航迹点参数" title="关闭" @click="$emit('close')">×</button>
     </header>
     <p class="coordinates">{{ coord(point.lat, 'N', 'S') }}，{{ coord(point.lon, 'E', 'W') }}</p>
@@ -13,6 +13,21 @@
       </button>
     </div>
     <div v-if="editing" class="params">
+      <label v-if="isRouteStart">
+        <span>发射时间</span>
+        <input
+          :value="transmitTimeDisplay"
+          type="text"
+          inputmode="numeric"
+          placeholder="YYYY-MM-DD HH:mm:ss"
+          title="可手动输入，如 2026-01-02 03:04:05"
+          @change="updateTransmitTime"
+        />
+      </label>
+      <label>
+        <span>航速 (kn)</span>
+        <input :value="param('speedKn')" type="number" min="0.1" max="60" step="0.1" @change="updateNumber('speedKn', $event, 0.1, 60)" />
+      </label>
       <label>
         <span>Src Depth (m)</span>
         <input :value="param('sourceDepthM')" type="number" min="0" max="20000" step="1" @change="updateNumber('sourceDepthM', $event, 0, 20000)" />
@@ -54,14 +69,34 @@
 
 <script setup>
 import { computed, ref } from 'vue'
+import {
+  formatTransmitTimeForDisplay,
+  normalizeTransmitTimeInput,
+} from '@/modules/acoustic/trackPointState.js'
 
 const props = defineProps({
   point: { type: Object, required: true },
 })
-const emit = defineEmits(['close', 'update-params'])
+const emit = defineEmits(['close', 'update-params', 'update-transmit-time'])
 
 const editing = ref(false)
 const params = computed(() => props.point.params || {})
+const pointIndex = computed(() => {
+  const value = Number(props.point.pointIndex ?? props.point.index)
+  return Number.isFinite(value) && value >= 0 ? value : 0
+})
+const routeIndex = computed(() => {
+  const value = Number(props.point.routeIndex)
+  return Number.isFinite(value) && value >= 0 ? value : -1
+})
+const isRouteStart = computed(() => props.point.isRouteStart === true || pointIndex.value === 0)
+const transmitTime = computed(() => String(props.point.transmitTime || ''))
+const transmitTimeDisplay = computed(() => formatTransmitTimeForDisplay(transmitTime.value))
+const routeLabel = computed(() => (
+  routeIndex.value >= 0
+    ? `航线 ${routeIndex.value + 1} · 航迹点 ${pointIndex.value + 1}`
+    : `航迹点 ${pointIndex.value + 1}`
+))
 const waterLabel = computed(() => (
   Number(props.point.elevation) < 0
     ? `${Math.round(Math.abs(Number(props.point.elevation)))}米水深`
@@ -69,8 +104,8 @@ const waterLabel = computed(() => (
 ))
 const sourceDepthLabel = computed(() => Math.round(Number(params.value.sourceDepthM) || 0))
 const position = computed(() => ({
-  left: `clamp(8px, ${Number(props.point.x) + 18}px, calc(100% - 286px))`,
-  top: `clamp(8px, ${Number(props.point.y) - 54}px, calc(100% - ${editing.value ? 340 : 110}px))`,
+  left: `clamp(8px, ${Number(props.point.x) + 18}px, calc(100% - 326px))`,
+  top: `clamp(8px, ${Number(props.point.y) - 54}px, calc(100% - ${editing.value ? 400 : 120}px))`,
 }))
 
 function coord(value, positive, negative) {
@@ -91,13 +126,27 @@ function updateNumber(key, event, min, max) {
   event.target.value = String(clamped)
   emit('update-params', { index: props.point.index, patch: { [key]: clamped } })
 }
+
+function updateTransmitTime(event) {
+  const normalized = normalizeTransmitTimeInput(event.target.value)
+  if (!normalized) {
+    // 输入无法解析时恢复原值，避免写入非法时间。
+    event.target.value = transmitTimeDisplay.value
+    return
+  }
+  event.target.value = formatTransmitTimeForDisplay(normalized)
+  emit('update-transmit-time', {
+    routeId: props.point.routeId || '',
+    value: normalized,
+  })
+}
 </script>
 
 <style scoped>
 .track-point-card {
   position: absolute;
   z-index: 15;
-  width: 270px;
+  width: 310px;
   max-width: calc(100% - 16px);
   max-height: calc(100% - 42px);
   overflow: auto;
@@ -184,28 +233,37 @@ svg {
 
 .params {
   display: grid;
-  gap: 6px;
+  gap: 8px;
   margin-top: 8px;
-  padding-top: 7px;
+  padding-top: 9px;
   border-top: 1px solid #294355;
 }
 
 .params label {
   display: grid;
-  grid-template-columns: 1fr 92px;
+  grid-template-columns: 1fr minmax(120px, 160px);
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   color: #7f9fb1;
 }
 
 .params input,
 .params select {
-  height: 24px;
-  padding: 0 5px;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
   color: #d9f4f5;
   border: 1px solid #35677f;
-  border-radius: 4px;
+  border-radius: 5px;
   background: #0d2638;
-  font-size: 10px;
+  font-size: 12px;
+}
+
+.params input:focus,
+.params select:focus {
+  outline: none;
+  border-color: #5ed8f4;
+  box-shadow: 0 0 0 2px rgba(94, 216, 244, 0.18);
 }
 </style>

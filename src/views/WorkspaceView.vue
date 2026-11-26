@@ -45,14 +45,14 @@ import {
   findModule,
   moduleCatalog,
 } from '@/config/moduleCatalog.js'
-import { readSessionRestore } from '@/modules/acoustic/sessionRestore.js'
+import { consumeSessionRestore } from '@/modules/acoustic/sessionRestore.js'
 
 const viewRegistry = Object.freeze({
   'acoustic-field': defineAsyncComponent(() => import('@/views/AcousticFieldView.vue')),
 })
 
-// 锁屏 / 休眠唤醒常导致整页重载；沿用上次的视图模式，避免每次都退回全球视图。
-const restoredSession = readSessionRestore()
+// 仅当标签页被浏览器丢弃后重载时沿用上次视图；手动刷新则从干净视图开始。
+const restoredSession = consumeSessionRestore()
 
 const activeModuleId = ref(DEFAULT_MODULE_ID)
 const activeModule = computed(() => findModule(activeModuleId.value))

@@ -49,6 +49,26 @@ export function readSessionRestore() {
   }
 }
 
+/**
+ * 只有被浏览器“丢弃（tab discard）”后重新加载的页面才恢复现场。
+ * 手动刷新(F5 / Ctrl+R)、关闭后重开、普通导航都会得到 false，从而从头开始。
+ */
+export function isSessionRestoreAllowed() {
+  return typeof document !== 'undefined' && document.wasDiscarded === true
+}
+
+/**
+ * 页面启动时调用：允许恢复时返回上次现场，否则清空存储并返回 null。
+ * 手动刷新时清空，避免之后标签页被丢弃又恢复成刷新前的旧状态。
+ */
+export function consumeSessionRestore() {
+  if (!isSessionRestoreAllowed()) {
+    clearSessionRestore()
+    return null
+  }
+  return readSessionRestore()
+}
+
 /** 覆盖写入现场（viewMode / activeWorkspaceId / openedJobIds）。 */
 export function writeSessionRestore(state) {
   const store = storage()

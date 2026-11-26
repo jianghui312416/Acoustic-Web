@@ -3,7 +3,7 @@
     <label class="st-select">
       <span>船舶选择</span>
       <select v-model="aisMonitorState.selectedMmsi" aria-label="船舶选择" @change="applySelectedVessel">
-        <option :value="null">不选择船舶</option>
+        <option :value="null">不选择AIS</option>
         <option v-for="vessel in vessels" :key="vessel.mmsi" :value="vessel.mmsi">
           {{ vesselLabel(vessel) }}
         </option>
@@ -51,7 +51,7 @@
     </label>
 
     <label class="st-select">
-      <span>频率设置</span>
+      <span>声源设置</span>
       <span class="st-number">
         <input
           v-model="state.frequencyHzText"
@@ -160,20 +160,26 @@
     <label class="st-switch">
       <input v-model="state.showReceiver" type="checkbox" />
       <span class="st-track"><i></i></span>
-      <span class="st-label">接收位置</span>
+      <span class="st-label">测量航迹设置</span>
     </label>
 
     <label class="st-switch">
-      <input v-model="state.selectTrackPoints" type="checkbox" :disabled="Boolean(selectedVessel)" />
+      <input
+        v-model="state.selectTrackPoints"
+        type="checkbox"
+        :disabled="Boolean(selectedVessel)"
+        @change="onTrackSelectionChange"
+      />
       <span class="st-track"><i></i></span>
-      <span class="st-label">航迹点选择</span>
+      <span class="st-label">发射航线设置</span>
     </label>
     <p v-if="selectedVessel" class="st-track-help">
       航迹从 AIS 当前位置出发，按原航向和原航速前进，最大航程 1 海里。
     </p>
-    <p v-if="state.selectTrackPoints" class="st-track-help">
-      在地形区域单击添加发射点，右键撤销最后一点，双击仅结束选择且不计入航迹；相邻点间常驻标注距离，一个点表示固定发射位置。
+    <p v-else-if="state.selectTrackPoints" class="st-track-help">
+      在地形区域单击添加发射航迹点，右键撤销最后一点，双击完成当前航线。完成后可点“添加航线”继续设置下一条；单个点表示固定发射位置。
     </p>
+    <button v-if="!selectedVessel" type="button" class="st-add-route" @click="addRoute">＋ 添加航线</button>
 
     <p class="st-section-title">显示</p>
 
@@ -189,7 +195,7 @@
       <span class="st-label">声源处时域图</span>
     </label>
 
-    <p v-if="!trackSelectionReady" class="st-receiver-required">请先完成航迹点选择，再打开声源处时频图或时域图</p>
+    <p v-if="!trackSelectionReady" class="st-receiver-required">请先完成发射航线设置，再打开声源处时频图或时域图</p>
 
     <label class="st-switch">
       <input v-model="state.showTimeFrequency" type="checkbox" :disabled="!state.receiverReady" />
@@ -231,7 +237,7 @@
       <span class="st-label st-readout-label"><span aria-hidden="true">🔎</span><span>光标读取</span></span>
     </label>
 
-    <label class="st-switch" :title="staticChannelReady ? '在垂直切面点击修改水听器位置和深度' : '仅完成单个航迹点选择后可用'">
+    <label class="st-switch" :title="staticChannelReady ? '在垂直切面点击修改水听器位置和深度' : '仅完成单点发射航线后可用'">
       <input
         v-model="state.sliceReceiverPlacement"
         type="checkbox"
@@ -241,7 +247,7 @@
       <span class="st-label st-readout-label"><span aria-hidden="true">⌖</span><span>切面接收位置</span></span>
     </label>
 
-    <p v-if="!state.receiverReady" class="st-receiver-required">请先选择接收位置，再打开时频图或时域图</p>
+    <p v-if="!state.receiverReady" class="st-receiver-required">请先设置测量航迹，再打开时频图或时域图</p>
 
     <label class="st-select">
       <span>时频/时域展示窗长</span>
@@ -251,29 +257,59 @@
       </span>
     </label>
 
-    <div v-if="!selectedVessel && trackPoints.length" class="st-track-list" aria-label="航迹点列表">
+    <div v-if="!selectedVessel && trackRoutes.length" class="st-track-list" aria-label="发射航线列表">
       <header class="st-track-list-head">
         <span>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18 9 8l6 7 4-10M5 18h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" /></svg>
-          航迹点
+          发射航线
         </span>
-        <b>{{ trackPoints.length }} 个</b>
+        <b>{{ trackRoutes.length }} 条</b>
       </header>
-      <ol>
-        <li v-for="(point, index) in trackPoints" :key="index">
-          <span class="st-point-index">{{ String(index + 1).padStart(2, '0') }}</span>
-          <span class="st-point-coordinate"><small>经度</small><b>{{ formatCoordinate(point.lon) }}°</b></span>
-          <span class="st-point-coordinate"><small>纬度</small><b>{{ formatCoordinate(point.lat) }}°</b></span>
+      <ul class="st-route-list">
+        <li
+          v-for="(route, routeIndex) in trackRoutes"
+          :key="route.id"
+          :class="{ active: route.id === trackPointState.activeRouteId }"
+        >
+          <button type="button" class="st-route-head" @click="toggleRoute(route.id)">
+            <span class="st-route-name">
+              <i class="st-route-chevron" :class="{ open: expandedRouteId === route.id }" aria-hidden="true">▸</i>
+              航线 {{ routeIndex + 1 }}
+            </span>
+            <span class="st-route-meta">{{ route.points.length }} 点 · {{ route.finished ? '已完成' : '录入中' }}</span>
+          </button>
+          <div v-if="expandedRouteId === route.id" class="st-route-detail">
+            <label class="st-route-time">
+              <span>发射时间</span>
+              <input
+                type="text"
+                inputmode="numeric"
+                placeholder="YYYY-MM-DD HH:mm:ss"
+                title="可手动输入，如 2026-01-02 03:04:05"
+                :value="formatDisplayTime(route.transmitTime)"
+                @change="onRouteTransmitTime(route, $event)"
+              />
+            </label>
+            <ol>
+              <li v-for="(point, pointIndex) in route.points" :key="pointIndex">
+                <span class="st-point-index">{{ String(pointIndex + 1).padStart(2, '0') }}</span>
+                <span class="st-point-coordinate"><small>经度</small><b>{{ formatCoordinate(point.lon) }}°</b></span>
+                <span class="st-point-coordinate"><small>纬度</small><b>{{ formatCoordinate(point.lat) }}°</b></span>
+                <span class="st-point-coordinate"><small>航速</small><b>{{ formatSpeed(route.params[pointIndex]?.speedKn) }}</b></span>
+              </li>
+            </ol>
+            <button type="button" class="st-route-remove" @click="removeRoute(route.id)">删除该航线</button>
+          </div>
         </li>
-      </ol>
+      </ul>
     </div>
 
     <button
-      v-if="state.selectTrackPoints && trackPoints.length >= 1"
+      v-if="state.selectTrackPoints && trackPointState.points.length >= 1"
       type="button"
       class="st-finish-track"
       @click="finishTrackSelection"
-    >✓ 完成航迹（{{ trackPoints.length }} 点）</button>
+    >✓ 完成航线（{{ trackPointState.points.length }} 点）</button>
 
     <p v-if="session.state !== 'idle'" class="st-session-status" :class="session.state">
       <span>{{ session.error || session.message }}</span><b v-if="session.state === 'running' || session.state === 'finalizing'">{{ session.percent }}%</b>
@@ -294,7 +330,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import {
   applyHydrophonePreampDefaults,
   combinedTonePreviewDurationS,
@@ -313,8 +349,18 @@ import {
   selectedAisVessel,
 } from '@/modules/ais/aisMonitorStore.js'
 import { simulationControls } from '@/modules/acoustic/simulationControls.js'
-import { trackPointState } from '@/modules/acoustic/trackPointState.js'
-import { finishTrackPoints } from '@/modules/acoustic/trackPointState.js'
+import {
+  activeTrackRoute,
+  createTrackRoute,
+  ensureDrawingTrackRoute,
+  finishTrackPoints,
+  formatTransmitTimeForDisplay,
+  normalizeTransmitTimeInput,
+  removeTrackRoute,
+  selectTrackRoute,
+  trackPointState,
+  updateRouteTransmitTime,
+} from '@/modules/acoustic/trackPointState.js'
 import { estimateJomopansEchoSpectrum } from '@/utils/jomopansEcho.js'
 
 const emit = defineEmits(['run', 'stop'])
@@ -338,10 +384,14 @@ const vessels = computed(() => {
   if (selected && !items.some(item => item.mmsi === selected.mmsi)) items.unshift(selected)
   return items
 })
-const trackPoints = computed(() => trackPointState.points)
-const trackSelectionReady = computed(() => Boolean(
-  selectedVessel.value || (trackPointState.points.length > 0 && trackPointState.finished),
+const trackRoutes = computed(() => trackPointState.routes)
+const finishedRoutes = computed(() => trackPointState.routes.filter(
+  route => route.points.length > 0 && route.finished,
 ))
+const trackSelectionReady = computed(() => Boolean(
+  selectedVessel.value || finishedRoutes.value.length > 0,
+))
+const expandedRouteId = ref('')
 const staticChannelReady = computed(() => Boolean(
   !selectedVessel.value && trackPointState.finished && trackPointState.points.length === 1,
 ))
@@ -443,6 +493,11 @@ function formatCoordinate(value) {
   return Number.isFinite(number) ? number.toFixed(4) : '—'
 }
 
+function formatSpeed(value) {
+  const number = Number(value)
+  return Number.isFinite(number) ? `${number.toFixed(1)} kn` : '—'
+}
+
 function applySelectedVessel() {
   const vessel = vessels.value.find((item) => item.mmsi === aisMonitorState.selectedMmsi)
   if (!vessel) {
@@ -464,7 +519,52 @@ function applySelectedVessel() {
 
 function finishTrackSelection() {
   if (!finishTrackPoints()) return
+  expandedRouteId.value = trackPointState.activeRouteId
   state.selectTrackPoints = false
+}
+
+function onTrackSelectionChange() {
+  if (state.selectTrackPoints && !selectedVessel.value) ensureDrawingTrackRoute()
+}
+
+/** 添加一条新的发射航线：先结束仍在录入的当前航线，再新建一条空航线。 */
+function addRoute() {
+  if (selectedVessel.value) return
+  const active = activeTrackRoute()
+  if (active && !active.finished) {
+    if (!active.points.length) {
+      state.selectTrackPoints = true
+      return
+    }
+    finishTrackPoints()
+  }
+  createTrackRoute()
+  expandedRouteId.value = trackPointState.activeRouteId
+  state.selectTrackPoints = true
+}
+
+function toggleRoute(routeId) {
+  expandedRouteId.value = expandedRouteId.value === routeId ? '' : routeId
+  selectTrackRoute(routeId)
+}
+
+function formatDisplayTime(value) {
+  return formatTransmitTimeForDisplay(value)
+}
+
+function onRouteTransmitTime(route, event) {
+  const normalized = normalizeTransmitTimeInput(event.target.value)
+  if (!normalized) {
+    // 输入无法解析时恢复原值，避免写入非法时间。
+    event.target.value = formatTransmitTimeForDisplay(route.transmitTime)
+    return
+  }
+  event.target.value = formatTransmitTimeForDisplay(normalized)
+  updateRouteTransmitTime(route.id, normalized)
+}
+
+function removeRoute(routeId) {
+  if (removeTrackRoute(routeId) && expandedRouteId.value === routeId) expandedRouteId.value = ''
 }
 </script>
 
@@ -948,4 +1048,156 @@ function finishTrackSelection() {
 .st-session-status b { flex: none; font: 500 9px ui-monospace, monospace; }
 .st-session-status.complete { color: #6ce3bd; border-color: rgba(48, 151, 119, .5); }
 .st-session-status.error { color: #ff9daa; border-color: rgba(174, 69, 87, .55); background: rgba(67, 24, 34, .65); }
+
+.st-add-route {
+  width: 100%;
+  height: 26px;
+  color: #7fe0f5;
+  border: 1px dashed rgba(74, 190, 220, 0.6);
+  border-radius: 5px;
+  background: rgba(11, 64, 83, 0.4);
+  cursor: pointer;
+  font: inherit;
+}
+
+.st-add-route:hover {
+  border-color: #65d8f5;
+  background: rgba(16, 83, 105, 0.7);
+}
+
+.st-route-list {
+  max-height: 230px;
+  margin: 0;
+  padding: 5px;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(95, 158, 184, 0.55) transparent;
+}
+
+.st-route-list > li {
+  display: block;
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+
+.st-route-list > li + li {
+  margin-top: 4px;
+}
+
+.st-route-list > li.active {
+  border-color: rgba(69, 183, 219, 0.5);
+  background: rgba(30, 82, 104, 0.32);
+}
+
+.st-route-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 7px;
+  color: #cfeef6;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.st-route-head:hover {
+  color: #eafaff;
+}
+
+.st-route-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #8fd8ef;
+}
+
+.st-route-chevron {
+  display: inline-block;
+  color: #59dff5;
+  font-style: normal;
+  transition: transform 0.15s ease;
+}
+
+.st-route-chevron.open {
+  transform: rotate(90deg);
+}
+
+.st-route-meta {
+  flex: none;
+  color: #6de5c4;
+  font: 500 9px ui-monospace, monospace;
+}
+
+.st-route-detail {
+  padding: 0 7px 7px;
+}
+
+.st-route-time {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  color: #8aa9bc;
+  font-size: 9px;
+}
+
+.st-route-time > span {
+  flex: none;
+}
+
+.st-route-time input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  color: #dceff6;
+  border: 1px solid rgba(95, 158, 184, 0.4);
+  border-radius: 4px;
+  background: rgba(24, 58, 79, 0.92);
+  font: inherit;
+}
+
+.st-route-detail ol {
+  max-height: 160px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.st-route-detail ol > li {
+  min-height: 30px;
+  display: grid;
+  grid-template-columns: 22px 1fr 1fr 0.9fr;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+}
+
+.st-route-detail ol > li:hover {
+  background: rgba(30, 82, 104, 0.38);
+}
+
+.st-route-remove {
+  width: 100%;
+  height: 24px;
+  margin-top: 6px;
+  color: #ff9daa;
+  border: 1px solid rgba(174, 69, 87, 0.5);
+  border-radius: 5px;
+  background: rgba(67, 24, 34, 0.4);
+  cursor: pointer;
+  font: inherit;
+}
+
+.st-route-remove:hover {
+  background: rgba(103, 35, 50, 0.6);
+}
 </style>
