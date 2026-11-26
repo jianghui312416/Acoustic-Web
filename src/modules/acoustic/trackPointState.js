@@ -138,6 +138,28 @@ export function finishTrackPoints() {
   return true
 }
 
+/** 仅在用户打开工作区记录时，用记录中的点位完整替换当前航迹。 */
+export function restoreTrackPoints(snapshot) {
+  const points = Array.isArray(snapshot?.points)
+    ? snapshot.points.filter(point => Number.isFinite(Number(point?.lon)) && Number.isFinite(Number(point?.lat))).map(point => ({
+      lon: Number(point.lon),
+      lat: Number(point.lat),
+      elevation: Number.isFinite(Number(point.elevation)) ? Number(point.elevation) : 0,
+    })).slice(0, 2000)
+    : []
+  const params = Array.isArray(snapshot?.params) ? snapshot.params : []
+  trackPointState.points = points
+  trackPointState.params = points.map((_, index) => ({
+    ...defaultTrackPointParams(),
+    ...(params[index] && typeof params[index] === 'object' ? params[index] : {}),
+  }))
+  trackPointState.finished = Boolean(snapshot?.finished && points.length)
+  trackPointState.selectedIndex = -1
+  trackPointState.lastAddedAt = 0
+  trackPointState.addedAt = []
+  trackPointState.revision += 1
+}
+
 export function clearTrackPoints() {
   if (!trackPointState.points.length && !trackPointState.finished) return
   resetTrackPoints()

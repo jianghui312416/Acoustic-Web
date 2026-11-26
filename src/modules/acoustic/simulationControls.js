@@ -4,7 +4,7 @@ import { normalizeCoordFormat } from '@/utils/coordinateFormat.js'
 /** 仿真模型下拉选项（与声场计算参数使用同一组模型标识）。 */
 export const SIMULATION_MODELS = Object.freeze([
   Object.freeze({ id: 'bellhop', label: '射线模型' }),
-  Object.freeze({ id: 'ram', label: 'RAM 模型' }),
+  Object.freeze({ id: 'ram', label: 'PE 模型' }),
 ])
 
 /**

@@ -532,17 +532,26 @@
             <span class="module-chevron" :class="{ open: workOpen }" aria-hidden="true">›</span>
           </button>
           <div v-if="workOpen" class="work-list" @click.stop>
+            <button type="button" class="work-save" @click="requestSaveWorkspaceDraft">＋ 保存当前工作区</button>
             <p v-if="jobWorkspace.error" class="work-message error">{{ jobWorkspace.error }}</p>
             <p v-else-if="jobWorkspace.loading && !jobWorkspace.jobs.length" class="work-message">正在读取工作区项目…</p>
-            <p v-else-if="!jobWorkspace.jobs.length" class="work-message">暂无可打开的三维声场历史工作项目</p>
+            <p v-else-if="!jobWorkspace.jobs.length" class="work-message">暂无工作区记录</p>
             <article v-for="job in jobWorkspace.jobs" :key="job.job_id" class="work-card">
               <div class="work-card-title">
                 <span>◆</span><b>{{ job.model_label || job.model || '三维声场' }}</b><i :class="job.status === 'completed' ? 'ready' : ''">{{ job.status_label || (job.openable ? '完成' : '处理中') }}</i>
               </div>
-              <div class="work-card-meta">工作 {{ job.job_id }} · {{ formatJobTime(job.updated_at_ms) }}</div>
+              <div class="work-card-meta">
+                工作 {{ job.job_id }} · {{ formatJobTime(job.updated_at_ms) }}
+                <template v-if="job.workspace_record"> · {{ job.field_count }} 个声场</template>
+              </div>
+              <ol v-if="job.workspace_record && job.job_ids?.length" class="work-card-children" aria-label="工作区内声场">
+                <li v-for="(fieldJobId, index) in job.job_ids" :key="fieldJobId">
+                  <span>声场 {{ index + 1 }}</span><code>{{ fieldJobId }}</code>
+                </li>
+              </ol>
               <div class="work-card-actions">
                 <button type="button" :disabled="!job.openable || openingJobId === job.job_id" @click="openJob(job)">
-                  {{ openingJobId === job.job_id ? '正在打开…' : isJobOpened(job.job_id) ? '定位声场' : '打开声场' }}
+                  {{ openingJobId === job.job_id ? '正在打开…' : job.workspace_record ? (isJobOpened(job.job_id) ? '定位工作区' : '打开工作区') : isJobOpened(job.job_id) ? '定位声场' : '打开声场' }}
                 </button>
                 <span v-if="isJobOpened(job.job_id)">已打开</span>
                 <button type="button" class="work-delete" :disabled="deletingJobId === job.job_id" title="删除工作记录" :aria-label="`删除工作 ${job.job_id}`" @click="removeJob(job)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3m2 0-1 13H8L7 7m3 4v5m4-5v5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
@@ -583,7 +592,15 @@ import {
 } from '@/modules/acoustic/simulationControls.js'
 import { rayFlowTimelinePositionMs, seekRayFlowClock } from '@/utils/rayFlowClock.js'
 import { deleteAcousticJob } from '@/api/jobWorkspaceApi.js'
-import { jobWorkspace, refreshJobWorkspace, requestCloseJob, requestOpenJob } from '@/modules/acoustic/jobWorkspace.js'
+import {
+  deleteLocalWorkspaceDraft,
+  jobWorkspace,
+  refreshJobWorkspace,
+  requestCloseJob,
+  requestCloseWorkspace,
+  requestOpenJob,
+  requestSaveWorkspaceDraft,
+} from '@/modules/acoustic/jobWorkspace.js'
 import WeatherNoiseSidebar from '@/components/weather/WeatherNoiseSidebar.vue'
 import SignalExcessPanel from '@/components/acoustic/SignalExcessPanel.vue'
 import SignalTransmissionControls from '@/components/acoustic/SignalTransmissionControls.vue'
@@ -651,7 +668,7 @@ const simulationTimeInputValue = computed(() => simulationTimeText.value.replace
 /** 运行按钮按当前仿真模型显示算法名：射线模型=Bellhop，RAM=Ram。 */
 const runSimulationLabel = computed(() => {
   const model = String(simulation.model || 'bellhop').toLowerCase()
-  const name = model === 'ram' ? 'Ram' : 'Bellhop'
+  const name = model === 'ram' ? 'PE' : 'Bellhop'
   return `运行仿真（${name}）`
 })
 const volumeControlsAvailable = computed(() => props.viewMode === 'terrain' && acousticSceneState.hasTerrainVolume)
@@ -828,6 +845,11 @@ function openJob(job) {
 
 async function removeJob(job) {
   if (!job?.job_id || !window.confirm(`确定删除工作 ${job.job_id}？删除后无法恢复。`)) return
+  if (job.workspace_record) {
+    requestCloseWorkspace(job.job_id, job.job_ids || [])
+    if (await deleteLocalWorkspaceDraft(job.job_id)) await refreshJobWorkspace()
+    return
+  }
   deletingJobId.value = job.job_id
   try {
     await deleteAcousticJob(job.job_id)
@@ -1042,6 +1064,8 @@ onBeforeUnmount(() => {
 .work-refresh:hover { background: rgba(35,170,214,.2); }
 .work-refresh.spinning { animation: work-spin .8s linear infinite; }
 .work-list { display: grid; gap: 6px; max-height: 300px; overflow: auto; margin-top: 5px; padding: 6px; border: 1px solid rgba(55,135,168,.22); border-radius: 6px; background: rgba(3,18,29,.7); }
+.work-save { min-height: 30px; border: 1px dashed #278bb2; border-radius: 6px; color: #8adcf4; background: rgba(8,67,91,.45); cursor: pointer; }
+.work-save:hover { color: #dffaff; border-color: #4ec7ee; background: rgba(11,91,119,.6); }
 .work-card { padding: 8px; border: 1px solid rgba(48,143,180,.35); border-radius: 7px; background: linear-gradient(145deg,rgba(9,39,57,.95),rgba(5,25,39,.96)); }
 .work-card-title { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .work-card-title > span { color: #c899ff; font-size: 10px; }
@@ -1049,6 +1073,10 @@ onBeforeUnmount(() => {
 .work-card-title i { padding: 2px 5px; border-radius: 9px; color: #f0c47d; background: rgba(127,80,13,.35); font: normal 9px sans-serif; }
 .work-card-title i.ready { color: #62efa0; background: rgba(16,112,62,.4); }
 .work-card-meta { margin: 5px 0 7px; color: #7399ad; font: 9px/1.4 monospace; overflow: hidden; text-overflow: ellipsis; }
+.work-card-children { display: grid; gap: 3px; margin: 0 0 7px; padding: 5px 6px 5px 18px; color: #7da6b9; border-left: 1px solid #25617b; background: rgba(2,19,30,.45); font-size: 9px; }
+.work-card-children li { padding-left: 2px; }
+.work-card-children span { color: #9ed8e8; }
+.work-card-children code { float: right; color: #688da0; font: 8px monospace; }
 .work-card-actions { display: flex; align-items: center; justify-content: space-between; }
 .work-card-actions button { padding: 4px 9px; border: 1px solid #168ec1; border-radius: 5px; color: #dff8ff; background: #075780; font-size: 10px; cursor: pointer; }
 .work-card-actions button:disabled { opacity: .45; cursor: default; }

@@ -1341,6 +1341,7 @@ import {
 import {
   clearTrackPoints,
   resetTrackPoints,
+  restoreTrackPoints,
   trackFieldRunState,
   trackPointDrawing,
   trackPointState,
@@ -1403,8 +1404,16 @@ import {
   sampleTerrainProfile,
 } from '@/sdk/terrainVolumeMask.js'
 import { acousticTerrainBounds } from '@/utils/bathymetry.js'
-import { loadAcousticJob, loadAcousticJobParams } from '@/api/jobWorkspaceApi.js'
-import { jobWorkspace, markJobClosed, markJobOpened } from '@/modules/acoustic/jobWorkspace.js'
+import { loadAcousticJob, loadAcousticJobParams, loadAcousticJobResult } from '@/api/jobWorkspaceApi.js'
+import {
+  activateWorkspace,
+  attachJobToActiveWorkspace,
+  jobWorkspace,
+  markJobClosed,
+  markJobOpened,
+  saveWorkspaceDraft,
+  workspaceRecordById,
+} from '@/modules/acoustic/jobWorkspace.js'
 import { createDefaultNoiseScenario, validateNoiseScenario } from '@/utils/noiseTimeFrequency.js'
 import { useDraggablePanel } from '@/composables/useDraggablePanel.js'
 import {
@@ -1498,8 +1507,18 @@ const TRACK_FIELD_CONCURRENCY = 4
 const terrainRadiusKm = ref(DEFAULT_TERRAIN_SPAN_KM / 6)
 /** 历史声场与工作区声场共用同一套胶囊 / 垂直切面 / 动态声线数据。 */
 const runHistoryLayers = shallowRef([])
+/** 当前新计算结果对应的后端工作号；归档后转移到历史图层。 */
+const currentJobId = ref('')
 /** 当前垂直切面 / 动态声线所展示的历史声场；空表示当前运行结果。 */
 const selectedProfileLayerId = ref('')
+/**
+ * 工作区结果引用：二维声场、环境噪声、信号链等不进入三维图层的任务。
+ * 与 snapshot 一起保存到后端；打开工作区时按 kind 逐个恢复。
+ */
+const workspaceResultRefs = ref([])
+let restoringWorkspaceResults = false
+/** 最近一次提交的信号链请求；工作区恢复时可据此重放连续链路结果。 */
+let lastSignalRequest = null
 const selectedProfileLayer = computed(() => (
   runHistoryLayers.value.find(layer => layer.id === selectedProfileLayerId.value) || null
 ))
@@ -1532,10 +1551,11 @@ function runPanelDockIndex(id) {
   return index < 0 ? 0 : index
 }
 /** 全球视图红框选择的区域：加载后作为地形模式的初始区域。 */
-const globeSelection = ref(acousticTerrainBounds(
+const defaultGlobeSelection = acousticTerrainBounds(
   { lon: 116, lat: 16 },
   DEFAULT_TERRAIN_SPAN_KM / 6
-))
+)
+const globeSelection = ref(normalizeTerrainBounds(defaultGlobeSelection))
 /** 每次从全球视图点击“加载”都递增，地形模式据此重新加载选区。 */
 const globeSelectionToken = ref(0)
 /** 地形缩放到最小时，先淡出地形并在数字地球上继续缩小，再回到全球视图。 */
@@ -1812,9 +1832,36 @@ function jobCalculationParams(job = {}, field = null) {
   }
 }
 
-async function openWorkspaceJob(jobId) {
+async function openWorkspaceJob(jobId, { activate = true, skipWorkspaceRecord = false } = {}) {
   const id = String(jobId || '')
   if (!id) return
+  const workspaceRecord = skipWorkspaceRecord ? null : workspaceRecordById(id)
+  if (workspaceRecord) {
+    if (workspaceRecord.snapshot) await applyWorkspaceSnapshot(workspaceRecord.snapshot)
+    activateWorkspace(id)
+    const childJobIds = [...new Set((workspaceRecord.job_ids || workspaceRecord.jobIds || (workspaceRecord.jobId ? [workspaceRecord.jobId] : [])).map(String).filter(Boolean))]
+    for (const childJobId of childJobIds) {
+      await openWorkspaceJob(childJobId, { activate: false, skipWorkspaceRecord: true })
+    }
+    const resultRefs = Array.isArray(workspaceRecord.snapshot?.resultRefs) ? workspaceRecord.snapshot.resultRefs : []
+    if (resultRefs.length) await restoreWorkspaceResults(resultRefs)
+    markJobOpened(id)
+    if (activate) {
+      emitViewMode('terrain')
+      const lastLayer = [...runHistoryLayers.value].reverse().find(layer => childJobIds.includes(String(layer.jobId)))
+      // 新版工作区以保存的地形边界为准；仅兼容没有现场快照的旧记录时，
+      // 才退回到最后一个声场的声源范围。
+      if (!workspaceRecord.snapshot?.globeSelection && lastLayer) {
+        focusRunHistoryLayer(lastLayer.id, DEFAULT_TERRAIN_SPAN_KM)
+      }
+    }
+    return true
+  }
+  if (currentJobId.value === id && terrainRunVisible.value) {
+    markJobOpened(id)
+    if (activate) emitViewMode('terrain')
+    return true
+  }
   const existing = runHistoryLayers.value.find(layer => layer.jobId === id)
   if (existing) {
     existing.visible = true
@@ -1824,9 +1871,11 @@ async function openWorkspaceJob(jobId) {
     removeRunPanelFromDock(existing.id)
     refreshRunHistoryLayers()
     markJobOpened(id)
-    emitViewMode('terrain')
-    focusRunHistoryLayer(existing.id, DEFAULT_TERRAIN_SPAN_KM)
-    return
+    if (activate) {
+      emitViewMode('terrain')
+      focusRunHistoryLayer(existing.id, DEFAULT_TERRAIN_SPAN_KM)
+    }
+    return true
   }
   if (openingJobIds.value.includes(id)) return
   openingJobIds.value = [...openingJobIds.value, id]
@@ -1893,11 +1942,15 @@ async function openWorkspaceJob(jobId) {
     })
     runHistoryLayers.value = [...runHistoryLayers.value, layer]
     markJobOpened(id)
-    emitViewMode('terrain')
-    focusRunHistoryLayer(id, DEFAULT_TERRAIN_SPAN_KM)
+    if (activate) {
+      emitViewMode('terrain')
+      focusRunHistoryLayer(id, DEFAULT_TERRAIN_SPAN_KM)
+    }
+    return true
   } catch (error) {
     console.error('[工作声场] 打开失败：', error)
     runtimeError.value = `工作 ${id} 打开失败：${error?.message || error}`
+    return false
   } finally {
     openingJobIds.value = openingJobIds.value.filter(value => value !== id)
   }
@@ -1907,9 +1960,33 @@ watch(() => jobWorkspace.openRequestToken, () => {
   openWorkspaceJob(jobWorkspace.requestedJobId)
 })
 watch(() => jobWorkspace.closeRequestToken, () => {
-  const layer = runHistoryLayers.value.find(item => item.jobId === jobWorkspace.closeRequestedJobId)
-  if (layer) closeRunHistoryLayer(layer.id)
+  for (const jobId of jobWorkspace.closeRequestedJobIds) {
+    const layer = runHistoryLayers.value.find(item => item.jobId === jobId)
+    if (layer) closeRunHistoryLayer(layer.id)
+    else if (currentJobId.value === jobId) closeTerrainRun()
+    else markJobClosed(jobId)
+  }
 })
+watch(() => jobWorkspace.saveRequestToken, () => {
+  void saveWorkspaceDraft(captureWorkspaceSnapshot())
+})
+// 信号链在 WebSocket 结束后登记进工作区；恢复重放不重复登记。
+watch(() => signalTransmissionSession.state, (state) => {
+  if (state !== 'complete' || restoringWorkspaceResults) return
+  const result = signalTransmissionSession.result
+  const request = lastSignalRequest
+  if (!result || !request) return
+  const jobId = String(result.job_id || '').trim()
+  if (!jobId) return
+  lastSignalRequest = null
+  const stream = String(request.channel_mode || '') === 'waypoint'
+  void attachResultToActiveWorkspace({
+    kind: stream ? 'signal_stream' : 'signal',
+    jobId,
+    request: cloneWorkspacePlain(request),
+    label: '信号链工作区',
+  })
+}, { flush: 'post' })
 const { panelRef: terrainSliceRef, dragStyle: terrainSliceStyle, startDragging: startTerrainSliceDrag } = useDraggablePanel()
 const { panelRef: terrainProfileRef, dragStyle: terrainProfileStyle, startDragging: startTerrainProfileDrag } = useDraggablePanel()
 const terrainSliceAngleLabel = computed(() => {
@@ -2226,6 +2303,8 @@ function closeRunHistoryLayer(id) {
   viewer?.scene?.requestRender?.()
 }
 function closeTerrainRun() {
+  if (currentJobId.value) markJobClosed(currentJobId.value)
+  currentJobId.value = ''
   terrainRunVisible.value = false
   terrainRunMinimized.value = false
   removeRunPanelFromDock(CURRENT_RUN_PANEL_ID)
@@ -3016,6 +3095,238 @@ const noiseParams = ref({
   numPoints: 100,
   timeFrequencyScenario: createDefaultNoiseScenario(4, 3, 'normal'),
 })
+
+function captureWorkspaceSnapshot() {
+  return {
+    globeSelection: globeSelection.value,
+    calcParams: calcParams.value,
+    noiseParams: noiseParams.value,
+    receiverArrayMarker: receiverArrayMarker.value,
+    hydrophonePlaced: hydrophonePlaced.value,
+    signalControls: Object.fromEntries(
+      Object.keys(signalTransmissionControls).filter(key => key !== 'receiverReady')
+        .map(key => [key, signalTransmissionControls[key]])
+    ),
+    track: {
+      points: trackPointState.points,
+      params: trackPointState.params,
+      finished: trackPointState.finished,
+    },
+    // 二维声场 / 环境噪声 / 信号链等非三维结果的任务引用，随现场一起持久化。
+    resultRefs: workspaceResultRefs.value.map(ref => ({ ...ref })),
+    ui: {
+      analysisMode: analysisMode.value,
+      resultPanelOpen: resultPanelOpen.value,
+      parameterPanelOpen: parameterPanelOpen.value,
+      sliceAzimuthDeg: sliceAzimuthDeg.value,
+      selectedProfileLayerId: selectedProfileLayerId.value,
+      cleanGlobeView: cleanGlobeView.value,
+    },
+  }
+}
+
+async function applyWorkspaceSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return false
+  workspaceResultRefs.value = Array.isArray(snapshot.resultRefs)
+    ? snapshot.resultRefs
+        .filter(ref => ref && typeof ref === 'object' && (ref.jobId || ref.job_id))
+        .map(ref => ({ ...ref, jobId: String(ref.jobId || ref.job_id || '') }))
+        .filter(ref => ref.jobId)
+    : []
+  lastSignalRequest = null
+  const ui = snapshot.ui && typeof snapshot.ui === 'object' ? snapshot.ui : null
+  if (ui) {
+    if (['2d', '3d', 'noise'].includes(ui.analysisMode)) analysisMode.value = ui.analysisMode
+    if (Number.isFinite(Number(ui.sliceAzimuthDeg))) sliceAzimuthDeg.value = Number(ui.sliceAzimuthDeg)
+    if (typeof ui.selectedProfileLayerId === 'string') selectedProfileLayerId.value = ui.selectedProfileLayerId
+    if (typeof ui.parameterPanelOpen === 'boolean') parameterPanelOpen.value = ui.parameterPanelOpen
+    if (typeof ui.resultPanelOpen === 'boolean') resultPanelOpen.value = ui.resultPanelOpen
+    if (typeof ui.cleanGlobeView === 'boolean') cleanGlobeView.value = ui.cleanGlobeView
+  }
+  if (snapshot.globeSelection) {
+    globeSelection.value = normalizeTerrainBounds(snapshot.globeSelection)
+    globeSelectionToken.value += 1
+  }
+  if (snapshot.calcParams && typeof snapshot.calcParams === 'object') {
+    Object.assign(calcParams.value, snapshot.calcParams)
+  }
+  if (snapshot.noiseParams && typeof snapshot.noiseParams === 'object') {
+    Object.assign(noiseParams.value, snapshot.noiseParams)
+  }
+  receiverArrayMarker.value = snapshot.receiverArrayMarker || null
+  hydrophonePlaced.value = Boolean(snapshot.hydrophonePlaced && receiverArrayMarker.value)
+  if (snapshot.signalControls && typeof snapshot.signalControls === 'object') {
+    for (const key of Object.keys(signalTransmissionControls)) {
+      if (key !== 'receiverReady' && Object.hasOwn(snapshot.signalControls, key)) {
+        signalTransmissionControls[key] = snapshot.signalControls[key]
+      }
+    }
+  }
+  // 先让“航迹点选择”开关的现有 watcher 完成清理，再写入记录中的权威航迹。
+  await nextTick()
+  restoreTrackPoints(snapshot.track)
+  return true
+}
+
+function cloneWorkspacePlain(value) {
+  try {
+    return value == null ? value : JSON.parse(JSON.stringify(value))
+  } catch {
+    return value
+  }
+}
+
+function workspaceResultRefKey(ref) {
+  return `${ref?.kind || ''}:${ref?.jobId || ''}`
+}
+
+function workspaceResultBaseKind(ref) {
+  const kind = String(ref?.kind || '')
+  return kind.startsWith('signal') ? 'signal' : kind
+}
+
+function upsertWorkspaceResultRef(ref) {
+  if (!ref || !ref.kind || !ref.jobId) return
+  const key = workspaceResultRefKey(ref)
+  const baseKind = workspaceResultBaseKind(ref)
+  // 二维 / 噪声 / 信号链在工作区里只保留最近一次结果；三维声场仍由 job_ids 累积。
+  workspaceResultRefs.value = [
+    ...workspaceResultRefs.value.filter(item =>
+      workspaceResultBaseKind(item) !== baseKind && workspaceResultRefKey(item) !== key),
+    { ...ref },
+  ]
+}
+
+/** 把一次二维/噪声/信号结果登记进当前工作区，并连同现场快照保存到后端。 */
+async function attachResultToActiveWorkspace(ref) {
+  if (!ref?.kind || !ref?.jobId) return ''
+  upsertWorkspaceResultRef(ref)
+  const snapshot = captureWorkspaceSnapshot()
+  const label = ref.label || '声场工作区'
+  // 三维结果继续走 job_ids；其它类型只进入 snapshot.resultRefs。
+  if (ref.kind === '3d') return attachJobToActiveWorkspace(ref.jobId, snapshot, label)
+  return saveWorkspaceDraft(snapshot)
+}
+
+async function restoreWorkspaceResults(refs) {
+  const list = Array.isArray(refs) ? refs : []
+  if (!list.length) return
+  restoringWorkspaceResults = true
+  try {
+    for (const ref of list) {
+      try {
+        if (ref.kind === '2d') await restoreWorkspace2dResult(ref)
+        else if (ref.kind === 'noise') await restoreWorkspaceNoiseResult(ref)
+        else if (ref.kind === 'signal' || ref.kind === 'signal_stream') await restoreWorkspaceSignalResult(ref)
+      } catch (error) {
+        console.warn('[工作区恢复] 结果恢复失败：', ref?.kind, ref?.jobId, error?.message ?? error)
+      }
+    }
+  } finally {
+    restoringWorkspaceResults = false
+  }
+}
+
+/** 从后端已保存的二维传播损失（及声线）响应重建二维声场并缓存。 */
+async function restoreWorkspace2dResult(ref) {
+  if (!ref?.jobId) return
+  const payload = await loadAcousticJobResult(ref.jobId)
+  const tlJson = payload?.result
+  if (!tlJson) return
+  const params = ref.params && typeof ref.params === 'object'
+    ? cloneWorkspacePlain(ref.params)
+    : cloneWorkspacePlain(calcParams.value)
+  const azimuth = Number.isFinite(Number(ref.azimuth)) ? Number(ref.azimuth) : Number(params.azimuth) || 0
+  const raySource = adapt2dTlResponse(tlJson, azimuth)
+  let rayJson = null
+  if (ref.rayJobId) {
+    try {
+      const rayPayload = await loadAcousticJobResult(ref.rayJobId)
+      rayJson = rayPayload?.result || null
+    } catch (error) {
+      console.warn('[工作区恢复] 二维声线获取失败：', error?.message ?? error)
+    }
+  }
+  let distanceMaxKm = 0
+  try {
+    const parsed = parseAnalyse3DTlrd(raySource)
+    distanceMaxKm = Math.max(...parsed.grid.distance.map(Number).filter(Number.isFinite), 0) / 1000
+  } catch {}
+  const receiver = ref.receiver && typeof ref.receiver === 'object'
+    ? cloneWorkspacePlain(ref.receiver)
+    : {
+        lon: Number(params.receiverX),
+        lat: Number(params.receiverY),
+        depthM: Number(noiseParams.value.depth),
+        rangeM: 0,
+        bearingDeg: azimuth,
+      }
+  soundResultCache['2d'] = {
+    calcParams: params,
+    raySourceData: raySource,
+    staticRayData: rayJson,
+    sourcePoint: {
+      lon: Number(params.coordX),
+      lat: Number(params.coordY),
+      depth_m: Number(params.srcDepth) || 0,
+    },
+    sourceRadiusKm: Math.max(0.1, distanceMaxKm || Number(params.range) * 1.852 || 20),
+    sliceAzimuthDeg: azimuth,
+    availableAzimuths: [azimuth],
+    bottomTypeSegments: [],
+    bottomTypeState: 'idle',
+    rayDataByAzimuth: new Map(),
+    bottomTypeByAzimuth: new Map(),
+    receiverArrayMarker: receiver,
+    volumeData: null,
+  }
+  if (analysisMode.value === '2d') {
+    restoreSoundResult('2d')
+    focus2dField()
+  }
+}
+
+/** 从后端已保存的环境噪声响应重建噪声结果与全局噪声场。 */
+async function restoreWorkspaceNoiseResult(ref) {
+  if (!ref?.jobId) return
+  const payload = await loadAcousticJobResult(ref.jobId)
+  const response = portalUnitResponse(payload?.result) ?? payload?.result
+  if (!response) return
+  const params = ref.params && typeof ref.params === 'object'
+    ? cloneWorkspacePlain(ref.params)
+    : cloneNoiseParameters(noiseParams.value)
+  noiseResult.value = response
+  noiseResultParams.value = params
+  noiseResultOutdated.value = false
+  publishEnvironmentNoise(response, params, 'normal')
+  cleanGlobeView.value = false
+  if (isNoiseMode.value) {
+    parameterPanelOpen.value = false
+    resultPanelOpen.value = true
+  }
+}
+
+/** 恢复信号链：连续链路按保存的请求重放，固定链路直接读取已保存结果。 */
+async function restoreWorkspaceSignalResult(ref) {
+  const request = ref?.request && typeof ref.request === 'object'
+    ? cloneWorkspacePlain(ref.request)
+    : null
+  if (request) {
+    // 恢复重放不应再次登记为新的工作区结果。
+    lastSignalRequest = null
+    runSignalTransmissionSession({ ...request })
+    return
+  }
+  if (!ref?.jobId) return
+  const payload = await loadAcousticJobResult(ref.jobId)
+  if (payload?.kind === 'signal' && payload.result) {
+    signalTransmissionSession.result = payload.result
+    signalTransmissionSession.state = 'complete'
+    signalTransmissionSession.phase = 'complete'
+    signalTransmissionSession.percent = 100
+    signalTransmissionSession.message = '已恢复保存的信号链结果'
+  }
+}
 const noiseResult = shallowRef(null)
 const noiseResultParams = ref(null)
 const noiseResultOutdated = ref(false)
@@ -4668,7 +4979,7 @@ async function runSignalTransmission() {
     .filter(item => Number.isFinite(item.frequency) && item.frequency > 0
       && item.frequency < signalTransmissionControls.sampleRate / 2
       && Number.isFinite(item.level))
-  runSignalTransmissionSession({
+  const signalRequest = {
     channel_mode: 'waypoint',
     waypoint_spacing_m: SIGNAL_ARRIVAL_WAYPOINT_SPACING_M,
     vessel_speed_kn: speedKn,
@@ -4709,7 +5020,9 @@ async function runSignalTransmission() {
     dataType: 'DT_ENV_SOUND',
     time: calcParams.value.time,
     timeRes: 0,
-  })
+  }
+  lastSignalRequest = cloneWorkspacePlain(signalRequest)
+  runSignalTransmissionSession(signalRequest)
   lastSignalFieldRequestId = requestId
   void startSignalRouteFieldPlayback({ request_id: requestId })
   return true
@@ -6715,6 +7028,7 @@ function archiveCurrent3dRun() {
   } catch {}
   const layer = shallowReactive({
     id,
+    jobId: currentJobId.value || undefined,
     field,
     // 保留本次声场的 GPU 体纹理，归档后仍由 GPU 光线步进渲染，不再退回 Canvas 面片。
     texture: currentVolumeTexture || null,
@@ -6745,6 +7059,7 @@ function archiveCurrent3dRun() {
   }
   // 用户未主动关闭前始终保留；不按数量自动淘汰状态窗口或对应声场。
   runHistoryLayers.value = [...runHistoryLayers.value, layer]
+  currentJobId.value = ''
   // 再次计算后保持原声场为活动对象：方向方位线 / 剖切继续落在刚归档的声场上，
   // 新结果作为独立图层显示；只有点击该图层的「二维切面」按钮才切到新声场。
   if (!selectedProfileLayerId.value) {
@@ -6756,6 +7071,7 @@ function archiveCurrent3dRun() {
 function submitCalculation() {
   activeMapPick.value = ''
   if (analysisMode.value === '3d') archiveCurrent3dRun()
+  currentJobId.value = ''
   if (props.viewMode === 'terrain' && analysisMode.value === '3d') {
     terrainRunVisible.value = true
     terrainRunMinimized.value = false
@@ -6869,6 +7185,15 @@ async function submitNoiseCalculation() {
     parameterPanelOpen.value = false
     resultPanelOpen.value = true
     refreshPickMarkers()
+    const noiseJobId = String(json?.Data?.TaskId || '').trim()
+    if (noiseJobId) {
+      void attachResultToActiveWorkspace({
+        kind: 'noise',
+        jobId: noiseJobId,
+        params: cloneNoiseParameters(noiseParams.value),
+        label: '环境噪声工作区',
+      })
+    }
   } catch (err) {
     console.error('[Environment Noise]', err)
     errorText.value = err?.message || String(err)
@@ -6981,6 +7306,19 @@ async function load2dData() {
     cleanGlobeView.value = false
     parameterPanelOpen.value = false
     resultPanelOpen.value = true
+    const tlJobId = String(tlJson?.Data?.TaskId || '').trim()
+    const rayJobId = String(rayJson?.Data?.TaskId || '').trim()
+    if (tlJobId) {
+      void attachResultToActiveWorkspace({
+        kind: '2d',
+        jobId: tlJobId,
+        rayJobId: rayJobId || undefined,
+        azimuth: Number(azimuth) || routeBearingDeg.value,
+        params: cloneWorkspacePlain(calcParams.value),
+        receiver: { ...defaultReceiver },
+        label: `${selectedModelLabel.value}二维声场工作区`,
+      })
+    }
   } catch (err) {
     console.error('[2D SoundField]', err)
     errorText.value = err?.message || String(err)
@@ -7546,6 +7884,7 @@ async function loadTlrdData(precomputedResponse = null) {
     const ice = calcParams.value.regionType === 'ice'
     tlrdJson = await analyse3dTLRDByModel(payload, calcParams.value.model, ice)
   }
+  const completedJobId = String(tlrdJson?.Data?.TaskId || '').trim()
   const parsed = parseAnalyse3DTlrd(tlrdJson)
   // 图表与切面均可直接消费解析后的紧凑模型。尽早断开原始多层数组引用，避免
   // 它在后续地形采样和声线请求期间与 Float32/RGBA 体同时占用数 GB 内存。
@@ -7621,6 +7960,15 @@ async function loadTlrdData(precomputedResponse = null) {
 
   applyScatterPoints([], wedge.pathMaxM)
   scheduleBottomTypesForAzimuth(sliceAzimuthDeg.value, 0)
+  if (completedJobId) {
+    currentJobId.value = completedJobId
+    markJobOpened(completedJobId)
+    await attachJobToActiveWorkspace(
+      completedJobId,
+      captureWorkspaceSnapshot(),
+      `${selectedModelLabel.value}声场工作区`,
+    )
+  }
 }
 
 /**

@@ -371,8 +371,8 @@ let savedTerrainCamera = null
 const MIN_CAMERA_ZOOM = 0.1
 // 允许贴近声场体与海底表面观察细节；仅改变投影视图比例，不重载地形或声场。
 // 上限受 DEM/网格分辨率约束，继续放大会只放大插值块，而不是增加细节。
-const MAX_CAMERA_ZOOM = 14
-/** 拖动/缩放期间先降细分保证跟手，停手后再补一帧高精度地形。 */
+const MAX_CAMERA_ZOOM = 30
+/** 拖动/滚轮缩放期间先降细分保证跟手，停手后再补一帧高精度地形。 */
 const INTERACTIVE_MESH_SEGMENTS = 128
 const MIN_CAMERA_PITCH = 0.05
 /** 俯视时 pitch = 90°，高程不再影响屏幕位置，避免点选标记与地形落点产生视角偏移。 */
@@ -702,14 +702,44 @@ function drawTrack() {
         ? `${Math.round(distanceKm * 1000)} m`
         : distanceKm < 10 ? `${distanceKm.toFixed(2)} km`
           : distanceKm < 100 ? `${distanceKm.toFixed(1)} km` : `${Math.round(distanceKm)} km`
-      const x = (previous.source.x + current.source.x) / 2
-      const y = (previous.source.y + current.source.y) / 2
+      const middleX = (previous.source.x + current.source.x) / 2
+      const middleY = (previous.source.y + current.source.y) / 2
+      const segmentX = current.source.x - previous.source.x
+      const segmentY = current.source.y - previous.source.y
+      const segmentLength = Math.hypot(segmentX, segmentY)
+      // 标签沿线段法向移到线外。默认优先放在线段下方（垂直线则放右侧），
+      // 与航迹点上方的 Waypoint 标签错开；靠近画布边缘时自动换到另一侧。
+      let normalX = segmentLength > 1e-6 ? -segmentY / segmentLength : 0
+      let normalY = segmentLength > 1e-6 ? segmentX / segmentLength : 1
+      if (normalY < -0.15 || (Math.abs(normalY) <= 0.15 && normalX < 0)) {
+        normalX *= -1
+        normalY *= -1
+      }
       const labelWidth = ctx.measureText(label).width + 10
+      const labelHeight = 18
+      const labelOffset = 18
+      const labelMargin = 4
+      const fitsCanvas = (candidateX, candidateY) => (
+        candidateX - labelWidth / 2 >= labelMargin &&
+        candidateX + labelWidth / 2 <= width - labelMargin &&
+        candidateY - labelHeight / 2 >= labelMargin &&
+        candidateY + labelHeight / 2 <= height - labelMargin
+      )
+      let x = middleX + normalX * labelOffset
+      let y = middleY + normalY * labelOffset
+      const oppositeX = middleX - normalX * labelOffset
+      const oppositeY = middleY - normalY * labelOffset
+      if (!fitsCanvas(x, y) && fitsCanvas(oppositeX, oppositeY)) {
+        x = oppositeX
+        y = oppositeY
+      }
+      x = clamp(x, labelWidth / 2 + labelMargin, width - labelWidth / 2 - labelMargin)
+      y = clamp(y, labelHeight / 2 + labelMargin, height - labelHeight / 2 - labelMargin)
       ctx.fillStyle = 'rgba(5, 24, 38, 0.82)'
-      ctx.fillRect(x - labelWidth / 2, y - 9, labelWidth, 18)
+      ctx.fillRect(x - labelWidth / 2, y - labelHeight / 2, labelWidth, labelHeight)
       ctx.strokeStyle = 'rgba(126, 247, 255, 0.72)'
       ctx.lineWidth = 1
-      ctx.strokeRect(x - labelWidth / 2, y - 9, labelWidth, 18)
+      ctx.strokeRect(x - labelWidth / 2, y - labelHeight / 2, labelWidth, labelHeight)
       ctx.fillStyle = '#e8fbff'
       ctx.fillText(label, x, y)
     }
